@@ -77,7 +77,7 @@ export const zhHant: Record<string, string> = {
         'tab.inbox': '收集箱',
         'tab.next': '專注',
         'tab.board': '看板',
-        'tab.menu': '菜單',
+        'tab.menu': '選單',
         'tab.agenda': '日程',
         'tab.calendar': '日曆',
         'tab.review': '回顧',
@@ -299,7 +299,7 @@ export const zhHant: Record<string, string> = {
         'board.done': '已完成',
         'board.noTasks': '沒有任務',
         'board.hint': '長按拖動 • 左滑刪除',
-        'board.dragTask': 'Drag task',
+        'board.dragTask': '拖動任務',
         'board.delete': '刪除',
         'calendar.title': '日曆',
         'calendar.addTask': '添加新任務...',
@@ -937,7 +937,7 @@ export const zhHant: Record<string, string> = {
         'settings.densityComfortable': '舒服的',
         'settings.densityCompact': '袖珍的',
         'settings.globalQuickAddShortcut': '全域快速新增快捷方式',
-        'settings.globalQuickAddShortcutDesc': '即使 Mindwtr 沒有集中註意力，也可在系統範圍內使用以進行快速捕獲。',
+        'settings.globalQuickAddShortcutDesc': '即使 Mindwtr 沒有集中注意力，也可在系統範圍內使用以進行快速捕獲。',
         'settings.windowDecorations': '窗飾',
         'settings.windowDecorationsDesc': '顯示系統標題列和視窗邊框。',
         'settings.showTray': '顯示系統托盤圖標',
@@ -1048,4 +1048,6 @@ export const zhHant: Record<string, string> = {
         'settings.linuxUpdateHint': '在 Linux 上，Mindwtr 無法自動安裝更新。下載後，透過套件管理器（例如 yay -S mindwtr 或 paru -S mindwtr）或下載的套件進行安裝。',
         'settings.saved': '設定已儲存',
         'settings.selectSyncFolderTitle': '選擇同步資料夾',
+        'settings.undoNotifications': '撤銷通知',
+        'settings.undoNotificationsDesc': '在將任務標記為已完成或刪除後顯示可撤銷提示。'
 };
