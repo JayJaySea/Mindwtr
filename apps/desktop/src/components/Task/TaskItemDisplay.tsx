@@ -8,6 +8,7 @@ import { getAttachmentDisplayTitle } from '../../lib/attachment-utils';
 import { MetadataBadge } from '../ui/MetadataBadge';
 import { AttachmentProgressIndicator } from '../AttachmentProgressIndicator';
 import type { KeyboardEvent, MouseEvent, ReactNode } from 'react';
+import { useEffect, useRef } from 'react';
 
 interface TaskItemDisplayActions {
     onToggleSelect?: () => void;
@@ -143,6 +144,44 @@ export function TaskItemDisplay({
         const label = t('task.moveToWaitingWithDue');
         return label === 'task.moveToWaitingWithDue' ? 'Move to Waiting and set due date' : label;
     })();
+    const clickTimerRef = useRef<number | null>(null);
+    const clearClickTimer = () => {
+        if (clickTimerRef.current !== null) {
+            window.clearTimeout(clickTimerRef.current);
+            clickTimerRef.current = null;
+        }
+    };
+    useEffect(() => {
+        return () => {
+            clearClickTimer();
+        };
+    }, []);
+    const handleTitleClick = (event: MouseEvent<HTMLButtonElement>) => {
+        if (selectionMode) {
+            onToggleSelect?.();
+            return;
+        }
+        // Keyboard activation should not be delayed.
+        if (event.detail === 0) {
+            onToggleView();
+            return;
+        }
+        if (!readOnly && event.detail >= 2) {
+            clearClickTimer();
+            onEdit();
+            return;
+        }
+        clearClickTimer();
+        clickTimerRef.current = window.setTimeout(() => {
+            onToggleView();
+            clickTimerRef.current = null;
+        }, 180);
+    };
+    const handleTitleDoubleClick = () => {
+        if (selectionMode || readOnly) return;
+        clearClickTimer();
+        onEdit();
+    };
     const handleProjectClick = (event: MouseEvent<HTMLSpanElement>, projectId: string) => {
         event.stopPropagation();
         onOpenProject?.(projectId);
@@ -377,24 +416,8 @@ export function TaskItemDisplay({
                     />
                     <button
                         type="button"
-                        onClick={(event) => {
-                            if (selectionMode) {
-                                onToggleSelect?.();
-                                return;
-                            }
-                            // Some desktop environments can miss onDoubleClick for this control;
-                            // use click detail as a reliable fallback for opening the editor.
-                            if (!readOnly && event.detail >= 2) {
-                                onEdit();
-                                return;
-                            }
-                            onToggleView();
-                        }}
-                        onDoubleClick={() => {
-                            if (!selectionMode && !readOnly) {
-                                onEdit();
-                            }
-                        }}
+                        onClick={handleTitleClick}
+                        onDoubleClick={handleTitleDoubleClick}
                         className={cn(
                             "block w-full text-left rounded px-0.5 py-0.5 transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40",
                             selectionMode ? "cursor-pointer" : "cursor-default",
