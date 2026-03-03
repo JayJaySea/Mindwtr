@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Modal, View, Text, TextInput, TouchableOpacity, StyleSheet, Pressable, ScrollView, Switch, Platform, KeyboardAvoidingView, Keyboard, useWindowDimensions } from 'react-native';
+import { Alert, Modal, View, Text, TextInput, TouchableOpacity, StyleSheet, Pressable, ScrollView, FlatList, Switch, Platform, KeyboardAvoidingView, Keyboard, useWindowDimensions } from 'react-native';
 import { CalendarDays, Folder, Flag, X, AtSign, Mic, Square } from 'lucide-react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
@@ -1317,21 +1317,27 @@ export function QuickCaptureSheet({
                 ))}
               </View>
             )}
-            <ScrollView style={[styles.pickerList, { borderColor: tc.border }]} contentContainerStyle={styles.pickerListContent}>
-              <Pressable
-                onPress={() => {
-                  setContextTags([]);
-                  setShowContextPicker(false);
-                }}
-                style={styles.pickerRow}
-                accessibilityRole="button"
-                accessibilityLabel={t('common.clear')}
-              >
-                <Text style={[styles.pickerRowText, { color: tc.text }]}>{t('common.clear')}</Text>
-              </Pressable>
-              {filteredContexts.map((token) => (
+            <FlatList
+              style={[styles.pickerList, { borderColor: tc.border }]}
+              contentContainerStyle={styles.pickerListContent}
+              data={filteredContexts}
+              keyExtractor={(token) => token}
+              keyboardShouldPersistTaps="handled"
+              ListHeaderComponent={(
                 <Pressable
-                  key={token}
+                  onPress={() => {
+                    setContextTags([]);
+                    setShowContextPicker(false);
+                  }}
+                  style={styles.pickerRow}
+                  accessibilityRole="button"
+                  accessibilityLabel={t('common.clear')}
+                >
+                  <Text style={[styles.pickerRowText, { color: tc.text }]}>{t('common.clear')}</Text>
+                </Pressable>
+              )}
+              renderItem={({ item: token }) => (
+                <Pressable
                   onPress={() => {
                     setContextTags((prev) => {
                       const exists = prev.some((item) => item.toLowerCase() === token.toLowerCase());
@@ -1359,8 +1365,8 @@ export function QuickCaptureSheet({
                     {contextTags.some((item) => item.toLowerCase() === token.toLowerCase()) ? `✓ ${token}` : token}
                   </Text>
                 </Pressable>
-              ))}
-            </ScrollView>
+              )}
+            />
           </View>
         </View>
       </Modal>
@@ -1404,21 +1410,27 @@ export function QuickCaptureSheet({
                 <Text style={[styles.pickerRowText, { color: tc.tint }]}>+ {t('projects.create')} &quot;{projectQuery.trim()}&quot;</Text>
               </Pressable>
             )}
-            <ScrollView style={[styles.pickerList, { borderColor: tc.border }]} contentContainerStyle={styles.pickerListContent}>
-              <Pressable
-                onPress={() => {
-                  setProjectId(null);
-                  setShowProjectPicker(false);
-                }}
-                style={styles.pickerRow}
-                accessibilityRole="button"
-                accessibilityLabel={t('taskEdit.noProjectOption')}
-              >
-                <Text style={[styles.pickerRowText, { color: tc.text }]}>{t('taskEdit.noProjectOption')}</Text>
-              </Pressable>
-              {filteredProjects.map((project) => (
+            <FlatList
+              style={[styles.pickerList, { borderColor: tc.border }]}
+              contentContainerStyle={styles.pickerListContent}
+              data={filteredProjects}
+              keyExtractor={(project) => project.id}
+              keyboardShouldPersistTaps="handled"
+              ListHeaderComponent={(
                 <Pressable
-                  key={project.id}
+                  onPress={() => {
+                    setProjectId(null);
+                    setShowProjectPicker(false);
+                  }}
+                  style={styles.pickerRow}
+                  accessibilityRole="button"
+                  accessibilityLabel={t('taskEdit.noProjectOption')}
+                >
+                  <Text style={[styles.pickerRowText, { color: tc.text }]}>{t('taskEdit.noProjectOption')}</Text>
+                </Pressable>
+              )}
+              renderItem={({ item: project }) => (
+                <Pressable
                   onPress={() => {
                     setProjectId(project.id);
                     setShowProjectPicker(false);
@@ -1429,8 +1441,8 @@ export function QuickCaptureSheet({
                 >
                   <Text style={[styles.pickerRowText, { color: tc.text }]}>{project.title}</Text>
                 </Pressable>
-              ))}
-            </ScrollView>
+              )}
+            />
           </View>
         </View>
       </Modal>

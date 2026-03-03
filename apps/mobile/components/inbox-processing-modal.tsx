@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, TouchableOpacity, Modal, ScrollView, TextInput, Platform, Alert, Share, ActivityIndicator, Dimensions, type TextStyle } from 'react-native';
+import { View, Text, TouchableOpacity, Modal, ScrollView, FlatList, TextInput, Platform, Alert, Share, ActivityIndicator, Dimensions, type TextStyle } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -1128,19 +1128,25 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
                             </TouchableOpacity>
                           )}
                         </View>
-                        <ScrollView style={{ maxHeight: 280 }} nestedScrollEnabled>
-                          <TouchableOpacity
-                            style={[styles.projectChip, { backgroundColor: '#10B981' }]}
-                            onPress={() => selectProjectEarly(null)}
-                          >
-                            <Text style={styles.projectChipText}>✓ {t('inbox.noProject')}</Text>
-                          </TouchableOpacity>
-                          {filteredProjects.map(proj => {
+                        <FlatList
+                          style={{ maxHeight: 280 }}
+                          data={filteredProjects}
+                          keyExtractor={(proj) => proj.id}
+                          nestedScrollEnabled
+                          keyboardShouldPersistTaps="handled"
+                          ListHeaderComponent={(
+                            <TouchableOpacity
+                              style={[styles.projectChip, { backgroundColor: '#10B981' }]}
+                              onPress={() => selectProjectEarly(null)}
+                            >
+                              <Text style={styles.projectChipText}>✓ {t('inbox.noProject')}</Text>
+                            </TouchableOpacity>
+                          )}
+                          renderItem={({ item: proj }) => {
                             const projectColor = proj.areaId ? areaById.get(proj.areaId)?.color : undefined;
                             const isSelected = selectedProjectId === proj.id;
                             return (
                               <TouchableOpacity
-                                key={proj.id}
                                 style={[
                                   styles.projectChip,
                                   isSelected
@@ -1153,8 +1159,8 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
                                 <Text style={[styles.projectChipText, { color: tc.text }]}>{proj.title}</Text>
                               </TouchableOpacity>
                             );
-                          })}
-                        </ScrollView>
+                          }}
+                        />
                       </View>
                     </>
                   )}
