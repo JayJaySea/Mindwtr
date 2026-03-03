@@ -195,6 +195,41 @@ describe('Sync Logic', () => {
             expect(attachment?.cloudKey).toBe('attachments/att-2.txt');
         });
 
+        it('preserves incoming URI when local attachment wins without a usable URI', () => {
+            const localAttachment: Attachment = {
+                id: 'att-uri-fallback',
+                kind: 'file',
+                title: 'doc.txt',
+                uri: '',
+                createdAt: '2023-01-01T00:00:00.000Z',
+                updatedAt: '2023-01-04T00:00:00.000Z',
+            };
+            const incomingAttachment: Attachment = {
+                id: 'att-uri-fallback',
+                kind: 'file',
+                title: 'doc.txt',
+                uri: '/incoming/doc.txt',
+                cloudKey: 'attachments/att-uri-fallback.txt',
+                createdAt: '2023-01-01T00:00:00.000Z',
+                updatedAt: '2023-01-03T00:00:00.000Z',
+            };
+            const localTask: Task = {
+                ...createMockTask('1', '2023-01-04'),
+                attachments: [localAttachment],
+            };
+            const incomingTask: Task = {
+                ...createMockTask('1', '2023-01-03'),
+                attachments: [incomingAttachment],
+            };
+
+            const merged = mergeAppData(mockAppData([localTask]), mockAppData([incomingTask]));
+            const attachment = merged.tasks[0].attachments?.find((item) => item.id === 'att-uri-fallback');
+
+            expect(attachment?.uri).toBe('/incoming/doc.txt');
+            expect(attachment?.localStatus).toBe('available');
+            expect(attachment?.cloudKey).toBe('attachments/att-uri-fallback.txt');
+        });
+
         it('falls back to incoming URI when local attachment is missing', () => {
             const localAttachment: Attachment = {
                 id: 'att-missing',
