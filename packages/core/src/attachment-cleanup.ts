@@ -70,3 +70,20 @@ export function removeOrphanedAttachmentsFromData(appData: AppData): AppData {
         })),
     };
 }
+
+export function removeAttachmentsByIdFromData(appData: AppData, attachmentIds: Iterable<string>): AppData {
+    const ids = new Set(attachmentIds);
+    if (ids.size === 0) return appData;
+
+    return {
+        ...appData,
+        tasks: appData.tasks.map((task) => ({
+            ...task,
+            attachments: task.attachments?.filter((attachment) => !ids.has(attachment.id)),
+        })),
+        projects: appData.projects.map((project) => ({
+            ...project,
+            attachments: project.attachments?.filter((attachment) => !ids.has(attachment.id)),
+        })),
+    };
+}

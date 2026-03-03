@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     findDeletedAttachmentsForFileCleanup,
     findOrphanedAttachments,
+    removeAttachmentsByIdFromData,
     removeOrphanedAttachmentsFromData,
 } from './attachment-cleanup';
 import type { AppData } from './types';
@@ -220,5 +221,66 @@ describe('removeOrphanedAttachmentsFromData', () => {
         const cleaned = removeOrphanedAttachmentsFromData(data);
         expect(cleaned.tasks[0].attachments).toHaveLength(0);
         expect(cleaned.projects[0].attachments).toHaveLength(0);
+    });
+});
+
+describe('removeAttachmentsByIdFromData', () => {
+    it('removes only requested attachments', () => {
+        const data: AppData = {
+            tasks: [
+                {
+                    id: 't1',
+                    title: 'Task',
+                    status: 'inbox',
+                    contexts: [],
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    attachments: [
+                        {
+                            id: 'keep-task',
+                            kind: 'file',
+                            title: 'keep-task',
+                            uri: '/tmp/keep-task',
+                            createdAt: new Date().toISOString(),
+                            updatedAt: new Date().toISOString(),
+                        },
+                        {
+                            id: 'drop-task',
+                            kind: 'file',
+                            title: 'drop-task',
+                            uri: '/tmp/drop-task',
+                            createdAt: new Date().toISOString(),
+                            updatedAt: new Date().toISOString(),
+                        },
+                    ],
+                },
+            ],
+            projects: [
+                {
+                    id: 'p1',
+                    title: 'Project',
+                    status: 'active',
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    attachments: [
+                        {
+                            id: 'drop-project',
+                            kind: 'file',
+                            title: 'drop-project',
+                            uri: '/tmp/drop-project',
+                            createdAt: new Date().toISOString(),
+                            updatedAt: new Date().toISOString(),
+                        },
+                    ],
+                },
+            ],
+            sections: [],
+            areas: [],
+            settings: {},
+        };
+
+        const cleaned = removeAttachmentsByIdFromData(data, ['drop-task', 'drop-project']);
+        expect(cleaned.tasks[0].attachments?.map((attachment) => attachment.id)).toEqual(['keep-task']);
+        expect(cleaned.projects[0].attachments ?? []).toHaveLength(0);
     });
 });

@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
-import { AppData, Attachment, MergeStats, useTaskStore, webdavGetJson, webdavPutJson, cloudGetJson, cloudPutJson, flushPendingSave, performSyncCycle, findOrphanedAttachments, removeOrphanedAttachmentsFromData, webdavDeleteFile, cloudDeleteFile, CLOCK_SKEW_THRESHOLD_MS, appendSyncHistory, withRetry, isRetryableWebdavReadError, isWebdavInvalidJsonError, normalizeWebdavUrl, normalizeCloudUrl, sanitizeAppDataForRemote, areSyncPayloadsEqual, assertNoPendingAttachmentUploads, injectExternalCalendars as injectExternalCalendarsForSync, persistExternalCalendars as persistExternalCalendarsForSync, mergeAppData, cloneAppData, LocalSyncAbort, getInMemoryAppDataSnapshot, shouldRunAttachmentCleanup } from '@mindwtr/core';
+import { AppData, Attachment, MergeStats, useTaskStore, webdavGetJson, webdavPutJson, cloudGetJson, cloudPutJson, flushPendingSave, performSyncCycle, findOrphanedAttachments, removeOrphanedAttachmentsFromData, removeAttachmentsByIdFromData, webdavDeleteFile, cloudDeleteFile, CLOCK_SKEW_THRESHOLD_MS, appendSyncHistory, withRetry, isRetryableWebdavReadError, isWebdavInvalidJsonError, normalizeWebdavUrl, normalizeCloudUrl, sanitizeAppDataForRemote, areSyncPayloadsEqual, assertNoPendingAttachmentUploads, injectExternalCalendars as injectExternalCalendarsForSync, persistExternalCalendars as persistExternalCalendarsForSync, mergeAppData, cloneAppData, LocalSyncAbort, getInMemoryAppDataSnapshot, shouldRunAttachmentCleanup } from '@mindwtr/core';
 import { mobileStorage } from './storage-adapter';
 import { logInfo, logSyncError, logWarn, sanitizeLogMessage } from './app-log';
 import { readSyncFile, resolveSyncFileUri, writeSyncFile } from './storage-file';
@@ -713,12 +713,17 @@ const mobileSyncOrchestrator = createSyncOrchestrator<string | undefined, Mobile
             : null;
           let processedCount = 0;
           const reachedBatchLimit = cleanupTargets.size > ATTACHMENT_CLEANUP_BATCH_LIMIT;
+          const orphanedIds = new Set(orphaned.map((attachment) => attachment.id));
+          const processedOrphanedIds = new Set<string>();
 
           for (const attachment of cleanupTargets.values()) {
             if (processedCount >= ATTACHMENT_CLEANUP_BATCH_LIMIT) {
               break;
             }
             processedCount += 1;
+            if (orphanedIds.has(attachment.id)) {
+              processedOrphanedIds.add(attachment.id);
+            }
             ensureLocalSnapshotFresh();
             await deleteAttachmentFile(attachment.uri);
             if (attachment.cloudKey) {
@@ -757,7 +762,9 @@ const mobileSyncOrchestrator = createSyncOrchestrator<string | undefined, Mobile
               total: String(cleanupTargets.size),
             });
           }
-          if (orphaned.length > 0 && !reachedBatchLimit) {
+          if (orphaned.length > 0 && reachedBatchLimit) {
+            mergedData = removeAttachmentsByIdFromData(mergedData, processedOrphanedIds);
+          } else if (orphaned.length > 0) {
             mergedData = removeOrphanedAttachmentsFromData(mergedData);
           }
         }
