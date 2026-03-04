@@ -156,6 +156,7 @@ export function KeybindingProvider({
 
     const scopeRef = useRef<TaskListScope | null>(null);
     const pendingRef = useRef<{ key: string | null; timestamp: number }>({ key: null, timestamp: 0 });
+    const fallbackSelectedTaskIdRef = useRef<string | null>(null);
 
     useEffect(() => {
         if (isTest) return;
@@ -180,6 +181,153 @@ export function KeybindingProvider({
     const registerTaskListScope = useCallback((scope: TaskListScope | null) => {
         scopeRef.current = scope;
     }, []);
+
+    const getFallbackTaskElements = useCallback((): HTMLElement[] => {
+        const root = document.querySelector<HTMLElement>('[data-main-content]') ?? document.body;
+        const items = Array.from(root.querySelectorAll<HTMLElement>('[data-task-id]'));
+        const seen = new Set<string>();
+        return items.filter((item) => {
+            const taskId = item.dataset.taskId;
+            if (!taskId || seen.has(taskId)) return false;
+            const rect = item.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return false;
+            const style = window.getComputedStyle(item);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            seen.add(taskId);
+            return true;
+        });
+    }, []);
+
+    const activateFallbackTaskElement = useCallback((taskElement: HTMLElement | null) => {
+        if (!taskElement) return;
+        const taskId = taskElement.dataset.taskId;
+        if (taskId) {
+            fallbackSelectedTaskIdRef.current = taskId;
+        }
+        if (typeof taskElement.scrollIntoView === 'function') {
+            taskElement.scrollIntoView({ block: 'nearest' });
+        }
+        taskElement.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        const focusTarget = taskElement.querySelector<HTMLElement>(
+            'button[aria-expanded], button[data-task-edit-trigger], button, [tabindex]:not([tabindex="-1"])'
+        );
+        focusTarget?.focus();
+    }, []);
+
+    const resolveFallbackSelectionIndex = useCallback((elements: HTMLElement[]): number => {
+        if (elements.length === 0) return -1;
+        const selectedTaskId = fallbackSelectedTaskIdRef.current;
+        if (selectedTaskId) {
+            const selectedIndex = elements.findIndex((item) => item.dataset.taskId === selectedTaskId);
+            if (selectedIndex >= 0) return selectedIndex;
+        }
+        const activeTaskElement = document.activeElement instanceof HTMLElement
+            ? document.activeElement.closest('[data-task-id]')
+            : null;
+        if (activeTaskElement instanceof HTMLElement) {
+            const activeIndex = elements.findIndex((item) => item === activeTaskElement);
+            if (activeIndex >= 0) return activeIndex;
+        }
+        return 0;
+    }, []);
+
+    const pickFallbackTaskElement = useCallback((): HTMLElement | null => {
+        const elements = getFallbackTaskElements();
+        if (elements.length === 0) return null;
+        const selectedIndex = resolveFallbackSelectionIndex(elements);
+        const safeIndex = selectedIndex >= 0 ? selectedIndex : 0;
+        const element = elements[safeIndex] ?? null;
+        activateFallbackTaskElement(element);
+        return element;
+    }, [activateFallbackTaskElement, getFallbackTaskElements, resolveFallbackSelectionIndex]);
+
+    const fallbackSelectNext = useCallback(() => {
+        const elements = getFallbackTaskElements();
+        if (elements.length === 0) return;
+        const selectedIndex = resolveFallbackSelectionIndex(elements);
+        const nextIndex = selectedIndex < 0
+            ? 0
+            : Math.min(selectedIndex + 1, elements.length - 1);
+        activateFallbackTaskElement(elements[nextIndex] ?? null);
+    }, [activateFallbackTaskElement, getFallbackTaskElements, resolveFallbackSelectionIndex]);
+
+    const fallbackSelectPrev = useCallback(() => {
+        const elements = getFallbackTaskElements();
+        if (elements.length === 0) return;
+        const selectedIndex = resolveFallbackSelectionIndex(elements);
+        const prevIndex = selectedIndex < 0
+            ? elements.length - 1
+            : Math.max(selectedIndex - 1, 0);
+        activateFallbackTaskElement(elements[prevIndex] ?? null);
+    }, [activateFallbackTaskElement, getFallbackTaskElements, resolveFallbackSelectionIndex]);
+
+    const fallbackSelectFirst = useCallback(() => {
+        const elements = getFallbackTaskElements();
+        activateFallbackTaskElement(elements[0] ?? null);
+    }, [activateFallbackTaskElement, getFallbackTaskElements]);
+
+    const fallbackSelectLast = useCallback(() => {
+        const elements = getFallbackTaskElements();
+        activateFallbackTaskElement(elements.length > 0 ? elements[elements.length - 1] : null);
+    }, [activateFallbackTaskElement, getFallbackTaskElements]);
+
+    const fallbackEditSelected = useCallback(() => {
+        const selectedElement = pickFallbackTaskElement();
+        if (!selectedElement) return;
+        const editTrigger = selectedElement.querySelector<HTMLElement>('[data-task-edit-trigger]');
+        if (!editTrigger) return;
+        editTrigger.focus();
+        editTrigger.click();
+    }, [pickFallbackTaskElement]);
+
+    const fallbackToggleDoneSelected = useCallback(() => {
+        const selectedElement = pickFallbackTaskElement();
+        const selectedTaskId = selectedElement?.dataset.taskId;
+        if (!selectedTaskId) return;
+        const state = useTaskStore.getState();
+        const task = state.tasks.find((item) => item.id === selectedTaskId);
+        if (!task) return;
+        const nextStatus = task.status === 'done' ? 'inbox' : 'done';
+        void state.moveTask(task.id, nextStatus);
+    }, [pickFallbackTaskElement]);
+
+    const fallbackDeleteSelected = useCallback(() => {
+        const selectedElement = pickFallbackTaskElement();
+        const selectedTaskId = selectedElement?.dataset.taskId;
+        if (!selectedTaskId) return;
+        const state = useTaskStore.getState();
+        void state.deleteTask(selectedTaskId);
+        if (fallbackSelectedTaskIdRef.current === selectedTaskId) {
+            fallbackSelectedTaskIdRef.current = null;
+        }
+    }, [pickFallbackTaskElement]);
+
+    const fallbackTaskListScope = useMemo<TaskListScope>(() => ({
+        kind: 'taskList',
+        selectNext: fallbackSelectNext,
+        selectPrev: fallbackSelectPrev,
+        selectFirst: fallbackSelectFirst,
+        selectLast: fallbackSelectLast,
+        editSelected: fallbackEditSelected,
+        toggleDoneSelected: fallbackToggleDoneSelected,
+        deleteSelected: fallbackDeleteSelected,
+    }), [
+        fallbackDeleteSelected,
+        fallbackEditSelected,
+        fallbackSelectFirst,
+        fallbackSelectLast,
+        fallbackSelectNext,
+        fallbackSelectPrev,
+        fallbackToggleDoneSelected,
+    ]);
+
+    const getActiveScope = useCallback((): TaskListScope => {
+        return scopeRef.current ?? fallbackTaskListScope;
+    }, [fallbackTaskListScope]);
+
+    useEffect(() => {
+        fallbackSelectedTaskIdRef.current = null;
+    }, [currentView]);
 
     const openHelp = useCallback(() => setIsHelpOpen(true), []);
     const toggleFullscreen = useCallback(async () => {
@@ -242,7 +390,7 @@ export function KeybindingProvider({
             if (editingTaskIdRef.current) return;
             if (isEditableTarget(e.target)) return;
 
-            const scope = scopeRef.current;
+            const scope = getActiveScope();
             const now = Date.now();
             if (pendingRef.current.key && now - pendingRef.current.timestamp > 700) {
                 pendingRef.current.key = null;
@@ -337,7 +485,7 @@ export function KeybindingProvider({
             }
             if (editingTaskIdRef.current) return;
             if (isEditableTarget(e.target)) return;
-            const scope = scopeRef.current;
+            const scope = getActiveScope();
 
             if (e.altKey && !e.ctrlKey && !e.metaKey) {
                 const view = emacsAltMap[e.key];
@@ -413,24 +561,18 @@ export function KeybindingProvider({
                         e.preventDefault();
                         return;
                     }
-                    const scope = scopeRef.current;
-                    if (scope) {
-                        e.preventDefault();
-                        scope.selectNext();
-                        return;
-                    }
+                    e.preventDefault();
+                    getActiveScope().selectNext();
+                    return;
                 }
                 if (e.key === 'ArrowUp') {
                     if (moveSidebarFocus(e.target, 'prev')) {
                         e.preventDefault();
                         return;
                     }
-                    const scope = scopeRef.current;
-                    if (scope) {
-                        e.preventDefault();
-                        scope.selectPrev();
-                        return;
-                    }
+                    e.preventDefault();
+                    getActiveScope().selectPrev();
+                    return;
                 }
                 if (style === 'vim' && e.key === 'ArrowLeft') {
                     if (focusSidebarCurrentView(currentView)) {
@@ -498,6 +640,7 @@ export function KeybindingProvider({
         toggleListDetails,
         toggleDensity,
         currentView,
+        getActiveScope,
     ]);
 
     useEffect(() => {

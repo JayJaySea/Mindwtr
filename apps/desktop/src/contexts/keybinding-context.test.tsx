@@ -47,6 +47,51 @@ const DummyList = () => {
     );
 };
 
+const setVisibleRect = (element: HTMLElement | null) => {
+    if (!element) return;
+    element.getBoundingClientRect = () =>
+        ({
+            x: 0,
+            y: 0,
+            top: 0,
+            left: 0,
+            bottom: 32,
+            right: 320,
+            width: 320,
+            height: 32,
+            toJSON: () => ({}),
+        }) as DOMRect;
+};
+
+const FallbackTaskList = ({
+    onEditTask1,
+    onEditTask2,
+}: {
+    onEditTask1: () => void;
+    onEditTask2: () => void;
+}) => {
+    return (
+        <div data-main-content>
+            <div data-task-id="1" ref={setVisibleRect}>
+                <button type="button" aria-expanded={false}>
+                    Task 1
+                </button>
+                <button type="button" data-task-edit-trigger onClick={onEditTask1}>
+                    Edit 1
+                </button>
+            </div>
+            <div data-task-id="2" ref={setVisibleRect}>
+                <button type="button" aria-expanded={false}>
+                    Task 2
+                </button>
+                <button type="button" data-task-edit-trigger onClick={onEditTask2}>
+                    Edit 2
+                </button>
+            </div>
+        </div>
+    );
+};
+
 describe('KeybindingProvider (vim)', () => {
     beforeEach(() => {
         useUiStore.setState({ editingTaskId: null });
@@ -130,5 +175,27 @@ describe('KeybindingProvider (vim)', () => {
         const event = cancelListener.mock.calls[0]?.[0] as CustomEvent<{ taskId: string }>;
         expect(event.detail.taskId).toBe('task-123');
         window.removeEventListener('mindwtr:cancel-task-edit', cancelListener);
+    });
+
+    it('falls back to visible task cards in views without registered scope', () => {
+        const onEditTask1 = vi.fn();
+        const onEditTask2 = vi.fn();
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="projects" onNavigate={vi.fn()}>
+                    <FallbackTaskList onEditTask1={onEditTask1} onEditTask2={onEditTask2} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        fireEvent.keyDown(window, { key: 'j' });
+        fireEvent.keyDown(window, { key: 'e' });
+        expect(onEditTask2).toHaveBeenCalledTimes(1);
+
+        fireEvent.keyDown(window, { key: 'g' });
+        fireEvent.keyDown(window, { key: 'g' });
+        fireEvent.keyDown(window, { key: 'e' });
+        expect(onEditTask1).toHaveBeenCalledTimes(1);
     });
 });
