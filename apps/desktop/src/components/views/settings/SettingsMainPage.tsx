@@ -10,6 +10,10 @@ type WeekStart = 'sunday' | 'monday';
 type DateFormatSetting = 'system' | 'dmy' | 'mdy';
 
 type Labels = {
+    lookAndFeel: string;
+    localization: string;
+    input: string;
+    windowBehavior: string;
     appearance: string;
     density: string;
     densityDesc: string;
@@ -173,7 +177,7 @@ export function SettingsMainPage({
     return (
         <div className="space-y-5">
             {/* Look & Feel */}
-            <SectionHeader>Look &amp; Feel</SectionHeader>
+            <SectionHeader>{t.lookAndFeel}</SectionHeader>
             <SettingsCard>
                 <SettingsRow
                     title={t.appearance}
@@ -205,7 +209,7 @@ export function SettingsMainPage({
             </SettingsCard>
 
             {/* Localization */}
-            <SectionHeader>Localization</SectionHeader>
+            <SectionHeader>{t.localization}</SectionHeader>
             <SettingsCard>
                 <SettingsRow
                     title={t.language}
@@ -259,7 +263,7 @@ export function SettingsMainPage({
             </SettingsCard>
 
             {/* Input */}
-            <SectionHeader>Input</SectionHeader>
+            <SectionHeader>{t.input}</SectionHeader>
             <SettingsCard>
                 <SettingsRow title={t.keybindings} description={t.keybindingsDesc}>
                     <select
@@ -301,7 +305,7 @@ export function SettingsMainPage({
             {/* Window Behavior */}
             {hasWindowSection && (
                 <>
-                    <SectionHeader>Window Behavior</SectionHeader>
+                    <SectionHeader>{t.windowBehavior}</SectionHeader>
                     <SettingsCard>
                         {showWindowDecorations && (
                             <SettingsRow title={t.windowDecorations} description={t.windowDecorationsDesc}>
