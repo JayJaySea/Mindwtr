@@ -7,7 +7,7 @@ if (!newVersion) {
     process.exit(1);
 }
 
-const files = [
+const jsonFiles = [
     'package.json',
     'apps/desktop/package.json',
     'apps/mobile/package.json',
@@ -18,9 +18,17 @@ const files = [
     'apps/desktop/src-tauri/tauri.conf.json'
 ];
 
+const cargoTomlFiles = [
+    'apps/desktop/src-tauri/Cargo.toml'
+];
+
+const cargoLockFiles = [
+    'apps/desktop/src-tauri/Cargo.lock'
+];
+
 console.log(`Updating versions to ${newVersion}...\n`);
 
-files.forEach(file => {
+jsonFiles.forEach(file => {
     const filePath = path.resolve(__dirname, '..', file);
     if (fs.existsSync(filePath)) {
         try {
@@ -54,6 +62,64 @@ files.forEach(file => {
         }
     } else {
         console.warn(`Warning: File not found: ${file}`);
+    }
+});
+
+cargoTomlFiles.forEach(file => {
+    const filePath = path.resolve(__dirname, '..', file);
+    if (!fs.existsSync(filePath)) {
+        console.warn(`Warning: File not found: ${file}`);
+        return;
+    }
+
+    try {
+        const content = fs.readFileSync(filePath, 'utf8');
+        const updated = content.replace(
+            /(^\[package\][\s\S]*?^version\s*=\s*")([^"]+)(")/m,
+            (_, prefix, currentVersion, suffix) => {
+                console.log(`Updating ${file} version from ${currentVersion} to ${newVersion}`);
+                return `${prefix}${newVersion}${suffix}`;
+            }
+        );
+
+        if (updated === content) {
+            console.warn(`Warning: No package version field found in ${file}`);
+            return;
+        }
+
+        fs.writeFileSync(filePath, updated);
+    } catch (e) {
+        console.error(`Error processing ${file}: ${e.message}`);
+        process.exit(1);
+    }
+});
+
+cargoLockFiles.forEach(file => {
+    const filePath = path.resolve(__dirname, '..', file);
+    if (!fs.existsSync(filePath)) {
+        console.warn(`Warning: File not found: ${file}`);
+        return;
+    }
+
+    try {
+        const content = fs.readFileSync(filePath, 'utf8');
+        const updated = content.replace(
+            /(\[\[package\]\]\nname = "mindwtr"\nversion = ")([^"]+)(")/,
+            (_, prefix, currentVersion, suffix) => {
+                console.log(`Updating ${file} root package version from ${currentVersion} to ${newVersion}`);
+                return `${prefix}${newVersion}${suffix}`;
+            }
+        );
+
+        if (updated === content) {
+            console.warn(`Warning: No root package version entry found in ${file}`);
+            return;
+        }
+
+        fs.writeFileSync(filePath, updated);
+    } catch (e) {
+        console.error(`Error processing ${file}: ${e.message}`);
+        process.exit(1);
     }
 });
 

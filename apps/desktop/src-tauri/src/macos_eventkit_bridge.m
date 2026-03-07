@@ -5,23 +5,26 @@
 #include <string.h>
 
 static NSString *mindwtr_permission_status_string(EKAuthorizationStatus status) {
-    switch (status) {
-        case EKAuthorizationStatusNotDetermined:
-            return @"undetermined";
-        case EKAuthorizationStatusRestricted:
-        case EKAuthorizationStatusDenied:
-            return @"denied";
-#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
-        case EKAuthorizationStatusFullAccess:
-            return @"granted";
-        case EKAuthorizationStatusWriteOnly:
-            return @"denied";
-#endif
-        case EKAuthorizationStatusAuthorized:
-            return @"granted";
-        default:
-            return @"denied";
+    if (status == EKAuthorizationStatusNotDetermined) {
+        return @"undetermined";
     }
+    if (status == EKAuthorizationStatusRestricted || status == EKAuthorizationStatusDenied) {
+        return @"denied";
+    }
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
+    // Newer SDKs alias FullAccess to the legacy Authorized value, so avoid a
+    // switch here because duplicate case labels fail to compile.
+    if (status == EKAuthorizationStatusWriteOnly) {
+        return @"denied";
+    }
+    if (status == EKAuthorizationStatusFullAccess) {
+        return @"granted";
+    }
+#endif
+    if (status == EKAuthorizationStatusAuthorized) {
+        return @"granted";
+    }
+    return @"denied";
 }
 
 static char *mindwtr_copy_json(id object) {
@@ -71,6 +74,7 @@ char *mindwtr_macos_calendar_request_permission_json(void) {
         void (^requestBlock)(void) = ^{
             if (@available(macOS 14.0, *)) {
                 [store requestFullAccessToEventsWithCompletion:^(BOOL granted, NSError *_Nullable error) {
+                    (void)granted;
                     requestError = error;
                     dispatch_semaphore_signal(semaphore);
                 }];
@@ -78,6 +82,7 @@ char *mindwtr_macos_calendar_request_permission_json(void) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
                 [store requestAccessToEntityType:EKEntityTypeEvent completion:^(BOOL granted, NSError *_Nullable error) {
+                    (void)granted;
                     requestError = error;
                     dispatch_semaphore_signal(semaphore);
                 }];
