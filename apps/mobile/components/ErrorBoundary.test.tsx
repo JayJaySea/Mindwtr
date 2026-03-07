@@ -8,7 +8,7 @@ vi.mock('../lib/app-log', () => ({
   logError: vi.fn().mockResolvedValue(undefined),
 }));
 
-function Boom() {
+function Boom(): React.ReactElement {
   throw new Error('boom');
 }
 
@@ -24,7 +24,7 @@ describe('ErrorBoundary', () => {
   });
 
   it('renders a fallback even without theme or language providers', () => {
-    let tree: renderer.ReactTestRenderer | null = null;
+    let tree!: renderer.ReactTestRenderer;
 
     expect(() => {
       renderer.act(() => {
@@ -36,7 +36,8 @@ describe('ErrorBoundary', () => {
       });
     }).not.toThrow();
 
-    expect(JSON.stringify(tree?.toJSON())).toContain('Something went wrong');
-    expect(JSON.stringify(tree?.toJSON())).toContain('boom');
+    const output = tree.toJSON();
+    expect(JSON.stringify(output)).toContain('Something went wrong');
+    expect(JSON.stringify(output)).toContain('boom');
   });
 });

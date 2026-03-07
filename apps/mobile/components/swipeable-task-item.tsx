@@ -309,6 +309,32 @@ export function SwipeableTaskItem({
         if (onToggleSelect) onToggleSelect();
     };
 
+    const accessibilityActions = [
+        { name: 'activate', label: t('common.edit') || 'Edit' },
+        ...(!selectionMode
+            ? [
+                { name: 'changeStatus', label: leftAction.label },
+                { name: 'delete', label: t('common.delete') || 'Delete' },
+            ]
+            : []),
+    ];
+
+    const handleAccessibilityAction = (event: { nativeEvent: { actionName: string } }) => {
+        const { actionName } = event.nativeEvent;
+        if (actionName === 'activate') {
+            handlePress();
+            return;
+        }
+        if (selectionMode) return;
+        if (actionName === 'changeStatus') {
+            onStatusChange(leftAction.action);
+            return;
+        }
+        if (actionName === 'delete') {
+            onDelete();
+        }
+    };
+
     const statusColors = getStatusColor(task.status);
     const content = (
         <Pressable
@@ -331,8 +357,10 @@ export function SwipeableTaskItem({
             onLongPress={handleLongPress}
             delayLongPress={300}
             accessibilityLabel={accessibilityLabel}
-            accessibilityHint="Double tap to edit task details. Swipe left to change status, right to delete."
+            accessibilityHint="Double tap to edit task details. Additional actions are available in the accessibility actions menu."
             accessibilityRole="button"
+            accessibilityActions={accessibilityActions}
+            onAccessibilityAction={handleAccessibilityAction}
         >
             {selectionMode && (
                 <View
@@ -512,10 +540,13 @@ export function SwipeableTaskItem({
                 transparent
                 animationType="fade"
                 onRequestClose={() => setShowStatusMenu(false)}
+                accessibilityViewIsModal
             >
                 <Pressable style={styles.modalOverlay} onPress={() => setShowStatusMenu(false)}>
                     <View style={[styles.menuContainer, { backgroundColor: tc.cardBg }]}>
-                        <Text style={[styles.menuTitle, { color: tc.text }]}>{t('taskStatus.changeStatus')}</Text>
+                        <Text style={[styles.menuTitle, { color: tc.text }]} accessibilityRole="header">
+                            {t('taskStatus.changeStatus')}
+                        </Text>
                         <View style={styles.menuGrid}>
                             {quickStatusOptions.map(status => {
                                 const colors = getStatusColor(status as TaskStatus);
@@ -531,6 +562,9 @@ export function SwipeableTaskItem({
                                             onStatusChange(status);
                                             setShowStatusMenu(false);
                                         }}
+                                        accessibilityRole="button"
+                                        accessibilityLabel={t(`status.${status}`)}
+                                        accessibilityState={{ selected: task.status === status }}
                                     >
                                         <View style={[styles.menuDot, { backgroundColor: colors.text }]} />
                                         <Text style={[styles.menuText, { color: tc.text }]}>{t(`status.${status}`)}</Text>

@@ -75,10 +75,13 @@ export function TaskEditAreaPicker({
             transparent
             animationType="fade"
             onRequestClose={onClose}
+            accessibilityViewIsModal
         >
             <View style={styles.overlay}>
                 <View style={[styles.modalCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
-                    <Text style={[styles.modalTitle, { color: tc.text }]}>{t('taskEdit.areaLabel')}</Text>
+                    <Text style={[styles.modalTitle, { color: tc.text }]} accessibilityRole="header">
+                        {t('taskEdit.areaLabel')}
+                    </Text>
                     <TextInput
                         value={areaQuery}
                         onChangeText={setAreaQuery}
@@ -90,9 +93,16 @@ export function TaskEditAreaPicker({
                         returnKeyType="done"
                         blurOnSubmit
                         onSubmitEditing={handleCreateArea}
+                        accessibilityLabel={t('taskEdit.areaLabel')}
+                        accessibilityHint={t('common.search')}
                     />
                     {!hasExactAreaMatch && areaQuery.trim() && (
-                        <Pressable onPress={handleCreateArea} style={styles.pickerItem}>
+                        <Pressable
+                            onPress={handleCreateArea}
+                            style={styles.pickerItem}
+                            accessibilityRole="button"
+                            accessibilityLabel={`${t('areas.create')}: ${areaQuery.trim()}`}
+                        >
                             <Text style={[styles.pickerItemText, { color: tc.tint }]}>
                                 + {t('areas.create')} &quot;{areaQuery.trim()}&quot;
                             </Text>
@@ -108,6 +118,8 @@ export function TaskEditAreaPicker({
                                 onClose();
                             }}
                             style={styles.pickerItem}
+                            accessibilityRole="button"
+                            accessibilityLabel={t('taskEdit.noAreaOption')}
                         >
                             <Text style={[styles.pickerItemText, { color: tc.text }]}>{t('taskEdit.noAreaOption')}</Text>
                         </Pressable>
@@ -119,13 +131,31 @@ export function TaskEditAreaPicker({
                                     onClose();
                                 }}
                                 style={styles.pickerItem}
+                                accessibilityRole="button"
+                                accessibilityLabel={area.name}
                             >
                                 <Text style={[styles.pickerItemText, { color: tc.text }]}>{area.name}</Text>
                             </Pressable>
                         ))}
+                        {filteredAreas.length === 0 && (
+                            <View style={styles.pickerItem}>
+                                <Text
+                                    style={[styles.pickerItemText, { color: tc.secondaryText }]}
+                                    accessibilityRole="text"
+                                    accessibilityLiveRegion="polite"
+                                >
+                                    {t('common.noMatches')}
+                                </Text>
+                            </View>
+                        )}
                     </ScrollView>
                     <View style={styles.modalButtons}>
-                        <TouchableOpacity onPress={onClose} style={styles.modalButton}>
+                        <TouchableOpacity
+                            onPress={onClose}
+                            style={styles.modalButton}
+                            accessibilityRole="button"
+                            accessibilityLabel={t('common.cancel')}
+                        >
                             <Text style={[styles.modalButtonText, { color: tc.secondaryText }]}>{t('common.cancel')}</Text>
                         </TouchableOpacity>
                     </View>

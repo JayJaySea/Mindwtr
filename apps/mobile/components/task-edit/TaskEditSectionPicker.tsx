@@ -148,6 +148,17 @@ export function TaskEditSectionPicker({
                                 <Text style={[styles.pickerItemText, { color: tc.text }]}>{section.title}</Text>
                             </Pressable>
                         ))}
+                        {filteredSections.length === 0 && normalizedQuery ? (
+                            <View style={styles.pickerItem}>
+                                <Text
+                                    style={[styles.pickerItemText, { color: tc.secondaryText }]}
+                                    accessibilityRole="text"
+                                    accessibilityLiveRegion="polite"
+                                >
+                                    {t('common.noMatches')}
+                                </Text>
+                            </View>
+                        ) : null}
                     </ScrollView>
                     <View style={styles.modalButtons}>
                         <TouchableOpacity
