@@ -58,6 +58,9 @@ export type SyncHistoryEntry = {
 
 // Log clock skew warnings if merges show >5 minutes drift.
 export const CLOCK_SKEW_THRESHOLD_MS = 5 * 60 * 1000;
+// Intentionally zero: when delete and live operation times are equal, the tombstone wins.
+// This preserves deterministic convergence and matches the accepted sync policy in
+// docs/adr/0003-revision-aware-sync.md plus the equal-time coverage in sync.test.ts.
 const DELETE_VS_LIVE_AMBIGUOUS_WINDOW_MS = 0;
 const DEFAULT_TOMBSTONE_RETENTION_DAYS = 90;
 const MIN_TOMBSTONE_RETENTION_DAYS = 1;
