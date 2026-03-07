@@ -14,11 +14,13 @@ static NSString *mindwtr_permission_status_string(EKAuthorizationStatus status) 
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
     // Newer SDKs alias FullAccess to the legacy Authorized value, so avoid a
     // switch here because duplicate case labels fail to compile.
-    if (status == EKAuthorizationStatusWriteOnly) {
-        return @"denied";
-    }
-    if (status == EKAuthorizationStatusFullAccess) {
-        return @"granted";
+    if (@available(macOS 14.0, *)) {
+        if (status == EKAuthorizationStatusWriteOnly) {
+            return @"denied";
+        }
+        if (status == EKAuthorizationStatusFullAccess) {
+            return @"granted";
+        }
     }
 #endif
     if (status == EKAuthorizationStatusAuthorized) {
