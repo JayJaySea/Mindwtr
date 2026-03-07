@@ -1,4 +1,14 @@
-import { matchesHierarchicalToken, safeParseDueDate, searchAll, type Project, type Task, type TaskStatus } from '@mindwtr/core';
+import {
+    matchesHierarchicalToken,
+    safeParseDueDate,
+    searchAll,
+    type Project,
+    type SearchProjectResult,
+    type SearchResults,
+    type SearchTaskResult,
+    type Task,
+    type TaskStatus,
+} from '@mindwtr/core';
 import { AREA_FILTER_ALL, AREA_FILTER_NONE } from '../lib/area-filter';
 
 export type GlobalSearchScope = 'all' | 'projects' | 'tasks' | 'project_tasks';
@@ -18,7 +28,7 @@ type ComputeGlobalSearchResultsInput = {
     duePreset: DuePreset;
     scope: GlobalSearchScope;
     weekStart: 'sunday' | 'monday';
-    ftsResults?: { tasks: Task[]; projects: Project[] } | null;
+    ftsResults?: SearchResults | null;
 };
 
 const buildDueMatcher = (duePreset: DuePreset, weekStart: number) => {
@@ -34,7 +44,7 @@ const buildDueMatcher = (duePreset: DuePreset, weekStart: number) => {
     const nextWeekEnd = new Date(nextWeekStart);
     nextWeekEnd.setDate(nextWeekStart.getDate() + 7);
 
-    return (task: Task) => {
+    return (task: SearchTaskResult) => {
         if (duePreset === 'any') return true;
         if (duePreset === 'none') return !task.dueDate;
         if (!task.dueDate) return false;
@@ -71,7 +81,7 @@ export const computeGlobalSearchResults = ({
 }: ComputeGlobalSearchResultsInput) => {
     const trimmedQuery = query.trim();
     const fallbackResults = trimmedQuery === ''
-        ? { tasks: [] as Task[], projects: [] as Project[] }
+        ? { tasks: [] as SearchTaskResult[], projects: [] as SearchProjectResult[] }
         : searchAll(tasks, projects, trimmedQuery);
     const effectiveResults = ftsResults && (ftsResults.tasks.length + ftsResults.projects.length) > 0
         ? ftsResults
@@ -96,14 +106,14 @@ export const computeGlobalSearchResults = ({
         return normalized === selectedArea;
     };
 
-    const matchesTaskArea = (task: Task) => {
+    const matchesTaskArea = (task: SearchTaskResult) => {
         const areaId = task.projectId
             ? projectById.get(task.projectId)?.areaId ?? null
             : task.areaId ?? null;
         return matchesArea(areaId);
     };
 
-    const matchesTokens = (task: Task) => {
+    const matchesTokens = (task: SearchTaskResult) => {
         if (selectedTokens.length === 0) return true;
         const taskTokens = [...(task.contexts || []), ...(task.tags || [])];
         return selectedTokens.every((token) =>
@@ -127,7 +137,7 @@ export const computeGlobalSearchResults = ({
         return true;
     });
 
-    const filteredProjects = effectiveResults.projects.filter((project) => {
+    const filteredProjects = effectiveResults.projects.filter((project: SearchProjectResult) => {
         if (!includeCompleted && project.status === 'archived') return false;
         if (!matchesArea(project.areaId ?? null)) return false;
         return true;

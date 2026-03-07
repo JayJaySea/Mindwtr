@@ -1,6 +1,18 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { Search, FileText, CheckCircle, Save, SlidersHorizontal, X } from 'lucide-react';
-import { shallow, useTaskStore, Task, Project, generateUUID, SavedSearch, getStorageAdapter, TaskStatus, safeParseDate } from '@mindwtr/core';
+import {
+    shallow,
+    useTaskStore,
+    Task,
+    generateUUID,
+    SavedSearch,
+    SearchProjectResult,
+    SearchResults,
+    SearchTaskResult,
+    getStorageAdapter,
+    TaskStatus,
+    safeParseDate,
+} from '@mindwtr/core';
 import { useLanguage } from '../contexts/language-context';
 import { cn } from '../lib/utils';
 import { PromptModal } from './PromptModal';
@@ -51,7 +63,7 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
     const [selectedTokens, setSelectedTokens] = useState<string[]>([]);
     const [duePreset, setDuePreset] = useState<DuePreset>('any');
     const [scope, setScope] = useState<GlobalSearchScope>('all');
-    const [ftsResults, setFtsResults] = useState<{ tasks: Task[]; projects: Project[] } | null>(null);
+    const [ftsResults, setFtsResults] = useState<SearchResults | null>(null);
     const [ftsLoading, setFtsLoading] = useState(false);
     const [debouncedQuery, setDebouncedQuery] = useState('');
     const inputRef = useRef<HTMLInputElement>(null);
@@ -260,21 +272,21 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
         }
     };
 
-    const handleSelect = (result: { type: 'project' | 'task', item: Project | Task }) => {
+    const handleSelect = (result: { type: 'project'; item: SearchProjectResult } | { type: 'task'; item: SearchTaskResult }) => {
         setIsOpen(false);
         if (result.type === 'project') {
             setProjectView({ selectedProjectId: result.item.id });
             onNavigate('projects', result.item.id);
         } else {
             // Map task status to appropriate view
-            const task = result.item as Task;
+            const task = result.item;
             setHighlightTask(task.id);
             if (task.projectId) {
                 setProjectView({ selectedProjectId: task.projectId });
                 onNavigate('projects', task.id);
                 return;
             }
-            const targetView = resolveGlobalSearchTaskView(task);
+            const targetView = resolveGlobalSearchTaskView(task as Task);
             onNavigate(targetView, task.id);
         }
     };
@@ -631,7 +643,7 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
                             {result.type === 'project' ? (
                                 <FileText className="w-4 h-4 text-blue-500" />
                             ) : (
-                                <CheckCircle className={cn("w-4 h-4", (result.item as Task).status === 'done' ? "text-green-500" : "text-gray-400")} />
+                                <CheckCircle className={cn("w-4 h-4", (result.item as SearchTaskResult).status === 'done' ? "text-green-500" : "text-gray-400")} />
                             )}
 
                             <div className="flex-1 flex flex-col overflow-hidden">
@@ -640,7 +652,7 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
                                 </span>
                                 <span className="truncate text-xs text-muted-foreground">
                                     {result.type === 'project' ? t('search.resultProject') : t('search.resultTask')}
-                                    {result.type === 'task' && (result.item as Task).projectId ? ` • ${t('search.inProjectSuffix')}` : ''}
+                                    {result.type === 'task' && (result.item as SearchTaskResult).projectId ? ` • ${t('search.inProjectSuffix')}` : ''}
                                 </span>
                             </div>
 

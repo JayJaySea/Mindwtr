@@ -1,5 +1,5 @@
 import type { AppData, Area, Attachment, Project, Task, Section } from './types';
-import type { TaskQueryOptions, SearchResults } from './storage';
+import type { SearchProjectResult, SearchResults, SearchTaskResult, TaskQueryOptions } from './storage';
 import { SQLITE_BASE_SCHEMA, SQLITE_FTS_SCHEMA, SQLITE_INDEX_SCHEMA } from './sqlite-schema';
 import { normalizeTaskStatus } from './task-status';
 import { logWarn } from './logger';
@@ -41,6 +41,23 @@ const fromBool = (value: unknown) => Boolean(value);
 const READ_PAGE_SIZE = 1000;
 const FTS_LOCK_TTL_MS = 5 * 60 * 1000;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const SEARCH_TASK_SELECT = [
+    't.id AS id',
+    't.title AS title',
+    't.status AS status',
+    't.startTime AS startTime',
+    't.dueDate AS dueDate',
+    't.projectId AS projectId',
+    't.areaId AS areaId',
+    't.tags AS tags',
+    't.contexts AS contexts',
+].join(', ');
+const SEARCH_PROJECT_SELECT = [
+    'p.id AS id',
+    'p.title AS title',
+    'p.status AS status',
+    'p.areaId AS areaId',
+].join(', ');
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -574,6 +591,29 @@ export class SqliteAdapter {
         };
     }
 
+    private mapSearchTaskRow(row: Record<string, unknown>): SearchTaskResult {
+        return {
+            id: String(row.id),
+            title: String(row.title ?? ''),
+            status: normalizeTaskStatus(row.status),
+            startTime: row.startTime as string | undefined,
+            dueDate: row.dueDate as string | undefined,
+            projectId: row.projectId as string | undefined,
+            areaId: row.areaId as string | undefined,
+            tags: toStringArray(fromJson<unknown>(row.tags, [])),
+            contexts: toStringArray(fromJson<unknown>(row.contexts, [])),
+        };
+    }
+
+    private mapSearchProjectRow(row: Record<string, unknown>): SearchProjectResult {
+        return {
+            id: String(row.id),
+            title: String(row.title ?? ''),
+            status: normalizeProjectStatus(row.status),
+            areaId: row.areaId as string | undefined,
+        };
+    }
+
     private mapSectionRow(row: Record<string, unknown>): Section {
         const orderNumRaw = row.orderNum;
         const fallbackOrder = typeof row._rowid === 'number' ? row._rowid : 0;
@@ -686,16 +726,16 @@ export class SqliteAdapter {
         const ftsQuery = tokens.map((token) => `${token}*`).join(' ');
         const runSearch = async (): Promise<SearchResults> => {
             const taskRows = await this.client.all<Record<string, unknown>>(
-                `SELECT t.* FROM tasks_fts f JOIN tasks t ON f.id = t.id WHERE tasks_fts MATCH ? AND t.deletedAt IS NULL`,
+                `SELECT ${SEARCH_TASK_SELECT} FROM tasks_fts f JOIN tasks t ON f.id = t.id WHERE tasks_fts MATCH ? AND t.deletedAt IS NULL`,
                 [ftsQuery]
             );
             const projectRows = await this.client.all<Record<string, unknown>>(
-                `SELECT p.* FROM projects_fts f JOIN projects p ON f.id = p.id WHERE projects_fts MATCH ? AND p.deletedAt IS NULL`,
+                `SELECT ${SEARCH_PROJECT_SELECT} FROM projects_fts f JOIN projects p ON f.id = p.id WHERE projects_fts MATCH ? AND p.deletedAt IS NULL`,
                 [ftsQuery]
             );
             return {
-                tasks: taskRows.map((row) => this.mapTaskRow(row)),
-                projects: projectRows.map((row) => this.mapProjectRow(row)),
+                tasks: taskRows.map((row) => this.mapSearchTaskRow(row)),
+                projects: projectRows.map((row) => this.mapSearchProjectRow(row)),
             };
         };
 

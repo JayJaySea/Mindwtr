@@ -1,6 +1,20 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { View, Text, TextInput, FlatList, TouchableOpacity, StyleSheet, Modal, ActivityIndicator, ScrollView } from 'react-native';
-import { useTaskStore, Task, Project, searchAll, generateUUID, SavedSearch, getStorageAdapter, TaskStatus, PRESET_CONTEXTS, PRESET_TAGS, matchesHierarchicalToken, safeParseDueDate } from '@mindwtr/core';
+import {
+    useTaskStore,
+    searchAll,
+    generateUUID,
+    SavedSearch,
+    SearchProjectResult,
+    SearchResults,
+    SearchTaskResult,
+    getStorageAdapter,
+    TaskStatus,
+    PRESET_CONTEXTS,
+    PRESET_TAGS,
+    matchesHierarchicalToken,
+    safeParseDueDate,
+} from '@mindwtr/core';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { useLanguage } from '../contexts/language-context';
 import { useRouter } from 'expo-router';
@@ -13,7 +27,7 @@ export default function SearchScreen() {
     const { t } = useLanguage();
     const router = useRouter();
   const [query, setQuery] = useState('');
-  const [ftsResults, setFtsResults] = useState<{ tasks: Task[]; projects: Project[] } | null>(null);
+  const [ftsResults, setFtsResults] = useState<SearchResults | null>(null);
   const [ftsLoading, setFtsLoading] = useState(false);
   const [debouncedQuery, setDebouncedQuery] = useState('');
     const [showSaveModal, setShowSaveModal] = useState(false);
@@ -73,7 +87,7 @@ export default function SearchScreen() {
   }, [debouncedQuery, shouldUseFts]);
 
   const fallbackResults = trimmedQuery === ''
-    ? { tasks: [] as Task[], projects: [] as Project[] }
+    ? { tasks: [] as SearchTaskResult[], projects: [] as SearchProjectResult[] }
     : searchAll(_allTasks, projects, trimmedQuery);
   const effectiveResults = ftsResults && (ftsResults.tasks.length + ftsResults.projects.length) > 0
     ? ftsResults
@@ -86,7 +100,7 @@ export default function SearchScreen() {
         if (selectedArea === 'none') return !areaId;
         return areaId === selectedArea;
     };
-    const matchesTaskArea = (task: Task) => {
+    const matchesTaskArea = (task: SearchTaskResult) => {
         if (selectedArea === 'all') return true;
         if (task.projectId) {
             const project = projectById.get(task.projectId);
@@ -94,7 +108,7 @@ export default function SearchScreen() {
         }
         return matchesArea(task.areaId ?? null);
     };
-    const matchesTokens = (task: Task) => {
+    const matchesTokens = (task: SearchTaskResult) => {
         if (selectedTokens.length === 0) return true;
         const taskTokens = [...(task.contexts || []), ...(task.tags || [])];
         return selectedTokens.every((token) =>
@@ -113,7 +127,7 @@ export default function SearchScreen() {
     const nextWeekStart = new Date(endOfWeek);
     const nextWeekEnd = new Date(nextWeekStart);
     nextWeekEnd.setDate(nextWeekStart.getDate() + 7);
-    const matchesDue = (task: Task) => {
+    const matchesDue = (task: SearchTaskResult) => {
         if (duePreset === 'any') return true;
         if (duePreset === 'none') return !task.dueDate;
         if (!task.dueDate) return false;
@@ -186,13 +200,13 @@ export default function SearchScreen() {
         router.push(`/saved-search/${newSearch.id}`);
     };
 
-    const handleSelect = (result: { type: 'project' | 'task', item: Project | Task }) => {
+    const handleSelect = (result: { type: 'project'; item: SearchProjectResult } | { type: 'task'; item: SearchTaskResult }) => {
         if (result.type === 'project') {
             router.push({ pathname: '/projects-screen', params: { projectId: result.item.id } });
             return;
         }
 
-        const task = result.item as Task;
+        const task = result.item;
         const status = task.status;
         setHighlightTask(task.id);
         if (status === 'done') {
@@ -524,7 +538,7 @@ export default function SearchScreen() {
                             <Text style={[styles.resultSubtitle, { color: tc.secondaryText }]}>
                                 {item.type === 'project'
                                     ? t('search.resultProject')
-                                    : (item.item as Task).projectId
+                                    : (item.item as SearchTaskResult).projectId
                                         ? `${t('search.resultTask')} • ${t('search.inProjectSuffix')}`
                                         : t('search.resultTask')}
                             </Text>

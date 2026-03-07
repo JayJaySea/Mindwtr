@@ -8,9 +8,16 @@ export type TaskQueryOptions = {
     includeDeleted?: boolean;
 };
 
+export type SearchTaskResult = Pick<
+    Task,
+    'id' | 'title' | 'status' | 'startTime' | 'dueDate' | 'projectId' | 'areaId' | 'tags' | 'contexts'
+>;
+
+export type SearchProjectResult = Pick<Project, 'id' | 'title' | 'status' | 'areaId'>;
+
 export type SearchResults = {
-    tasks: Task[];
-    projects: Project[];
+    tasks: SearchTaskResult[];
+    projects: SearchProjectResult[];
 };
 
 export interface StorageAdapter {

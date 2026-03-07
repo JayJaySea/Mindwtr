@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRequire } from 'node:module';
 
 import { SqliteAdapter, type SqliteClient } from './sqlite-adapter';
@@ -224,6 +224,71 @@ describeSqlite('SqliteAdapter', () => {
         expect(area.order).toBe(0);
         expect(area.rev).toBe(3);
         expect(area.revBy).toBe('device-desktop');
+    });
+
+    it('returns lightweight search results for FTS queries', async () => {
+        const allMock = vi
+            .fn()
+            .mockResolvedValueOnce([
+                {
+                    id: 'task-search-1',
+                    title: 'Searchable task',
+                    status: 'next',
+                    startTime: '2025-01-01T08:00:00.000Z',
+                    dueDate: '2025-01-02T00:00:00.000Z',
+                    projectId: 'project-search-1',
+                    areaId: 'area-1',
+                    tags: JSON.stringify(['#search']),
+                    contexts: JSON.stringify(['@desk']),
+                },
+            ])
+            .mockResolvedValueOnce([
+                {
+                    id: 'project-search-1',
+                    title: 'Searchable project',
+                    status: 'active',
+                    areaId: 'area-1',
+                },
+            ]);
+        const client: SqliteClient = {
+            run: vi.fn().mockResolvedValue(undefined),
+            get: vi.fn().mockResolvedValue(undefined),
+            exec: vi.fn().mockResolvedValue(undefined),
+            all: allMock,
+        };
+        const lightweightAdapter = new SqliteAdapter(client);
+        (lightweightAdapter as unknown as { ensureSchema: () => Promise<void> }).ensureSchema = async () => {};
+
+        const results = await lightweightAdapter.searchAll('Searchable');
+
+        expect(allMock).toHaveBeenCalledTimes(2);
+        expect(allMock.mock.calls[0]?.[0]).toContain('SELECT t.id AS id');
+        expect(allMock.mock.calls[0]?.[0]).not.toContain('t.attachments');
+        expect(allMock.mock.calls[0]?.[0]).not.toContain('t.description');
+        expect(allMock.mock.calls[1]?.[0]).toContain('SELECT p.id AS id');
+        expect(allMock.mock.calls[1]?.[0]).not.toContain('p.supportNotes');
+
+        expect(results.tasks).toHaveLength(1);
+        expect(results.projects).toHaveLength(1);
+        expect(results.tasks[0]).toMatchObject({
+            id: 'task-search-1',
+            title: 'Searchable task',
+            status: 'next',
+            startTime: '2025-01-01T08:00:00.000Z',
+            dueDate: '2025-01-02T00:00:00.000Z',
+            projectId: 'project-search-1',
+            areaId: 'area-1',
+            tags: ['#search'],
+            contexts: ['@desk'],
+        });
+        expect(results.projects[0]).toMatchObject({
+            id: 'project-search-1',
+            title: 'Searchable project',
+            status: 'active',
+        });
+        expect(results.tasks[0]).not.toHaveProperty('description');
+        expect(results.tasks[0]).not.toHaveProperty('attachments');
+        expect(results.projects[0]).not.toHaveProperty('supportNotes');
     });
 
     it('derives stable fallback order when project/section orderNum is null', async () => {
