@@ -47,9 +47,12 @@
 
 **Developer Docs**
 * [[Developer Guide]]
+* [[Developer Troubleshooting]]
 * [[Architecture]]
 * [[Core API]]
+* [[Database Schema]]
 * [[Deployment Guide]]
+* [[Release Process]]
 * [[Testing Strategy]]
 * [[Performance Guide]]
 * [Contributing (Repository Guide)](https://github.com/dongdongbh/Mindwtr/blob/main/docs/CONTRIBUTING.md)
