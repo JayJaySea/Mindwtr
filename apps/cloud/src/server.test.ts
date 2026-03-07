@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { __cloudTestUtils, startCloudServer } from './server';
@@ -259,6 +259,20 @@ describe('cloud server utils', () => {
         await expect(second).resolves.toBe('ok');
         expect(failingCalls).toBe(1);
         expect(succeedingCalls).toBe(1);
+    });
+
+    test('writeData atomically replaces the JSON file and cleans up temp files', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'mindwtr-cloud-write-data-'));
+        const filePath = join(dir, 'data.json');
+
+        __cloudTestUtils.writeData(filePath, { ok: true, version: 1 });
+        expect(JSON.parse(readFileSync(filePath, 'utf8'))).toEqual({ ok: true, version: 1 });
+
+        __cloudTestUtils.writeData(filePath, { ok: true, version: 2 });
+        expect(JSON.parse(readFileSync(filePath, 'utf8'))).toEqual({ ok: true, version: 2 });
+        expect(readdirSync(dir)).toEqual(['data.json']);
+
+        rmSync(dir, { recursive: true, force: true });
     });
 });
 

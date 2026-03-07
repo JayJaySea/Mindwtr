@@ -543,7 +543,26 @@ function readData(filePath: string): any | null {
 
 function writeData(filePath: string, data: unknown) {
     mkdirSync(dirname(filePath), { recursive: true });
-    writeFileSync(filePath, JSON.stringify(data, null, 2));
+    const serialized = JSON.stringify(data, null, 2);
+    const tempPath = join(
+        dirname(filePath),
+        `.${basename(filePath)}.${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`,
+    );
+    let tempExists = false;
+    try {
+        writeFileSync(tempPath, serialized, { flag: 'wx', mode: 0o600 });
+        tempExists = true;
+        renameSync(tempPath, filePath);
+        tempExists = false;
+    } finally {
+        if (tempExists && existsSync(tempPath)) {
+            try {
+                unlinkSync(tempPath);
+            } catch {
+                // Best-effort cleanup if the atomic replace fails partway through.
+            }
+        }
+    }
 }
 
 function ensureWritableDir(dirPath: string): boolean {
@@ -590,6 +609,7 @@ export const __cloudTestUtils = {
     asStatus,
     pickTaskList,
     readJsonBody,
+    writeData,
     normalizeAttachmentRelativePath,
     isPathWithinRoot,
     pathContainsSymlink,
