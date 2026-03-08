@@ -3,6 +3,7 @@ import { vi } from 'vitest';
 // Minimal globals for Expo modules in node test env.
 const testGlobal = globalThis as typeof globalThis & {
   __DEV__?: boolean;
+  IS_REACT_ACT_ENVIRONMENT?: boolean;
   expo?: {
     EventEmitter: new () => {
       addListener: () => { remove: () => void };
@@ -11,9 +12,12 @@ const testGlobal = globalThis as typeof globalThis & {
     };
     modules: Record<string, unknown>;
   };
+  requestAnimationFrame?: (callback: FrameRequestCallback) => number;
+  cancelAnimationFrame?: (id: number) => void;
 };
 
 testGlobal.__DEV__ = false;
+testGlobal.IS_REACT_ACT_ENVIRONMENT = true;
 testGlobal.expo = testGlobal.expo ?? {
   EventEmitter: class {
     addListener() {
@@ -24,6 +28,12 @@ testGlobal.expo = testGlobal.expo ?? {
   },
   modules: {},
 };
+testGlobal.requestAnimationFrame = testGlobal.requestAnimationFrame ?? ((callback: FrameRequestCallback) => {
+  return setTimeout(() => callback(Date.now()), 0) as unknown as number;
+});
+testGlobal.cancelAnimationFrame = testGlobal.cancelAnimationFrame ?? ((id: number) => {
+  clearTimeout(id);
+});
 
 vi.mock('expo-audio', () => ({
   AudioModule: {

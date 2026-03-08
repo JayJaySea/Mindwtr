@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, Modal, ScrollView, FlatList, TextInput, Platform, Alert, Share, ActivityIndicator, Dimensions, type TextStyle } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -373,6 +373,22 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
     finalizeNextAction(selectedProjectId);
   };
 
+  const handleSkipTask = () => {
+    if (!currentTask) return;
+    applyProcessingEdits({
+      projectId: selectedProjectId ?? undefined,
+      contexts: selectedContexts,
+      tags: selectedTags,
+      ...(scheduleEnabled ? { startTime: pendingStartDate ? pendingStartDate.toISOString() : undefined } : {}),
+    });
+    setSkippedIds((prev) => {
+      const next = new Set(prev);
+      next.add(currentTask.id);
+      return next;
+    });
+    moveToNext();
+  };
+
   const applyProcessingEdits = (updates?: Partial<Task>) => {
     if (!currentTask) return;
     const title = processingTitle.trim() || currentTask.title;
@@ -677,12 +693,12 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
             </View>
             <TouchableOpacity
               style={[styles.headerActionButton, styles.headerActionButtonRight]}
-              onPress={handleNextTask}
+              onPress={handleSkipTask}
             >
               <Text style={styles.skipBtn}>
                 {(() => {
-                  const translated = t('inbox.nextTask');
-                  return translated === 'inbox.nextTask' ? 'Next task →' : translated;
+                  const translated = t('inbox.skip');
+                  return translated === 'inbox.skip' ? 'Skip' : translated;
                 })()}
               </Text>
             </TouchableOpacity>

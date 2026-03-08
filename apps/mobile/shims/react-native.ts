@@ -10,11 +10,13 @@ export const StyleSheet = {
 export const View = createHostComponent('View');
 export const Text = createHostComponent('Text');
 export const ScrollView = createHostComponent('ScrollView');
+export const FlatList = createHostComponent('FlatList');
 export const Modal = createHostComponent('Modal');
 export const TouchableOpacity = createHostComponent('TouchableOpacity');
 export const Pressable = createHostComponent('Pressable');
 export const KeyboardAvoidingView = createHostComponent('KeyboardAvoidingView');
 export const Image = createHostComponent('Image');
+export const ActivityIndicator = createHostComponent('ActivityIndicator');
 
 export const TextInput = (props: any) =>
   React.createElement('TextInput', props, props.children);
@@ -41,6 +43,15 @@ export const Animated = {
 };
 
 export const Platform = { OS: 'web', select: (options: any) => options?.web ?? options?.default };
+
+export const Dimensions = {
+  get: () => ({ width: 390, height: 844 }),
+};
+
+export const Keyboard = {
+  addListener: () => ({ remove: () => {} }),
+  dismiss: () => {},
+};
 
 export const TurboModuleRegistry = {
   get: () => null,
