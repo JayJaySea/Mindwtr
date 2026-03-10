@@ -22,6 +22,7 @@ type InboxProcessingWizardProps = {
     handleSkip: () => void;
     handleNotActionable: (destination: 'trash' | 'someday' | 'reference') => void;
     handleActionable: () => void;
+    showReferenceOption: boolean;
     handleProjectCheckNo: () => void;
     handleProjectCheckYes: () => void;
     handleTwoMinDone: () => void;
@@ -90,6 +91,7 @@ export function InboxProcessingWizard({
     handleSkip,
     handleNotActionable,
     handleActionable,
+    showReferenceOption,
     handleProjectCheckNo,
     handleProjectCheckYes,
     handleTwoMinDone,
@@ -316,12 +318,14 @@ export function InboxProcessingWizard({
                         >
                             <Clock className="w-3.5 h-3.5" /> {t('process.someday')}
                         </button>
-                        <button
-                            onClick={() => handleNotActionable('reference')}
-                            className="flex-1 flex items-center justify-center gap-1.5 bg-cyan-500/10 text-cyan-400 py-2.5 rounded-lg text-xs font-medium hover:bg-cyan-500/20 transition-colors"
-                        >
-                            <BookOpen className="w-3.5 h-3.5" /> {t('process.reference')}
-                        </button>
+                        {showReferenceOption && (
+                            <button
+                                onClick={() => handleNotActionable('reference')}
+                                className="flex-1 flex items-center justify-center gap-1.5 bg-cyan-500/10 text-cyan-400 py-2.5 rounded-lg text-xs font-medium hover:bg-cyan-500/20 transition-colors"
+                            >
+                                <BookOpen className="w-3.5 h-3.5" /> {t('process.reference')}
+                            </button>
+                        )}
                     </div>
                     <button
                         onClick={handleActionable}

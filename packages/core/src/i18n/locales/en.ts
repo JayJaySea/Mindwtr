@@ -811,6 +811,7 @@ export const en: Record<string, string> = {
         'settings.inboxTwoMinuteFirst': 'Ask the 2-minute rule first',
         'settings.inboxProjectFirst': 'Ask for project early',
         'settings.inboxScheduleEnabled': 'Allow scheduling during processing',
+        'settings.inboxReferenceEnabled': 'Offer Reference during processing',
         'settings.captureDefault': 'Default capture method',
         'settings.captureDefaultDesc': 'Choose whether quick capture starts with text or audio.',
         'settings.captureDefaultText': 'Text',

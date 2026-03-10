@@ -335,7 +335,8 @@ export default function SettingsPage() {
     const inboxProcessing = settings.gtd?.inboxProcessing ?? {};
     const inboxTwoMinuteFirst = inboxProcessing.twoMinuteFirst === true;
     const inboxProjectFirst = inboxProcessing.projectFirst === true;
-    const inboxScheduleEnabled = inboxProcessing.scheduleEnabled !== false;
+    const inboxScheduleEnabled = inboxProcessing.scheduleEnabled === true;
+    const inboxReferenceEnabled = inboxProcessing.referenceEnabled === true;
     const includeContextStep = settings.gtd?.weeklyReview?.includeContextStep !== false;
     const autoArchiveDays = Number.isFinite(settings.gtd?.autoArchiveDays)
         ? Math.max(0, Math.floor(settings.gtd?.autoArchiveDays as number))
@@ -3576,6 +3577,18 @@ export default function SettingsPage() {
                             <Switch
                                 value={inboxScheduleEnabled}
                                 onValueChange={(value) => updateInboxProcessing({ scheduleEnabled: value })}
+                                trackColor={{ false: '#767577', true: '#3B82F6' }}
+                            />
+                        </View>
+                        )}
+                        {gtdInboxProcessingExpanded && (
+                        <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.inboxReferenceEnabled')}</Text>
+                            </View>
+                            <Switch
+                                value={inboxReferenceEnabled}
+                                onValueChange={(value) => updateInboxProcessing({ referenceEnabled: value })}
                                 trackColor={{ false: '#767577', true: '#3B82F6' }}
                             />
                         </View>

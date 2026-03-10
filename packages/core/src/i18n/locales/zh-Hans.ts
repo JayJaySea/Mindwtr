@@ -767,6 +767,7 @@ export const zhHans: Record<string, string> = {
         'settings.inboxTwoMinuteFirst': '先询问两分钟规则',
         'settings.inboxProjectFirst': '提前询问项目归属',
         'settings.inboxScheduleEnabled': '处理中允许安排日期',
+        'settings.inboxReferenceEnabled': '处理中提供参考资料选项',
         'settings.captureDefault': '默认捕捉方式',
         'settings.captureDefaultDesc': '选择快速捕捉时默认使用文字或语音。',
         'settings.captureDefaultText': '文字',

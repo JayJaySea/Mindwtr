@@ -206,6 +206,7 @@ export interface AppData {
                 twoMinuteFirst?: boolean;
                 projectFirst?: boolean;
                 scheduleEnabled?: boolean;
+                referenceEnabled?: boolean;
             };
             weeklyReview?: {
                 includeContextStep?: boolean;

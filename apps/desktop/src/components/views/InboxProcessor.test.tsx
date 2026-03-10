@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, waitFor } from '@testing-library/react';
-import type { Area, Project, Task } from '@mindwtr/core';
+import type { AppData, Area, Project, Task } from '@mindwtr/core';
 
 import { InboxProcessor } from './InboxProcessor';
 
@@ -34,7 +34,7 @@ type RenderResult = {
     deleteTask: ReturnType<typeof vi.fn>;
 } & ReturnType<typeof render>;
 
-const renderInboxProcessor = (): RenderResult => {
+const renderInboxProcessor = (settings?: AppData['settings']): RenderResult => {
     const addProject = vi.fn(async () => createdProject);
     const updateTask = vi.fn(async () => undefined);
     const deleteTask = vi.fn(async () => undefined);
@@ -51,6 +51,7 @@ const renderInboxProcessor = (): RenderResult => {
                 tasks={tasks}
                 projects={projects}
                 areas={areas}
+                settings={settings}
                 addProject={addProject}
                 updateTask={updateTask}
                 deleteTask={deleteTask}
@@ -104,5 +105,43 @@ describe('InboxProcessor', () => {
         fireEvent.click(getByText('process.moreThanOneStepNo'));
 
         expect(getByText('process.twoMinDesc')).toBeInTheDocument();
+    });
+
+    it('keeps scheduling and reference branches hidden by default', () => {
+        const { getByRole, getByText, queryByText } = renderInboxProcessor();
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        fireEvent.click(getByText('process.refineNext'));
+
+        expect(queryByText('process.reference')).not.toBeInTheDocument();
+
+        fireEvent.click(getByText('process.yesActionable'));
+        fireEvent.click(getByText('process.moreThanOneStepNo'));
+        fireEvent.click(getByText('process.takesLonger'));
+
+        expect(getByText('process.nextStepDesc')).toBeInTheDocument();
+        expect(queryByText('taskEdit.startDateLabel')).not.toBeInTheDocument();
+    });
+
+    it('shows scheduling and reference options when enabled in settings', () => {
+        const { getByRole, getByText } = renderInboxProcessor({
+            gtd: {
+                inboxProcessing: {
+                    scheduleEnabled: true,
+                    referenceEnabled: true,
+                },
+            },
+        });
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        fireEvent.click(getByText('process.refineNext'));
+
+        expect(getByText('process.reference')).toBeInTheDocument();
+
+        fireEvent.click(getByText('process.yesActionable'));
+        fireEvent.click(getByText('process.moreThanOneStepNo'));
+        fireEvent.click(getByText('process.takesLonger'));
+
+        expect(getByText('taskEdit.startDateLabel')).toBeInTheDocument();
     });
 });

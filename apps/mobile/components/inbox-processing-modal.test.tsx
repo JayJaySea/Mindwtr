@@ -124,7 +124,6 @@ describe('InboxProcessingModal', () => {
         projectId: undefined,
         contexts: ['@home'],
         tags: ['#old'],
-        startTime: undefined,
       })
     );
     expect(onClose).toHaveBeenCalled();

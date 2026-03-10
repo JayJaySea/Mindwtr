@@ -771,6 +771,7 @@ export const zhHant: Record<string, string> = {
         'settings.inboxTwoMinuteFirst': '先詢問兩分鐘規則',
         'settings.inboxProjectFirst': '提前詢問項目歸屬',
         'settings.inboxScheduleEnabled': '處理中允許安排日期',
+        'settings.inboxReferenceEnabled': '處理中提供參考資料選項',
         'settings.captureDefault': '默認捕捉方式',
         'settings.captureDefaultDesc': '選擇快速捕捉時默認使用文字或語音。',
         'settings.captureDefaultText': '文字',

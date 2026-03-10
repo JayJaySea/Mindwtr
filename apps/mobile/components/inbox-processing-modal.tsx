@@ -49,7 +49,8 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
   const processingScrollRef = useRef<ScrollView | null>(null);
 
   const inboxProcessing = settings?.gtd?.inboxProcessing ?? {};
-  const scheduleEnabled = inboxProcessing.scheduleEnabled !== false;
+  const scheduleEnabled = inboxProcessing.scheduleEnabled === true;
+  const referenceEnabled = inboxProcessing.referenceEnabled === true;
 
   const aiEnabled = settings?.ai?.enabled === true;
   const aiProvider = (settings?.ai?.provider ?? 'openai') as AIProviderId;
@@ -876,12 +877,14 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
                     >
                       <Text style={[styles.buttonPrimaryText, actionabilityChoice !== 'someday' && { color: tc.text }]}>💭 {t('inbox.someday')}</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[styles.button, { backgroundColor: actionabilityChoice === 'reference' ? '#3B82F6' : tc.border }]}
-                      onPress={() => setActionabilityChoice('reference')}
-                    >
-                      <Text style={[styles.buttonPrimaryText, actionabilityChoice !== 'reference' && { color: tc.text }]}>📚 {t('nav.reference')}</Text>
-                    </TouchableOpacity>
+                    {referenceEnabled && (
+                      <TouchableOpacity
+                        style={[styles.button, { backgroundColor: actionabilityChoice === 'reference' ? '#3B82F6' : tc.border }]}
+                        onPress={() => setActionabilityChoice('reference')}
+                      >
+                        <Text style={[styles.buttonPrimaryText, actionabilityChoice !== 'reference' && { color: tc.text }]}>📚 {t('nav.reference')}</Text>
+                      </TouchableOpacity>
+                    )}
                   </View>
                 </View>
               </View>

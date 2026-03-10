@@ -58,7 +58,8 @@ export function InboxProcessor({
     const inboxProcessing = settings?.gtd?.inboxProcessing ?? {};
     const twoMinuteFirst = inboxProcessing.twoMinuteFirst === true;
     const projectFirst = inboxProcessing.projectFirst === true;
-    const scheduleEnabled = inboxProcessing.scheduleEnabled !== false;
+    const scheduleEnabled = inboxProcessing.scheduleEnabled === true;
+    const referenceEnabled = inboxProcessing.referenceEnabled === true;
 
     const areaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
     const projectMap = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
@@ -473,6 +474,7 @@ export function InboxProcessor({
                 handleSkip={handleSkip}
                 handleNotActionable={handleNotActionable}
                 handleActionable={handleActionable}
+                showReferenceOption={referenceEnabled}
                 handleProjectCheckNo={handleProjectCheckNo}
                 handleProjectCheckYes={handleProjectCheckYes}
                 handleTwoMinDone={handleTwoMinDone}

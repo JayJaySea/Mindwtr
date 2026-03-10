@@ -16,6 +16,7 @@ type Labels = {
     inboxTwoMinuteFirst: string;
     inboxProjectFirst: string;
     inboxScheduleEnabled: string;
+    inboxReferenceEnabled: string;
     on: string;
     off: string;
     captureDefault: string;
@@ -153,7 +154,8 @@ export function SettingsGtdPage({
     const inboxProcessing = safeSettings.gtd?.inboxProcessing ?? {};
     const inboxTwoMinuteFirst = inboxProcessing.twoMinuteFirst === true;
     const inboxProjectFirst = inboxProcessing.projectFirst === true;
-    const inboxScheduleEnabled = inboxProcessing.scheduleEnabled !== false;
+    const inboxScheduleEnabled = inboxProcessing.scheduleEnabled === true;
+    const inboxReferenceEnabled = inboxProcessing.referenceEnabled === true;
     const includeContextStep = safeSettings.gtd?.weeklyReview?.includeContextStep !== false;
     const pomodoroEnabled = safeSettings.features?.pomodoro === true;
     const fieldLabel = (fieldId: TaskEditorFieldId) => {
@@ -519,6 +521,28 @@ export function SettingsGtdPage({
                                 className={cn(
                                     'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
                                     inboxScheduleEnabled ? 'translate-x-4' : 'translate-x-1'
+                                )}
+                            />
+                        </button>
+                    </div>
+                    <div className="p-4 flex items-center justify-between gap-6">
+                        <div className="min-w-0">
+                            <div className="text-sm font-medium">{t.inboxReferenceEnabled}</div>
+                        </div>
+                        <button
+                            type="button"
+                            role="switch"
+                            aria-checked={inboxReferenceEnabled}
+                            onClick={() => updateInboxProcessing({ referenceEnabled: !inboxReferenceEnabled })}
+                            className={cn(
+                                'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                                inboxReferenceEnabled ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
+                            )}
+                        >
+                            <span
+                                className={cn(
+                                    'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                                    inboxReferenceEnabled ? 'translate-x-4' : 'translate-x-1'
                                 )}
                             />
                         </button>
