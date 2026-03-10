@@ -1,10 +1,16 @@
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { DndContext, PointerSensor, useSensor, useSensors, closestCenter, type DragEndEvent } from '@dnd-kit/core';
-import { SortableContext, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable';
+import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { AlertTriangle, ChevronDown, ChevronRight, CornerDownRight, Folder, Plus, Star } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { SortableProjectRow } from './SortableRows';
 import type { Area, Project, Task } from '@mindwtr/core';
+import { reportError } from '../../../lib/report-error';
+import {
+    computeProjectAreaDragResult,
+    getProjectAreaContainerId,
+    ProjectAreaDropZone,
+} from './project-area-dnd';
 
 type TagOptionList = {
     list: string[];
@@ -44,6 +50,7 @@ interface ProjectsSidebarProps {
     tasksByProject: TasksByProject;
     projects: Project[];
     toggleProjectFocus: (projectId: string) => void;
+    updateProject: (projectId: string, updates: Partial<Project>) => Promise<void> | void;
     reorderProjects: (projectIds: string[], areaId?: string) => void;
     onDuplicateProject: (projectId: string) => void;
 }
@@ -77,6 +84,7 @@ export function ProjectsSidebar({
     tasksByProject,
     projects,
     toggleProjectFocus,
+    updateProject,
     reorderProjects,
     onDuplicateProject,
 }: ProjectsSidebarProps) {
@@ -115,15 +123,50 @@ export function ProjectsSidebar({
         };
     }, [contextMenu, closeContextMenu]);
 
-    const handleProjectDragEnd = (areaId: string, areaProjects: Project[]) => (event: DragEndEvent) => {
+    const buildProjectDndState = useCallback((groups: GroupedProjects) => {
+        const projectIdsByArea = new Map<string, string[]>();
+        const projectAreaById = new Map<string, string>();
+        groups.forEach(([areaId, areaProjects]) => {
+            const ids = areaProjects.map((project) => project.id);
+            projectIdsByArea.set(areaId, ids);
+            ids.forEach((id) => projectAreaById.set(id, areaId));
+        });
+        return { projectIdsByArea, projectAreaById };
+    }, []);
+
+    const activeProjectDnd = useMemo(() => buildProjectDndState(groupedActiveProjects), [buildProjectDndState, groupedActiveProjects]);
+    const deferredProjectDnd = useMemo(() => buildProjectDndState(groupedDeferredProjects), [buildProjectDndState, groupedDeferredProjects]);
+
+    const handleProjectDragEnd = useCallback((dndState: ReturnType<typeof buildProjectDndState>) => (event: DragEndEvent) => {
         const { active, over } = event;
         if (!over || active.id === over.id) return;
-        const oldIndex = areaProjects.findIndex((project) => project.id === active.id);
-        const newIndex = areaProjects.findIndex((project) => project.id === over.id);
-        if (oldIndex === -1 || newIndex === -1) return;
-        const reordered = arrayMove(areaProjects, oldIndex, newIndex).map((project) => project.id);
-        reorderProjects(reordered, areaId === noAreaId ? undefined : areaId);
-    };
+        const move = computeProjectAreaDragResult({
+            activeId: String(active.id),
+            overId: String(over.id),
+            projectIdsByArea: dndState.projectIdsByArea,
+            projectAreaById: dndState.projectAreaById,
+        });
+        if (!move) return;
+
+        const sourceAreaArg = move.sourceAreaId === noAreaId ? undefined : move.sourceAreaId;
+        const destinationAreaArg = move.destinationAreaId === noAreaId ? undefined : move.destinationAreaId;
+
+        if (!move.movedAcrossAreas) {
+            reorderProjects(move.nextDestinationIds, destinationAreaArg);
+            return;
+        }
+
+        Promise.resolve(updateProject(move.movedProjectId, { areaId: destinationAreaArg }))
+            .then(async () => {
+                if (move.nextSourceIds.length > 0) {
+                    await Promise.resolve(reorderProjects(move.nextSourceIds, sourceAreaArg));
+                }
+                await Promise.resolve(reorderProjects(move.nextDestinationIds, destinationAreaArg));
+            })
+            .catch((error) => {
+                reportError('Failed to move project between areas', error);
+            });
+    }, [noAreaId, reorderProjects, updateProject]);
 
     return (
         <div className="w-64 h-full flex-shrink-0 flex flex-col gap-4 border-r border-border pr-6">
@@ -204,38 +247,40 @@ export function ProjectsSidebar({
                         {t('projects.activeSection')}
                     </div>
                 )}
-                {groupedActiveProjects.map(([areaId, areaProjects]) => {
-                    const area = areaById.get(areaId);
-                    const areaLabel = area ? area.name : t('projects.noArea');
-                    const isCollapsed = collapsedAreas[areaId] ?? false;
+                {groupedActiveProjects.length > 0 && (
+                    <DndContext
+                        sensors={projectSensors}
+                        collisionDetection={closestCenter}
+                        onDragEnd={handleProjectDragEnd(activeProjectDnd)}
+                    >
+                        {groupedActiveProjects.map(([areaId, areaProjects]) => {
+                            const area = areaById.get(areaId);
+                            const areaLabel = area ? area.name : t('projects.noArea');
+                            const isCollapsed = collapsedAreas[areaId] ?? false;
 
-                    return (
-                        <div key={areaId} className="space-y-1">
-                            <button
-                                type="button"
-                                onClick={() => onToggleAreaCollapse(areaId)}
-                                className="w-full flex items-center justify-between px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground transition-colors"
-                            >
-                                <span className="flex items-center gap-2">
-                                    {area?.color && (
-                                        <span
-                                            className="w-2 h-2 rounded-full border border-border/50"
-                                            style={{ backgroundColor: area.color }}
-                                        />
-                                    )}
-                                    {area?.icon && <span className="text-[10px]">{area.icon}</span>}
-                                    {areaLabel}
-                                </span>
-                                {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                            </button>
-                            {!isCollapsed && (
-                                <DndContext
-                                    sensors={projectSensors}
-                                    collisionDetection={closestCenter}
-                                    onDragEnd={handleProjectDragEnd(areaId, areaProjects)}
-                                >
-                                    <SortableContext items={areaProjects.map((project) => project.id)} strategy={verticalListSortingStrategy}>
-                                        {areaProjects.map((project) => {
+                            return (
+                                <div key={areaId} className="space-y-1">
+                                    <button
+                                        type="button"
+                                        onClick={() => onToggleAreaCollapse(areaId)}
+                                        className="w-full flex items-center justify-between px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground transition-colors"
+                                    >
+                                        <span className="flex items-center gap-2">
+                                            {area?.color && (
+                                                <span
+                                                    className="w-2 h-2 rounded-full border border-border/50"
+                                                    style={{ backgroundColor: area.color }}
+                                                />
+                                            )}
+                                            {area?.icon && <span className="text-[10px]">{area.icon}</span>}
+                                            {areaLabel}
+                                        </span>
+                                        {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                                    </button>
+                                    {!isCollapsed && (
+                                        <ProjectAreaDropZone id={getProjectAreaContainerId(areaId)} className="space-y-1 rounded-lg">
+                                            <SortableContext items={areaProjects.map((project) => project.id)} strategy={verticalListSortingStrategy}>
+                                                {areaProjects.map((project) => {
                                             const projTasks = tasksByProject[project.id] || [];
                                             let nextAction = undefined;
                                             let nextCandidate = undefined;
@@ -316,13 +361,15 @@ export function ProjectsSidebar({
                                                     )}
                                                 </SortableProjectRow>
                                             );
-                                        })}
-                                    </SortableContext>
-                                </DndContext>
-                            )}
-                        </div>
-                    );
-                })}
+                                                })}
+                                            </SortableContext>
+                                        </ProjectAreaDropZone>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </DndContext>
+                )}
 
                 {groupedDeferredProjects.length > 0 && (
                     <div className="pt-2 border-t border-border/60">
@@ -336,38 +383,39 @@ export function ProjectsSidebar({
                         </button>
                         {showDeferredProjects && (
                             <div className="space-y-3">
-                                {groupedDeferredProjects.map(([areaId, areaProjects]) => {
-                                    const area = areaById.get(areaId);
-                                    const areaLabel = area ? area.name : t('projects.noArea');
-                                    const isCollapsed = collapsedAreas[areaId] ?? false;
+                                <DndContext
+                                    sensors={projectSensors}
+                                    collisionDetection={closestCenter}
+                                    onDragEnd={handleProjectDragEnd(deferredProjectDnd)}
+                                >
+                                    {groupedDeferredProjects.map(([areaId, areaProjects]) => {
+                                        const area = areaById.get(areaId);
+                                        const areaLabel = area ? area.name : t('projects.noArea');
+                                        const isCollapsed = collapsedAreas[areaId] ?? false;
 
-                                    return (
-                                        <div key={`deferred-${areaId}`} className="space-y-1">
-                                            <button
-                                                type="button"
-                                                onClick={() => onToggleAreaCollapse(areaId)}
-                                                className="w-full flex items-center justify-between px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground transition-colors"
-                                            >
-                                                <span className="flex items-center gap-2">
-                                                    {area?.color && (
-                                                        <span
-                                                            className="w-2 h-2 rounded-full border border-border/50"
-                                                            style={{ backgroundColor: area.color }}
-                                                        />
-                                                    )}
-                                                    {area?.icon && <span className="text-[10px]">{area.icon}</span>}
-                                                    {areaLabel}
-                                                </span>
-                                                {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                                            </button>
-                                            {!isCollapsed && (
-                                                <DndContext
-                                                    sensors={projectSensors}
-                                                    collisionDetection={closestCenter}
-                                                    onDragEnd={handleProjectDragEnd(areaId, areaProjects)}
+                                        return (
+                                            <div key={`deferred-${areaId}`} className="space-y-1">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => onToggleAreaCollapse(areaId)}
+                                                    className="w-full flex items-center justify-between px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground transition-colors"
                                                 >
-                                                    <SortableContext items={areaProjects.map((project) => project.id)} strategy={verticalListSortingStrategy}>
-                                                        {areaProjects.map((project) => (
+                                                    <span className="flex items-center gap-2">
+                                                        {area?.color && (
+                                                            <span
+                                                                className="w-2 h-2 rounded-full border border-border/50"
+                                                                style={{ backgroundColor: area.color }}
+                                                            />
+                                                        )}
+                                                        {area?.icon && <span className="text-[10px]">{area.icon}</span>}
+                                                        {areaLabel}
+                                                    </span>
+                                                    {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                                                </button>
+                                                {!isCollapsed && (
+                                                    <ProjectAreaDropZone id={getProjectAreaContainerId(areaId)} className="space-y-1 rounded-lg">
+                                                        <SortableContext items={areaProjects.map((project) => project.id)} strategy={verticalListSortingStrategy}>
+                                                            {areaProjects.map((project) => (
                                                             <SortableProjectRow key={project.id} projectId={project.id}>
                                                                 {({ handle, isDragging }) => (
                                                                     <div
@@ -403,13 +451,14 @@ export function ProjectsSidebar({
                                                                     </div>
                                                                 )}
                                                             </SortableProjectRow>
-                                                        ))}
-                                                    </SortableContext>
-                                                </DndContext>
-                                            )}
-                                        </div>
-                                    );
-                                })}
+                                                            ))}
+                                                        </SortableContext>
+                                                    </ProjectAreaDropZone>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </DndContext>
                             </div>
                         )}
                     </div>

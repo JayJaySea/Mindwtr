@@ -813,6 +813,7 @@ export function ProjectsView() {
                         tasksByProject={tasksByProject}
                         projects={projects}
                         toggleProjectFocus={toggleProjectFocus}
+                        updateProject={updateProject}
                         reorderProjects={reorderProjects}
                         onDuplicateProject={handleDuplicateProject}
                     />
