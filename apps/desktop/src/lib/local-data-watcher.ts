@@ -7,13 +7,14 @@ import {
     useTaskStore,
 } from '@mindwtr/core';
 import { invoke } from '@tauri-apps/api/core';
-import { isTauriRuntime } from './runtime';
+import { getDesktopTimerHost, isTauriRuntime } from './runtime';
 import { hashString, toStableJson } from './sync-service-utils';
 import { logInfo, logWarn } from './app-log';
 
 const IGNORE_WINDOW_MS = 2000;
 const DEBOUNCE_MS = 750;
 const IGNORE_DRAIN_PADDING_MS = 25;
+const timerHost = getDesktopTimerHost();
 
 type FsEvent = {
     path?: string;
@@ -65,8 +66,8 @@ const defaultDependencies: LocalDataWatcherDependencies = {
         return watch(path, callback);
     },
     now: () => Date.now(),
-    schedule: setTimeout,
-    cancelSchedule: clearTimeout,
+    schedule: timerHost.setTimeout,
+    cancelSchedule: timerHost.clearTimeout,
     hashPayload: hashString,
     normalize: normalizeAppData,
     merge: mergeAppData,

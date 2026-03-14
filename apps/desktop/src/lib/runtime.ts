@@ -6,20 +6,40 @@ export function isFlatpakRuntime(): boolean {
     return typeof window !== 'undefined' && Boolean((window as any).__MINDWTR_FLATPAK__);
 }
 
+type DesktopTimerHost = {
+    setTimeout: typeof globalThis.setTimeout;
+    clearTimeout: typeof globalThis.clearTimeout;
+};
+
+export function getDesktopTimerHost(): DesktopTimerHost {
+    if (typeof window !== 'undefined') {
+        return {
+            setTimeout: window.setTimeout.bind(window) as typeof globalThis.setTimeout,
+            clearTimeout: window.clearTimeout.bind(window) as typeof globalThis.clearTimeout,
+        };
+    }
+
+    return {
+        setTimeout: globalThis.setTimeout.bind(globalThis),
+        clearTimeout: globalThis.clearTimeout.bind(globalThis),
+    };
+}
+
 const INSTALL_SOURCE_TIMEOUT_MS = 1500;
 
 async function resolveWithTimeout<T>(promise: Promise<T>, fallback: T, timeoutMs: number): Promise<T> {
+    const timers = getDesktopTimerHost();
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     try {
         return await Promise.race([
             promise.catch(() => fallback),
             new Promise<T>((resolve) => {
-                timeoutId = setTimeout(() => resolve(fallback), timeoutMs);
+                timeoutId = timers.setTimeout(() => resolve(fallback), timeoutMs);
             }),
         ]);
     } finally {
         if (timeoutId) {
-            clearTimeout(timeoutId);
+            timers.clearTimeout(timeoutId);
         }
     }
 }
