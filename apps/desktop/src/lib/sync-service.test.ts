@@ -181,6 +181,16 @@ describe('SyncService testability hooks', () => {
 });
 
 describe('SyncService orchestration', () => {
+    const countInFlightStarts = (snapshots: Array<ReturnType<typeof SyncService.getSyncStatus>>) => (
+        snapshots.reduce((count, snapshot, index) => {
+            const previous = snapshots[index - 1];
+            if (!previous?.inFlight && snapshot.inFlight) {
+                return count + 1;
+            }
+            return count;
+        }, 0)
+    );
+
     it('re-runs a queued sync cycle after the in-flight sync finishes', async () => {
         const backendSpy = vi.spyOn(SyncService as any, 'getSyncBackend');
         backendSpy
@@ -189,6 +199,10 @@ describe('SyncService orchestration', () => {
                 return 'off';
             })
             .mockResolvedValue('off');
+        const snapshots: Array<ReturnType<typeof SyncService.getSyncStatus>> = [];
+        const unsubscribe = SyncService.subscribeSyncStatus((status) => {
+            snapshots.push({ ...status });
+        });
 
         const first = SyncService.performSync();
         const second = SyncService.performSync();
@@ -196,9 +210,17 @@ describe('SyncService orchestration', () => {
         const [firstResult, secondResult] = await Promise.all([first, second]);
         expect(firstResult.success).toBe(true);
         expect(secondResult.success).toBe(true);
+        await vi.waitFor(() => {
+            expect(SyncService.getSyncStatus()).toMatchObject({
+                inFlight: false,
+                queued: false,
+                lastResult: 'success',
+            });
+        });
+        unsubscribe();
 
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        expect(backendSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(snapshots.some((status) => status.queued === true)).toBe(true);
+        expect(countInFlightStarts(snapshots)).toBe(2);
     });
 
     it('emits queued status updates while a sync is already in flight', async () => {
@@ -218,28 +240,28 @@ describe('SyncService orchestration', () => {
         const first = SyncService.performSync();
         const second = SyncService.performSync();
         await Promise.all([first, second]);
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await vi.waitFor(() => {
+            expect(SyncService.getSyncStatus()).toMatchObject({
+                inFlight: false,
+                queued: false,
+                lastResult: 'success',
+            });
+        });
         unsubscribe();
 
         expect(snapshots.some((status) => status.inFlight === true)).toBe(true);
         expect(snapshots.some((status) => status.queued === true)).toBe(true);
-        expect(SyncService.getSyncStatus()).toMatchObject({
-            inFlight: false,
-            queued: false,
-            lastResult: 'success',
-        });
     });
 
     it('serializes re-entrant sync calls triggered by sync status listeners', async () => {
-        let active = 0;
-        let maxActive = 0;
         const backendSpy = vi.spyOn(SyncService as any, 'getSyncBackend');
         backendSpy.mockImplementation(async () => {
-            active += 1;
-            maxActive = Math.max(maxActive, active);
             await new Promise((resolve) => setTimeout(resolve, 20));
-            active -= 1;
             return 'off';
+        });
+        const snapshots: Array<ReturnType<typeof SyncService.getSyncStatus>> = [];
+        const unsubscribeSnapshots = SyncService.subscribeSyncStatus((status) => {
+            snapshots.push({ ...status });
         });
 
         let triggered = false;
@@ -251,12 +273,19 @@ describe('SyncService orchestration', () => {
         });
 
         const result = await SyncService.performSync();
-        await new Promise((resolve) => setTimeout(resolve, 80));
+        await vi.waitFor(() => {
+            expect(SyncService.getSyncStatus()).toMatchObject({
+                inFlight: false,
+                queued: false,
+                lastResult: 'success',
+            });
+        });
         unsubscribe();
+        unsubscribeSnapshots();
 
         expect(result.success).toBe(true);
-        expect(maxActive).toBe(1);
-        expect(backendSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(snapshots.some((status) => status.queued === true)).toBe(true);
+        expect(countInFlightStarts(snapshots)).toBe(2);
     });
 
     it('runs a queued follow-up sync after an in-flight failure', async () => {
@@ -275,12 +304,12 @@ describe('SyncService orchestration', () => {
         expect(firstResult.success).toBe(false);
         expect(secondResult.success).toBe(false);
 
-        await new Promise((resolve) => setTimeout(resolve, 40));
-        expect(backendSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
-        expect(SyncService.getSyncStatus()).toMatchObject({
-            inFlight: false,
-            queued: false,
-            lastResult: 'success',
+        await vi.waitFor(() => {
+            expect(SyncService.getSyncStatus()).toMatchObject({
+                inFlight: false,
+                queued: false,
+                lastResult: 'success',
+            });
         });
     });
 });
