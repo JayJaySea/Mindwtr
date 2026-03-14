@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { sortTasks, getStatusColor, getTaskAgeLabel, rescheduleTask, extractWaitingPerson } from './task-utils';
 import { Task } from './types';
 
@@ -44,15 +44,21 @@ describe('task-utils', () => {
     });
 
     describe('getTaskAgeLabel', () => {
+        beforeEach(() => {
+            vi.useFakeTimers();
+            vi.setSystemTime(new Date('2025-02-15T12:00:00.000Z'));
+        });
+
+        afterEach(() => {
+            vi.useRealTimers();
+        });
+
         it('should return null for new tasks', () => {
-            const now = new Date().toISOString();
-            expect(getTaskAgeLabel(now)).toBeNull();
+            expect(getTaskAgeLabel('2025-02-15T12:00:00.000Z')).toBeNull();
         });
 
         it('should return correct label for old tasks', () => {
-            const twoWeeksAgo = new Date();
-            twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
-            expect(getTaskAgeLabel(twoWeeksAgo.toISOString())).toBe('2 weeks old');
+            expect(getTaskAgeLabel('2025-02-01T12:00:00.000Z')).toBe('2 weeks old');
         });
     });
 

@@ -752,7 +752,6 @@ export const __cloudTestUtils = {
     normalizeAttachmentRelativePath,
     isPathWithinRoot,
     pathContainsSymlink,
-    validateTaskCreationProps,
     createWriteLockRunner,
 };
 

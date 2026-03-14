@@ -1063,17 +1063,17 @@ function mergeEntitiesWithStats<T extends { id: string; updatedAt: string; delet
             return deletedTimeRaw > maxAllowedMergeTime ? maxAllowedMergeTime : deletedTimeRaw;
         };
         let winner = safeIncomingTime > safeLocalTime ? normalizedIncomingItem : normalizedLocalItem;
-            const resolveDeleteVsLiveWinner = (localCandidate: T, incomingCandidate: T): T => {
-                const localOpTime = resolveOperationTime(localCandidate);
-                const incomingOpTime = resolveOperationTime(incomingCandidate);
-                const operationDiff = incomingOpTime - localOpTime;
-                if (Math.abs(operationDiff) <= DELETE_VS_LIVE_AMBIGUOUS_WINDOW_MS) {
-                    return localCandidate.deletedAt ? incomingCandidate : localCandidate;
-                }
-                if (operationDiff > 0) return incomingCandidate;
-                if (operationDiff < 0) return localCandidate;
+        const resolveDeleteVsLiveWinner = (localCandidate: T, incomingCandidate: T): T => {
+            const localOpTime = resolveOperationTime(localCandidate);
+            const incomingOpTime = resolveOperationTime(incomingCandidate);
+            const operationDiff = incomingOpTime - localOpTime;
+            if (Math.abs(operationDiff) <= DELETE_VS_LIVE_AMBIGUOUS_WINDOW_MS) {
                 return localCandidate.deletedAt ? incomingCandidate : localCandidate;
-            };
+            }
+            if (operationDiff > 0) return incomingCandidate;
+            if (operationDiff < 0) return localCandidate;
+            return localCandidate.deletedAt ? incomingCandidate : localCandidate;
+        };
 
         if (hasRevision) {
             if (localDeleted !== incomingDeleted) {
