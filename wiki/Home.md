@@ -129,7 +129,7 @@ Mindwtr is **simple by default and powerful when needed**. We focus on reducing 
 - **New to GTD?** Start with [[GTD Overview]]
 - **Installing the app?** See [[Getting Started]]
 - **Want to contribute?** Check [[Developer Guide]]
-- **Latest release:** [v0.7.2 notes](https://github.com/dongdongbh/Mindwtr/blob/main/docs/release-notes/0.7.2.md)
+- **Latest release:** [v0.7.3 notes](https://github.com/dongdongbh/Mindwtr/blob/main/docs/release-notes/0.7.3.md)
 
 ---
 

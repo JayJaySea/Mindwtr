@@ -1,4 +1,4 @@
-- Scoped task project pickers by area so editing shows more relevant projects.
-- Improved picker accessibility across task, project, section, and area selectors.
-- Added confirmation before swipe-to-trash deletes a task.
-- Clarified iOS file-sync guidance when a provider does not support folder selection.
+- Added date and time format overrides in Settings.
+- Improved mobile sync reliability with clearer sync activity feedback and stronger WebDAV cooldown handling.
+- Improved task editing and inbox processing flows, including safer close confirmation and better tab-state recovery.
+- Hardened persistence and merge reliability across devices.

@@ -30,7 +30,7 @@
           "完全离线可用，无需互联网连接",
           "完全开源，安全透明"
         ],
-        "ReleaseNotes": "• 为大型 Agenda 视图加入虚拟化，桌面端滚动与渲染更流畅。\n• 桌面端新增列表内联筛选，并强化键盘导航回退行为。\n• 任务编辑时按区域筛选项目选择器，让大型项目体系更易选中相关项目。\n• 提升桌面与移动端的搜索和同步稳定性。",
+        "ReleaseNotes": "• 新增日期与时间格式覆盖选项，并让收件箱处理设置改为按需启用。\n• 支持在桌面端按区域拖放整理项目，并补强设置页诊断与日历本地化。\n• 强化桌面与移动端同步可靠性，包含更安全的队列同步与云端合并处理。\n• 恢复 macOS 日历权限提示，并修复多项同步、提醒与持久化边缘问题。",
         "Images": [
           {
             "FileName": "2026-01-27_22-59-40.png",
@@ -82,7 +82,7 @@
           "No internet connection required to function",
           "Open source and transparent"
         ],
-        "ReleaseNotes": "• Virtualized large Agenda views for noticeably smoother desktop performance.\n• Added inline list filtering and sturdier keyboard navigation fallbacks on desktop.\n• Scoped project pickers by area during task editing so large setups show more relevant choices.\n• Improved search and sync reliability across desktop and mobile.",
+        "ReleaseNotes": "• Added date and time format overrides, and made inbox-processing settings opt-in.\n• Added desktop drag-and-drop project moves across areas plus better settings diagnostics and calendar localization.\n• Improved desktop and mobile sync reliability with safer queued-sync handling and stronger cloud merge protection.\n• Restored macOS calendar permission prompting and fixed several reminder, persistence, and sync edge cases.",
         "Images": [
           {
             "FileName": "2026-01-27_22-59-40.png",
@@ -130,7 +130,7 @@
           "No requiere conexión a internet para funcionar",
           "Código abierto y transparente"
         ],
-        "ReleaseNotes": "• Virtualizamos vistas Agenda grandes para un rendimiento de escritorio mas fluido.\n• Anadimos filtrado inline en listas y fallbacks de navegacion por teclado mas solidos.\n• Limitamos los selectores de proyectos por area al editar tareas para mostrar opciones mas relevantes.\n• Mejoramos la fiabilidad general de busqueda y sync en escritorio y movil.",
+        "ReleaseNotes": "• Anadimos opciones de formato de fecha y hora, y las opciones de procesamiento de bandeja de entrada ahora son opt-in.\n• Anadimos reordenacion de proyectos entre areas en escritorio junto con mejores diagnosticos de configuracion y localizacion del calendario.\n• Mejoramos la fiabilidad del sync en escritorio y movil con colas mas seguras y mejor proteccion del merge en la nube.\n• Recuperamos el aviso de permisos de calendario en macOS y corregimos varios casos limite de recordatorios, persistencia y sync.",
         "Images": [
           {
             "FileName": "2026-01-27_22-59-40.png",
