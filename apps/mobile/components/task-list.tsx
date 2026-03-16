@@ -5,6 +5,7 @@ import {
   useTaskStore,
   Task,
   TaskStatus,
+  TimeEstimate,
   sortTasksBy,
   parseQuickAdd,
   safeParseDate,
@@ -26,6 +27,11 @@ import { useLanguage } from '../contexts/language-context';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { buildCopilotConfig, isAIKeyRequired, loadAIKey } from '../lib/ai-config';
 import { logError } from '../lib/app-log';
+import {
+  MOBILE_TIME_ESTIMATE_OPTIONS,
+  formatTimeEstimateChipLabel,
+  matchesSelectedTimeEstimates,
+} from './time-estimate-filter-utils';
 
 export interface TaskListProps {
   statusFilter: TaskStatus | 'all';
@@ -97,6 +103,7 @@ function TaskListComponent({
   const [sortModalVisible, setSortModalVisible] = useState(false);
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
   const [bulkActionLabel, setBulkActionLabel] = useState('');
+  const [selectedTimeEstimates, setSelectedTimeEstimates] = useState<TimeEstimate[]>([]);
   const [inputSelection, setInputSelection] = useState<{ start: number; end: number }>({ start: 0, end: 0 });
   const [typeaheadOpen, setTypeaheadOpen] = useState(false);
   const [typeaheadIndex, setTypeaheadIndex] = useState(0);
@@ -149,6 +156,21 @@ function TaskListComponent({
   const keyRequired = isAIKeyRequired(settings);
   const timeEstimatesEnabled = settings?.features?.timeEstimates === true;
   const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
+  const hasActiveTimeEstimateFilters = timeEstimatesEnabled && selectedTimeEstimates.length > 0;
+
+  useEffect(() => {
+    if (!timeEstimatesEnabled && selectedTimeEstimates.length > 0) {
+      setSelectedTimeEstimates([]);
+    }
+  }, [selectedTimeEstimates.length, timeEstimatesEnabled]);
+
+  const toggleTimeEstimate = useCallback((estimate: TimeEstimate) => {
+    setSelectedTimeEstimates((prev) => (
+      prev.includes(estimate)
+        ? prev.filter((value) => value !== estimate)
+        : [...prev, estimate]
+    ));
+  }, []);
 
   // Memoize filtered and sorted tasks for performance
   const filteredTasks = useMemo(() => {
@@ -163,10 +185,11 @@ function TaskListComponent({
         const start = safeParseDate(t.startTime);
         if (start && start > now) return false;
       }
+      if (timeEstimatesEnabled && !matchesSelectedTimeEstimates(t, selectedTimeEstimates)) return false;
       return matchesStatus && matchesProject;
     });
     return filtered;
-  }, [tasks, statusFilter, projectId, sortBy]);
+  }, [tasks, statusFilter, projectId, selectedTimeEstimates, timeEstimatesEnabled]);
 
   const orderedTasks = useMemo(() => {
     return sortTasksBy(filteredTasks, sortBy);
@@ -741,6 +764,54 @@ function TaskListComponent({
         <View style={styles.headerAccessoryRow}>{headerAccessory}</View>
       ) : null}
 
+      {timeEstimatesEnabled && (
+        <View style={[styles.filterSection, { borderBottomColor: themeColorsMemo.border, backgroundColor: themeColorsMemo.cardBg }]}>
+          <Text style={[styles.filterLabel, { color: themeColorsMemo.secondaryText }]}>
+            {t('filters.timeEstimate')}
+          </Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChips}>
+            <TouchableOpacity
+              onPress={() => setSelectedTimeEstimates([])}
+              style={[
+                styles.filterChip,
+                {
+                  borderColor: themeColorsMemo.border,
+                  backgroundColor: !hasActiveTimeEstimateFilters ? themeColorsMemo.tint : themeColorsMemo.filterBg,
+                },
+              ]}
+              accessibilityRole="button"
+              accessibilityState={{ selected: !hasActiveTimeEstimateFilters }}
+            >
+              <Text style={[styles.filterChipText, { color: !hasActiveTimeEstimateFilters ? themeColorsMemo.onTint : themeColorsMemo.text }]}>
+                {t('common.all')}
+              </Text>
+            </TouchableOpacity>
+            {MOBILE_TIME_ESTIMATE_OPTIONS.map((estimate) => {
+              const isActive = selectedTimeEstimates.includes(estimate);
+              return (
+                <TouchableOpacity
+                  key={estimate}
+                  onPress={() => toggleTimeEstimate(estimate)}
+                  style={[
+                    styles.filterChip,
+                    {
+                      borderColor: themeColorsMemo.border,
+                      backgroundColor: isActive ? themeColorsMemo.tint : themeColorsMemo.filterBg,
+                    },
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: isActive }}
+                >
+                  <Text style={[styles.filterChipText, { color: isActive ? themeColorsMemo.onTint : themeColorsMemo.text }]}>
+                    {formatTimeEstimateChipLabel(estimate)}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      )}
+
       {enableBulkActions && selectionMode && (
         <View style={[styles.bulkBar, { backgroundColor: themeColors.cardBg, borderBottomColor: themeColors.border }]}>
           <View style={styles.bulkStatusRow}>
@@ -1270,6 +1341,30 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 4,
     paddingBottom: 8,
+  },
+  filterSection: {
+    borderBottomWidth: 1,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  filterLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  filterChips: {
+    gap: 8,
+    alignItems: 'center',
+  },
+  filterChip: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  filterChipText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
   list: {
     flex: 1,
