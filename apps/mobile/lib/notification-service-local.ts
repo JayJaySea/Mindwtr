@@ -57,7 +57,6 @@ type LocalAlarmConfig = {
   message: string;
   fireAt: Date;
   repeatInterval?: 'daily' | 'weekly';
-  hasButtons?: boolean;
   data?: Record<string, string>;
 };
 
@@ -66,7 +65,7 @@ type NativeEmitterSubscription = {
 };
 
 const LOCAL_ALARM_MAP_KEY = 'mindwtr:local:alarms:v1';
-const LOCAL_ALARM_CHANNEL = 'mindwtr_reminders';
+const LOCAL_ALARM_CHANNEL = 'mindwtr_reminders_v2';
 const LOCAL_NOTIFICATION_COLOR = '#3b82f6';
 const LOCAL_SMALL_ICON = 'ic_launcher';
 const LOCAL_DIGEST_MORNING_KEY = 'digest:morning';
@@ -328,7 +327,6 @@ function buildAlarmConfigSignature(config: LocalAlarmConfig): string {
     message: config.message,
     fireAt: config.fireAt.toISOString(),
     repeatInterval: config.repeatInterval ?? 'once',
-    hasButtons: config.hasButtons === true,
     data: config.data ?? {},
   });
 }
@@ -373,12 +371,17 @@ async function scheduleAlarmForKey(api: AlarmNotificationsApi, key: string, conf
     title: config.title,
     message: config.message,
     channel: LOCAL_ALARM_CHANNEL,
+    auto_cancel: true,
     small_icon: LOCAL_SMALL_ICON,
     color: LOCAL_NOTIFICATION_COLOR,
+    has_button: false,
+    loop_sound: false,
+    play_sound: true,
     schedule_type: config.repeatInterval ? 'repeat' : 'once',
     repeat_interval: config.repeatInterval ?? 'hourly',
     interval_value: 1,
-    has_button: config.hasButtons === true,
+    use_big_text: true,
+    vibrate: false,
     data: {
       ...(config.data ?? {}),
       alarmKey: key,
@@ -497,9 +500,8 @@ async function runRescheduleCycle(api: AlarmNotificationsApi): Promise<void> {
     activeKeys.add(key);
     await scheduleAlarmForKey(api, key, {
       title: task.title,
-      message: task.description || tr['digest.morningBody'],
+      message: task.description || '',
       fireAt: next,
-      hasButtons: true,
       data: {
         kind: 'task-reminder',
         taskId: task.id,
@@ -605,11 +607,16 @@ export async function sendLocalMobileNotification(
       title: trimmedTitle,
       message: String(message || '').trim(),
       channel: LOCAL_ALARM_CHANNEL,
+      auto_cancel: true,
       small_icon: LOCAL_SMALL_ICON,
       color: LOCAL_NOTIFICATION_COLOR,
       fire_date: api.parseDate(new Date(Date.now() + 2000)),
+      has_button: false,
+      loop_sound: false,
+      play_sound: true,
       schedule_type: 'once',
-      has_button: true,
+      use_big_text: true,
+      vibrate: false,
       data: {
         kind: 'pomodoro',
         ...(data ?? {}),

@@ -4,22 +4,30 @@ const {
   mockAsyncStorageGetItem,
   mockAsyncStorageSetItem,
   mockStoreSubscribe,
+  mockStoreState,
   mockAlarmDeleteAlarm,
   mockAlarmDeleteRepeatingAlarm,
   mockAlarmRemoveAllFiredNotifications,
   mockAlarmRemoveFiredNotification,
   mockAlarmScheduleAlarm,
+  mockGetNextScheduledAt,
   mockPermissionsAndroidCheck,
   mockPermissionsAndroidRequest,
 } = vi.hoisted(() => ({
   mockAsyncStorageGetItem: vi.fn(),
   mockAsyncStorageSetItem: vi.fn(),
   mockStoreSubscribe: vi.fn(() => () => undefined),
+  mockStoreState: {
+    settings: {},
+    tasks: [],
+    projects: [],
+  },
   mockAlarmDeleteAlarm: vi.fn(),
   mockAlarmDeleteRepeatingAlarm: vi.fn(),
   mockAlarmRemoveAllFiredNotifications: vi.fn(),
   mockAlarmRemoveFiredNotification: vi.fn(),
   mockAlarmScheduleAlarm: vi.fn(async () => ({ id: 99 })),
+  mockGetNextScheduledAt: vi.fn(() => null),
   mockPermissionsAndroidCheck: vi.fn(async () => true),
   mockPermissionsAndroidRequest: vi.fn(async () => 'granted'),
 }));
@@ -62,7 +70,7 @@ vi.mock('react-native-alarm-notification', () => ({
 }));
 
 vi.mock('@mindwtr/core', () => ({
-  getNextScheduledAt: vi.fn(() => null),
+  getNextScheduledAt: mockGetNextScheduledAt,
   getSystemDefaultLanguage: vi.fn(() => 'en'),
   getTranslations: vi.fn(async () => ({
     'digest.morningTitle': 'Morning',
@@ -85,7 +93,7 @@ vi.mock('@mindwtr/core', () => ({
   }),
   safeParseDate: vi.fn((value?: string) => (value ? new Date(value) : null)),
   useTaskStore: {
-    getState: () => ({ settings: {}, tasks: [], projects: [] }),
+    getState: () => mockStoreState,
     subscribe: mockStoreSubscribe,
   },
 }));
@@ -106,12 +114,17 @@ describe('notification-service-local', () => {
     mockAsyncStorageGetItem.mockReset();
     mockAsyncStorageSetItem.mockReset();
     mockStoreSubscribe.mockClear();
+    mockStoreState.settings = {};
+    mockStoreState.tasks = [];
+    mockStoreState.projects = [];
     mockAlarmDeleteAlarm.mockReset();
     mockAlarmDeleteRepeatingAlarm.mockReset();
     mockAlarmRemoveAllFiredNotifications.mockReset();
     mockAlarmRemoveFiredNotification.mockReset();
     mockAlarmScheduleAlarm.mockReset();
     mockAlarmScheduleAlarm.mockResolvedValue({ id: 99 });
+    mockGetNextScheduledAt.mockReset();
+    mockGetNextScheduledAt.mockReturnValue(null);
     mockPermissionsAndroidCheck.mockReset();
     mockPermissionsAndroidRequest.mockReset();
     mockPermissionsAndroidCheck.mockResolvedValue(true);
@@ -161,5 +174,32 @@ describe('notification-service-local', () => {
     expect(mockAlarmRemoveAllFiredNotifications).toHaveBeenCalledTimes(1);
     expect(__localNotificationTestUtils.getAlarmMapSnapshot().size).toBe(0);
     expect(mockAsyncStorageSetItem).toHaveBeenCalledWith('mindwtr:local:alarms:v1', '{}');
+  });
+
+  it('schedules task reminders as normal notification-style alerts', async () => {
+    mockStoreState.tasks = [
+      {
+        id: 'task-1',
+        title: 'Pay rent',
+        description: '',
+      },
+    ];
+    mockGetNextScheduledAt.mockReturnValue(new Date('2026-03-17T09:30:00.000Z'));
+
+    await startLocalMobileNotifications();
+
+    expect(mockAlarmScheduleAlarm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        auto_cancel: true,
+        channel: 'mindwtr_reminders_v2',
+        has_button: false,
+        loop_sound: false,
+        message: '',
+        play_sound: true,
+        title: 'Pay rent',
+        use_big_text: true,
+        vibrate: false,
+      })
+    );
   });
 });
