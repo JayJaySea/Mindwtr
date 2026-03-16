@@ -28,6 +28,7 @@ export function MobileAreaSwitcher() {
     if (resolvedAreaFilter === AREA_FILTER_NONE) return t('projects.noArea');
     return areaById.get(resolvedAreaFilter)?.name ?? t('projects.allAreas');
   }, [areaById, resolvedAreaFilter, t]);
+  const isDefaultScope = resolvedAreaFilter === AREA_FILTER_ALL;
 
   const options = useMemo(() => ([
     { id: AREA_FILTER_ALL, label: t('projects.allAreas') },
@@ -42,17 +43,26 @@ export function MobileAreaSwitcher() {
 
   return (
     <>
-      <TouchableOpacity
+      <Pressable
         accessibilityLabel={`${t('projects.areaFilter')}: ${currentLabel}`}
         accessibilityRole="button"
         onPress={() => setVisible(true)}
-        style={[styles.trigger, { backgroundColor: tc.filterBg, borderColor: tc.border }]}
+        style={({ pressed }) => [
+          styles.trigger,
+          pressed ? styles.triggerPressed : null,
+        ]}
       >
-        <Text numberOfLines={1} style={[styles.triggerText, { color: tc.tint }]}>
+        <Text
+          numberOfLines={1}
+          style={[
+            styles.triggerText,
+            { color: isDefaultScope ? tc.secondaryText : tc.tint },
+          ]}
+        >
           {currentLabel}
         </Text>
-        <ChevronDown color={tc.tint} size={14} />
-      </TouchableOpacity>
+        <ChevronDown color={isDefaultScope ? tc.secondaryText : tc.tint} size={13} strokeWidth={2.1} />
+      </Pressable>
 
       <Modal
         animationType="fade"
@@ -123,20 +133,21 @@ export function MobileAreaSwitcher() {
 
 const styles = StyleSheet.create({
   trigger: {
-    maxWidth: 144,
-    minHeight: 34,
-    paddingLeft: 12,
-    paddingRight: 10,
-    borderRadius: 12,
-    borderWidth: 1,
+    maxWidth: 136,
+    minHeight: 28,
+    paddingHorizontal: 2,
+    paddingVertical: 2,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 4,
+  },
+  triggerPressed: {
+    opacity: 0.72,
   },
   triggerText: {
     flexShrink: 1,
-    fontSize: 13,
-    fontWeight: '600',
+    fontSize: 12,
+    fontWeight: '500',
   },
   modalRoot: {
     flex: 1,
