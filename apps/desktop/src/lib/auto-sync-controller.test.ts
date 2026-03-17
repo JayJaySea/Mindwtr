@@ -6,7 +6,7 @@ const createManualScheduler = (startMs = 0) => {
     let nextId = 1;
     const timers = new Map<number, { runAt: number; callback: () => void }>();
 
-    const setTimer: typeof setTimeout = ((callback: TimerHandler, delay?: number) => {
+    const setTimer = ((callback: TimerHandler, delay?: number) => {
         const id = nextId;
         nextId += 1;
         timers.set(id, {
@@ -18,11 +18,11 @@ const createManualScheduler = (startMs = 0) => {
             },
         });
         return id as unknown as ReturnType<typeof setTimeout>;
-    }) as typeof setTimeout;
+    }) as unknown as typeof setTimeout;
 
-    const clearTimer: typeof clearTimeout = ((timerId: ReturnType<typeof setTimeout>) => {
+    const clearTimer = ((timerId: ReturnType<typeof setTimeout>) => {
         timers.delete(Number(timerId));
-    }) as typeof clearTimeout;
+    }) as unknown as typeof clearTimeout;
 
     const advanceBy = async (ms: number) => {
         nowMs += ms;
