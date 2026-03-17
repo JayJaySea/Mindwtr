@@ -169,6 +169,7 @@ export function Layout({ children, currentView, onViewChange }: LayoutProps) {
     const fullWidthViews = new Set([
         'board',
         'projects',
+        'contexts',
         'obsidian',
         'settings',
     ]);
