@@ -1,0 +1,164 @@
+name: Update Flathub
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish to Flathub (e.g. v0.7.5)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: update-flathub-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  open-flathub-pr:
+    name: Open Flathub PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: ${{ github.event_name != 'release' || !github.event.release.prerelease }}
+
+    steps:
+      - name: Checkout Mindwtr
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release version
+        id: version
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          GITHUB_EVENT_INPUTS_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          scripts/ci/resolve-release-version.sh "$INPUT_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Require stable release tag
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if [[ "$TAG" == *-* ]]; then
+            echo "Stable Flathub automation skips prerelease tags: $TAG" >&2
+            exit 1
+          fi
+
+      - name: Verify Flathub token
+        env:
+          FLATHUB_REPO_TOKEN: ${{ secrets.FLATHUB_REPO_TOKEN }}
+        run: |
+          if [ -z "${FLATHUB_REPO_TOKEN:-}" ]; then
+            echo "Missing FLATHUB_REPO_TOKEN secret." >&2
+            exit 1
+          fi
+
+      - name: Checkout Flathub repo
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: flathub/tech.dongdongbh.mindwtr
+          ref: master
+          token: ${{ secrets.FLATHUB_REPO_TOKEN }}
+          path: flathub
+
+      - name: Checkout flatpak-builder-tools
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: flatpak/flatpak-builder-tools
+          ref: 37eb3e5bdc5a14d13ee27b85265aae2c5e9a60c2
+          path: flatpak-builder-tools
+
+      - name: Install Flatpak generator dependencies
+        run: |
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user aiohttp tomlkit pipx
+          python3 -m pipx install "$GITHUB_WORKSPACE/flatpak-builder-tools/node"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Update Flathub checkout
+        run: |
+          scripts/ci/update-flathub-checkout.sh \
+            "${{ steps.version.outputs.tag }}" \
+            "$GITHUB_WORKSPACE/flathub" \
+            "$GITHUB_WORKSPACE/flatpak-builder-tools"
+
+      - name: Create or update Flathub PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.FLATHUB_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          BRANCH="automation/update-v${VERSION}"
+          REPO="flathub/tech.dongdongbh.mindwtr"
+
+          cd flathub
+
+          if git diff --quiet; then
+            echo "No Flathub changes to propose."
+            echo "url=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config --local user.name "GitHub Actions"
+          git config --local user.email "actions@github.com"
+          git checkout -B "$BRANCH"
+          git add \
+            tech.dongdongbh.mindwtr.yml \
+            tech.dongdongbh.mindwtr.node-sources.json \
+            tech.dongdongbh.mindwtr.cargo-sources.json
+
+          if git diff --cached --quiet; then
+            echo "No staged Flathub changes to commit."
+            echo "url=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "Update to ${TAG}"
+          git push --force-with-lease origin "$BRANCH"
+
+          existing_pr_url="$(gh pr list \
+            --repo "$REPO" \
+            --head "$BRANCH" \
+            --base master \
+            --state open \
+            --json url \
+            --jq '.[0].url // ""')"
+
+          if [ -n "$existing_pr_url" ]; then
+            echo "Updated existing PR: $existing_pr_url"
+            echo "url=${existing_pr_url}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          pr_url="$(gh pr create \
+            --repo "$REPO" \
+            --base master \
+            --head "$BRANCH" \
+            --title "Update to ${TAG}" \
+            --body "Automated update from ${GITHUB_REPOSITORY} release ${TAG}.
+
+- Updates the pinned upstream commit
+- Regenerates tech.dongdongbh.mindwtr.cargo-sources.json
+- Regenerates tech.dongdongbh.mindwtr.node-sources.json")"
+
+          echo "url=${pr_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Write summary
+        if: always()
+        run: |
+          echo "### Flathub Update" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tag: ${{ steps.version.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ steps.pr.outputs.url }}" ]; then
+            echo "- PR: ${{ steps.pr.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- PR: no changes were needed" >> "$GITHUB_STEP_SUMMARY"
+          fi
