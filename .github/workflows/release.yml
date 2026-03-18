@@ -50,6 +50,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_update_flathub:
+        description: 'Run Flathub update job'
+        required: false
+        type: boolean
+        default: false
       run_bump_official_cask:
         description: 'Run official Homebrew cask bump job'
         required: false
@@ -501,6 +506,15 @@ jobs:
           fi
           git commit -m "update: Mindwtr ${{ steps.version.outputs.version }}"
           git push
+
+  update-flathub:
+    needs: release
+    name: Update Flathub
+    if: ${{ always() && ((startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' && needs.release.result == 'success') || (github.event_name == 'workflow_dispatch' && inputs.run_update_flathub && (needs.release.result == 'success' || needs.release.result == 'skipped'))) }}
+    uses: ./.github/workflows/update-flathub.yml
+    with:
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    secrets: inherit
 
   bump-official-cask:
     needs: release

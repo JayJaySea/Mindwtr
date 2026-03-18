@@ -1,14 +1,15 @@
 name: Update Flathub
 
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
+  workflow_call:
     inputs:
       tag:
         description: 'Release tag to publish to Flathub (e.g. v0.7.5)'
         required: true
         type: string
+    secrets:
+      FLATHUB_REPO_TOKEN:
+        required: true
 
 permissions:
   contents: read
@@ -17,7 +18,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 concurrency:
-  group: update-flathub-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.event.release.tag_name || github.ref }}
+  group: update-flathub-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
@@ -25,7 +26,6 @@ jobs:
     name: Open Flathub PR
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    if: ${{ github.event_name != 'release' || !github.event.release.prerelease }}
 
     steps:
       - name: Checkout Mindwtr
@@ -36,8 +36,7 @@ jobs:
       - name: Resolve release version
         id: version
         env:
-          INPUT_TAG: ${{ github.event.inputs.tag }}
-          GITHUB_EVENT_INPUTS_TAG: ${{ github.event.inputs.tag }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           scripts/ci/resolve-release-version.sh "$INPUT_TAG" >> "$GITHUB_OUTPUT"
 
@@ -138,16 +137,14 @@ jobs:
             exit 0
           fi
 
+          pr_body=$'Automated update from '"${GITHUB_REPOSITORY}"$' release '"${TAG}"$'.\n\n- Updates the pinned upstream commit\n- Regenerates tech.dongdongbh.mindwtr.cargo-sources.json\n- Regenerates tech.dongdongbh.mindwtr.node-sources.json'
+
           pr_url="$(gh pr create \
             --repo "$REPO" \
             --base master \
             --head "$BRANCH" \
             --title "Update to ${TAG}" \
-            --body "Automated update from ${GITHUB_REPOSITORY} release ${TAG}.
-
-- Updates the pinned upstream commit
-- Regenerates tech.dongdongbh.mindwtr.cargo-sources.json
-- Regenerates tech.dongdongbh.mindwtr.node-sources.json")"
+            --body "$pr_body")"
 
           echo "url=${pr_url}" >> "$GITHUB_OUTPUT"
 
