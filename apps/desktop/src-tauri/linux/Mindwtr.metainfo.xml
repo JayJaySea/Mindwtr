@@ -13,8 +13,26 @@
     <binary>mindwtr</binary>
   </provides>
   <description>
-    <p>Mindwtr is a local-first task manager built around Getting Things Done. It helps you capture tasks quickly, organize projects and areas, and review your work without locking your data into a cloud service.</p>
-    <p>The desktop app includes recurring tasks, calendar views, attachments, local sync folders, and optional Dropbox, WebDAV, or self-hosted cloud sync. Your data stays readable on disk and works offline by default.</p>
+    <p>A local-first GTD task manager, Mindwtr helps you capture tasks quickly, organize projects and areas, and stay on top of your commitments without locking your data into a proprietary cloud.</p>
+    <p>✨ Core Features:</p>
+    <ul>
+      <li>Fast inbox capture for tasks, notes, and ideas</li>
+      <li>Projects, areas, sections, tags, and contexts to organize your work</li>
+      <li>Daily and weekly review workflows to keep your system current</li>
+      <li>Recurring tasks, due dates, start dates, and review dates</li>
+      <li>List, board, and calendar views for different planning styles</li>
+      <li>Attachments and Markdown notes for richer task details</li>
+      <li>Focus flags, reminders, and progress tracking for active work</li>
+      <li>Offline-first storage with readable local data files</li>
+    </ul>
+    <p>☁️ Sync and Portability:</p>
+    <ul>
+      <li>Local folder sync for simple backups and device transfers</li>
+      <li>WebDAV sync for private servers and NAS setups</li>
+      <li>Optional Dropbox and self-hosted cloud sync</li>
+      <li>Cross-platform desktop and mobile apps built around the same GTD model</li>
+      <li>Your data stays accessible without requiring an account</li>
+    </ul>
   </description>
   <screenshots>
     <screenshot type="default">
@@ -39,12 +57,34 @@
     <category>Utility</category>
   </categories>
   <url type="homepage">https://github.com/dongdongbh/Mindwtr</url>
+  <url type="donation">https://ko-fi.com/dongdongbh</url>
   <url type="bugtracker">https://github.com/dongdongbh/Mindwtr/issues</url>
   <url type="vcs-browser">https://github.com/dongdongbh/Mindwtr</url>
   <releases>
     <release version="0.7.4" date="2026-03-16">
-      <description>
-        <p>Improved desktop sync, attachment handling, and general bug fixes.</p>
+      <url type="details">https://github.com/dongdongbh/Mindwtr/releases/tag/v0.7.4</url>
+      <description translate="no">
+        <p>Mindwtr 0.7.4 adds Apple-platform iCloud sync, a desktop Obsidian workspace, stronger cross-device sync reliability, and faster mobile triage tools.</p>
+        <ul>
+          <li>Added native iCloud sync support on Apple platforms.</li>
+          <li>Added Obsidian vault integration on desktop with a dedicated workspace that stays hidden until enabled.</li>
+          <li>Improved sync reliability with safer merge handling, bounded cloud requests, and clearer conflict diagnostics.</li>
+          <li>Added a global mobile area switcher, time estimate filters, and daily-review focus toggles.</li>
+          <li>Improved desktop layouts, sync accessibility, and release tooling for the Node 24 transition.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.7.3" date="2026-03-05">
+      <url type="details">https://github.com/dongdongbh/Mindwtr/releases/tag/v0.7.3</url>
+      <description translate="no">
+        <p>Mindwtr 0.7.3 focused on more consistent sync behavior, safer local persistence, more workflow customization, and better mobile reminder handling.</p>
+        <ul>
+          <li>Unified desktop and mobile sync orchestration to reduce stale queued-sync edge cases.</li>
+          <li>Added date and time format overrides and opt-in inbox processing settings on desktop.</li>
+          <li>Added a visible mobile sync activity indicator and improved WebDAV rate-limit handling.</li>
+          <li>Hardened local storage, search, attachment validation, and self-hosted cloud merge behavior.</li>
+          <li>Improved notification reliability, task editing flows, and calendar permission handling.</li>
+        </ul>
       </description>
     </release>
   </releases>
