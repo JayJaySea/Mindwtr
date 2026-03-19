@@ -2,6 +2,52 @@
 
 All notable changes to Mindwtr will be documented in this file.
 
+## [0.7.4] - 2026-03-16
+
+### Added
+- **Apple Sync**: Added native iCloud sync on supported Apple mobile builds.
+- **Desktop Obsidian**: Added an Obsidian vault workspace for reviewing imported tasks.
+- **Mobile Triage**: Added a global area switcher, time estimate filters, and daily-review focus toggles.
+
+### Changed
+- **Sync Reliability**: Hardened merge handling, missing-file attachment status tracking, and self-hosted cloud request limits/timeouts.
+- **Desktop UX**: Improved Projects, Contexts, and Obsidian layouts plus sync-status accessibility.
+- **Release Tooling**: Updated release workflows, documentation, and Node 24 compatibility work.
+
+### Notes
+- Intermediate patch releases in this line are documented in [docs/release-notes](docs/release-notes/README.md): `0.7.1` to `0.7.3`.
+
+## [0.7.0] - 2026-02-28
+
+### Changed
+- **Attachments & Sync**: Fixed stale attachment-reference edge cases and made attachment validation/unrecoverable handling safer.
+- **Conflict Handling**: Refined delete-vs-edit merge behavior so newer edits survive while ties remain deterministic.
+- **CI & Release**: Hardened artifact validation and release automation defaults.
+
+### Notes
+- See [docs/release-notes](docs/release-notes/README.md) for the full `0.7.x` release line.
+
+## [0.6.0] - 2026-01-25
+
+### Added
+- **Desktop UX**: Added toast notifications, clearer loading/disabled states, and unsaved-edit warnings.
+- **Docs**: Added architecture, CLI/API, and MCP documentation coverage.
+
+### Changed
+- **Sync Safety**: Improved conflict visibility, timestamp normalization logging, and sync write coalescing safety.
+- **Core Performance**: Added paginated SQLite loads and safer FTS rebuild locking.
+- **Cloud**: Improved server logging and cache pruning.
+
+### Notes
+- Intermediate patch releases in this line are documented in [docs/release-notes](docs/release-notes/README.md): `0.6.1` to `0.6.22`.
+
+## [0.5.7] - 2026-01-21
+
+### Added
+- **Project Sections**: Added section headers, notes, and drag-and-drop ordering inside projects.
+- **Mobile Parity**: Added section selection and section-aware grouping on mobile.
+- **Core Storage**: Added section sync/storage support and related tests.
+
 ## [0.5.6] - 2026-01-18
 
 ### Added

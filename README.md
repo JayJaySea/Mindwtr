@@ -336,9 +336,8 @@ You can help in several ways:
 
 ## Roadmap
 
-- 📦 Add to Flathub
 - 🤖 Add to F-Droid
-- ☁️ Native iCloud/CloudKit sync (Apple ecosystem)
+- ☁️ Expand native iCloud/CloudKit sync to macOS desktop
 - 🗣️ iOS Reminders Inbox import (Siri capture -> Mindwtr Inbox)
 - ✉️ Email to Inbox
 
