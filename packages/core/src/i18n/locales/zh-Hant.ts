@@ -36,6 +36,7 @@ export const zhHant: Record<string, string> = {
         'quickAdd.audioPermissionBody': '請允許麥克風權限以錄製語音捕捉。',
         'quickAdd.audioErrorTitle': '錄音失敗',
         'quickAdd.audioErrorBody': '無法錄製語音，請重試。',
+        'quickAdd.invalidDateCommand': '無效的日期命令',
         'checklist.progress': '清單進度',
         'keybindings.helpTitle': '快捷鍵',
         'keybindings.helpSubtitle': '按 Esc 關閉',

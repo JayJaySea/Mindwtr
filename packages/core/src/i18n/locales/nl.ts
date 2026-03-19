@@ -32,6 +32,7 @@ export const nlOverrides: Record<string, string> = {
         'quickAdd.audioStop': 'Stop',
         'quickAdd.audioRecording': 'Opnemen...',
         'quickAdd.audioNoteTitle': 'Spraaknotitie',
+        'quickAdd.invalidDateCommand': 'Ongeldige datumopdracht',
         'checklist.progress': 'Checklist-voortgang',
         'tab.inbox': 'Inbox',
         'tab.next': 'Focus',

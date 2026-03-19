@@ -36,6 +36,7 @@ export const ptOverrides: Record<string, string> = {
         'quickAdd.audioPermissionBody': 'Habilite o acesso ao microfone para gravar capturas de áudio.',
         'quickAdd.audioErrorTitle': 'Falha na gravação',
         'quickAdd.audioErrorBody': 'Não foi possível gravar áudio. Por favor, tente novamente.',
+        'quickAdd.invalidDateCommand': 'Comando de data inválido',
         'checklist.progress': 'Progresso da lista de verificação',
         'keybindings.helpTitle': 'Atalhos de teclado',
         'keybindings.helpSubtitle': 'Pressione Esc para fechar',

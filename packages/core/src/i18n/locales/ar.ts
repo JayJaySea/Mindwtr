@@ -36,6 +36,7 @@ export const arOverrides: Record<string, string> = {
         'quickAdd.audioPermissionBody': 'تمكين الوصول إلى الميكروفون لتسجيل اللقطات الصوتية.',
         'quickAdd.audioErrorTitle': 'فشل التسجيل',
         'quickAdd.audioErrorBody': 'لم نتمكن من تسجيل الصوت. يرجى المحاولة مرة أخرى.',
+        'quickAdd.invalidDateCommand': 'أمر تاريخ غير صالح',
         'checklist.progress': 'تقدم القائمة المرجعية',
         'keybindings.helpTitle': 'اختصارات لوحة المفاتيح',
         'keybindings.helpSubtitle': 'اضغط على Esc للإغلاق',

@@ -36,6 +36,7 @@ export const trOverrides: Record<string, string> = {
         'quickAdd.audioPermissionBody': 'Ses kayıtlarını kaydetmek için mikrofon erişimini etkinleştirin.',
         'quickAdd.audioErrorTitle': 'Kayıt başarısız oldu',
         'quickAdd.audioErrorBody': 'Ses kaydedemedik. Lütfen tekrar deneyin.',
+        'quickAdd.invalidDateCommand': 'Geçersiz tarih komutu',
         'checklist.progress': 'Kontrol listesi ilerlemesi',
         'keybindings.helpTitle': 'Klavye Kısayolları',
         'keybindings.helpSubtitle': 'Kapatmak için Esc tuşuna basın',

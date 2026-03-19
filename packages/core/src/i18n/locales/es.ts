@@ -36,6 +36,7 @@ export const esOverrides: Record<string, string> = {
         'quickAdd.audioPermissionBody': 'Enable microphone access to record audio captures.',
         'quickAdd.audioErrorTitle': 'Recording failed',
         'quickAdd.audioErrorBody': 'We could not record audio. Please try again.',
+        'quickAdd.invalidDateCommand': 'Comando de fecha no válido',
         'checklist.progress': 'Progreso de la checklist',
         'keybindings.helpTitle': 'Atajos de teclado',
         'keybindings.helpSubtitle': 'Pulsa Esc para cerrar',

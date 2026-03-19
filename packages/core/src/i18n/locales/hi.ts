@@ -36,6 +36,7 @@ export const hiOverrides: Record<string, string> = {
         'quickAdd.audioPermissionBody': 'ऑडियो कैप्चर रिकॉर्ड करने के लिए माइक्रोफ़ोन एक्सेस सक्षम करें।',
         'quickAdd.audioErrorTitle': 'रिकॉर्डिंग विफल रही',
         'quickAdd.audioErrorBody': 'हम ऑडियो रिकॉर्ड नहीं कर सके. कृपया पुन: प्रयास करें।',
+        'quickAdd.invalidDateCommand': 'अमान्य तारीख आदेश',
         'checklist.progress': 'जाँच सूची प्रगति',
         'keybindings.helpTitle': 'कुंजीपटल अल्प मार्ग',
         'keybindings.helpSubtitle': 'बंद करने के लिए Esc दबाएँ',

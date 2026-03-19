@@ -36,6 +36,7 @@ export const zhHans: Record<string, string> = {
         'quickAdd.audioPermissionBody': '请允许麦克风权限以录制语音捕捉。',
         'quickAdd.audioErrorTitle': '录音失败',
         'quickAdd.audioErrorBody': '无法录制语音，请重试。',
+        'quickAdd.invalidDateCommand': '无效的日期命令',
         'checklist.progress': '清单进度',
         'keybindings.helpTitle': '快捷键',
         'keybindings.helpSubtitle': '按 Esc 关闭',

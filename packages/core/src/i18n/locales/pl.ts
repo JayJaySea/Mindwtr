@@ -36,6 +36,7 @@ export const plOverrides: Record<string, string> = {
         'quickAdd.audioPermissionBody': 'Włącz dostęp do mikrofonu, aby nagrywać notatki głosowe.',
         'quickAdd.audioErrorTitle': 'Nagrywanie nie powiodło się',
         'quickAdd.audioErrorBody': 'Nie udało się nagrać dźwięku. Spróbuj ponownie.',
+        'quickAdd.invalidDateCommand': 'Nieprawidłowe polecenie daty',
         'checklist.progress': 'Postęp listy kontrolnej',
         'keybindings.helpTitle': 'Skróty klawiaturowe',
         'keybindings.helpSubtitle': 'Naciśnij Esc, aby zamknąć',

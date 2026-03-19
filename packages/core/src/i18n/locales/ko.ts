@@ -36,6 +36,7 @@ export const koOverrides: Record<string, string> = {
         'quickAdd.audioPermissionBody': '오디오 캡처를 녹음하려면 마이크 액세스를 활성화하세요.',
         'quickAdd.audioErrorTitle': '녹음 실패',
         'quickAdd.audioErrorBody': '오디오를 녹음할 수 없습니다. 다시 시도해 주세요.',
+        'quickAdd.invalidDateCommand': '잘못된 날짜 명령어',
         'checklist.progress': '체크리스트 진행상황',
         'keybindings.helpTitle': '키보드 단축키',
         'keybindings.helpSubtitle': '닫으려면 Esc를 누르세요.',

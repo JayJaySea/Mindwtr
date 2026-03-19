@@ -41,6 +41,7 @@ export const deOverrides: Record<string, string> = {
         'quickAdd.audioPermissionBody': 'Mikrofon-Zugriff erlauben, um Sprachnotizen aufzunehmen.',
         'quickAdd.audioErrorTitle': 'Aufnahme fehlgeschlagen',
         'quickAdd.audioErrorBody': 'Wir konnten nichts aufnehmen. Bitte versuchen Sie es nochmals.',
+        'quickAdd.invalidDateCommand': 'Ungültiger Datumsbefehl',
         
          // Checklist
         'checklist.progress': 'Fortschritt der Checkliste',

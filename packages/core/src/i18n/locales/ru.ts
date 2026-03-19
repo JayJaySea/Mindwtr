@@ -36,6 +36,7 @@ export const ruOverrides: Record<string, string> = {
         'quickAdd.audioPermissionBody': 'Включите доступ к микрофону для записи аудиозаписей.',
         'quickAdd.audioErrorTitle': 'Запись не удалась',
         'quickAdd.audioErrorBody': 'Нам не удалось записать звук. Пожалуйста, попробуйте еще раз.',
+        'quickAdd.invalidDateCommand': 'Недопустимая команда даты',
         'checklist.progress': 'Контрольный список прогресса',
         'keybindings.helpTitle': 'Сочетания клавиш',
         'keybindings.helpSubtitle': 'Нажмите Esc, чтобы закрыть',

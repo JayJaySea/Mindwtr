@@ -36,6 +36,7 @@ export const itOverrides: Record<string, string> = {
         'quickAdd.audioPermissionBody': 'Abilita l\'accesso al microfono per registrare le acquisizioni audio.',
         'quickAdd.audioErrorTitle': 'La registrazione non è riuscita',
         'quickAdd.audioErrorBody': 'Non è stato possibile registrare l\'audio. Per favore riprova.',
+        'quickAdd.invalidDateCommand': 'Comando data non valido',
         'checklist.progress': 'Progresso della lista di controllo',
         'keybindings.helpTitle': 'Scorciatoie da tastiera',
         'keybindings.helpSubtitle': 'Premi Esc per chiudere',

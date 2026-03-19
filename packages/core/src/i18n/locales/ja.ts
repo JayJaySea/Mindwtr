@@ -36,6 +36,7 @@ export const jaOverrides: Record<string, string> = {
         'quickAdd.audioPermissionBody': 'オーディオ キャプチャを録音するためのマイク アクセスを有効にします。',
         'quickAdd.audioErrorTitle': '録音に失敗しました',
         'quickAdd.audioErrorBody': '音声を録音できませんでした。もう一度試してください。',
+        'quickAdd.invalidDateCommand': '無効な日付コマンド',
         'checklist.progress': 'チェックリストの進捗状況',
         'keybindings.helpTitle': 'キーボードショートカット',
         'keybindings.helpSubtitle': 'Escを押して閉じます',
