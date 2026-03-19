@@ -1060,6 +1060,7 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
     const stats = createEmptyEntityStats(local.length, incoming.length);
     const merged: T[] = [];
     let invalidDeletedAtWarnings = 0;
+    const maxAllowedMergeTime = Date.now();
     const normalizeTimestamps = (item: T): T => {
         if (!item.createdAt) return item;
         const createdTime = new Date(item.createdAt).getTime();
@@ -1105,10 +1106,6 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
 
         const normalizedLocalItem = normalizeTimestamps(localItem);
         const normalizedIncomingItem = normalizeTimestamps(incomingItem);
-        // Reject timestamps in the future per merge decision so long-running
-        // syncs don't keep using a stale captured "now" value.
-        const maxAllowedMergeTime = Date.now();
-
         const safeLocalTime = parseMergeTimestamp(normalizedLocalItem.updatedAt, maxAllowedMergeTime);
         const safeIncomingTime = parseMergeTimestamp(normalizedIncomingItem.updatedAt, maxAllowedMergeTime);
         const localRev = typeof normalizedLocalItem.rev === 'number' && Number.isFinite(normalizedLocalItem.rev)
@@ -1498,10 +1495,10 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
     let localData = purgeExpiredTombstones(localNormalized, nowIso, io.tombstoneRetentionDays).data;
 
     if (hasPendingRemoteWriteFlag(localData)) {
+        const recoveredLocalData = clearPendingRemoteWriteFlag(localData);
         io.onStep?.('write-remote');
         await yieldToUi();
-        await io.writeRemote(localData);
-        const recoveredLocalData = clearPendingRemoteWriteFlag(localData);
+        await io.writeRemote(recoveredLocalData);
         if (recoveredLocalData !== localData) {
             io.onStep?.('write-local');
             await yieldToUi();
@@ -1612,16 +1609,17 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
     }
 
     const finalDataWithPendingRemoteWrite = withPendingRemoteWriteFlag(finalData, nowIso);
+    const persistedFinalData = clearPendingRemoteWriteFlag(finalDataWithPendingRemoteWrite);
     io.onStep?.('write-local');
     await yieldToUi();
     await io.writeLocal(finalDataWithPendingRemoteWrite);
 
     // Write local first so a local persistence failure cannot leave remote ahead.
+    // The pending flag is crash-recovery state for the local device only.
     io.onStep?.('write-remote');
     await yieldToUi();
-    await io.writeRemote(finalDataWithPendingRemoteWrite);
+    await io.writeRemote(persistedFinalData);
 
-    const persistedFinalData = clearPendingRemoteWriteFlag(finalDataWithPendingRemoteWrite);
     if (persistedFinalData !== finalDataWithPendingRemoteWrite) {
         await yieldToUi();
         await io.writeLocal(persistedFinalData);

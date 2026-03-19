@@ -857,6 +857,26 @@ describe('Sync Logic', () => {
             }
         });
 
+        it('captures merge time once per entity collection', () => {
+            const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(new Date('2026-01-01T00:00:00.000Z').getTime());
+            try {
+                const local = mockAppData([
+                    createMockTask('1', '2026-01-01T00:00:00.000Z'),
+                    createMockTask('2', '2026-01-01T00:00:00.000Z'),
+                ]);
+                const incoming = mockAppData([
+                    createMockTask('1', '2099-01-01T00:00:00.000Z'),
+                    createMockTask('2', '2099-01-02T00:00:00.000Z'),
+                ]);
+
+                mergeAppDataWithStats(local, incoming);
+
+                expect(nowSpy).toHaveBeenCalledTimes(4);
+            } finally {
+                nowSpy.mockRestore();
+            }
+        });
+
         it('prefers newer item when timestamps are within skew threshold', () => {
             const local = mockAppData([createMockTask('1', '2023-01-02T00:00:00.000Z')]);
             const incoming = mockAppData([createMockTask('1', '2023-01-02T00:04:00.000Z')]);
@@ -1790,7 +1810,7 @@ describe('Sync Logic', () => {
 
             expect(localWrites).toHaveLength(2);
             expect(localWrites[0].settings.pendingRemoteWriteAt).toBe('2026-01-01T00:00:00.000Z');
-            expect(remoteWriteData?.settings.pendingRemoteWriteAt).toBe('2026-01-01T00:00:00.000Z');
+            expect(remoteWriteData?.settings.pendingRemoteWriteAt).toBeUndefined();
             expect(localWrites[1].settings.pendingRemoteWriteAt).toBeUndefined();
             expect(result.data.settings.pendingRemoteWriteAt).toBeUndefined();
         });
@@ -1818,7 +1838,7 @@ describe('Sync Logic', () => {
                 now: () => '2026-01-01T00:00:00.000Z',
             });
 
-            const retryWriteIndex = sequence.indexOf('write-remote:pending');
+            const retryWriteIndex = sequence.indexOf('write-remote:clear');
             const clearMarkerIndex = sequence.indexOf('write-local:clear');
             const readRemoteIndex = sequence.indexOf('read-remote');
             expect(retryWriteIndex).toBeGreaterThan(-1);
