@@ -6,6 +6,7 @@ const calendarHookTracker = {
     mounts: 0,
     unmounts: 0,
 };
+let calendarHookUseEffect: typeof import('react').useEffect | null = null;
 
 vi.mock('../../contexts/language-context', () => ({
     useLanguage: () => ({
@@ -235,40 +236,50 @@ vi.mock('./settings/useObsidianSettings', () => ({
     }),
 }));
 
-vi.mock('./settings/useCalendarSettings', async () => {
-    const React = await import('react');
-    return {
-        useCalendarSettings: () => {
-            React.useEffect(() => {
-                calendarHookTracker.mounts += 1;
-                return () => {
-                    calendarHookTracker.unmounts += 1;
-                };
-            }, []);
+vi.mock('./settings/useCalendarSettings', () => ({
+    useCalendarSettings: () => {
+        if (!calendarHookUseEffect) {
+            throw new Error('calendar hook useEffect not initialized');
+        }
 
-            return {
-                externalCalendars: [],
-                newCalendarName: '',
-                newCalendarUrl: '',
-                calendarError: null,
-                systemCalendarPermission: 'unsupported',
-                setNewCalendarName: vi.fn(),
-                setNewCalendarUrl: vi.fn(),
-                handleAddCalendar: vi.fn(),
-                handleToggleCalendar: vi.fn(),
-                handleRemoveCalendar: vi.fn(),
-                handleRequestSystemCalendarPermission: vi.fn(),
+        calendarHookUseEffect(() => {
+            calendarHookTracker.mounts += 1;
+            return () => {
+                calendarHookTracker.unmounts += 1;
             };
-        },
-    };
-});
+        }, []);
+
+        return {
+            externalCalendars: [],
+            newCalendarName: '',
+            newCalendarUrl: '',
+            calendarError: null,
+            systemCalendarPermission: 'unsupported',
+            setNewCalendarName: vi.fn(),
+            setNewCalendarUrl: vi.fn(),
+            handleAddCalendar: vi.fn(),
+            handleToggleCalendar: vi.fn(),
+            handleRemoveCalendar: vi.fn(),
+            handleRequestSystemCalendarPermission: vi.fn(),
+        };
+    },
+}));
 
 import { SettingsView } from './SettingsView';
 
 describe('SettingsView', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
         calendarHookTracker.mounts = 0;
         calendarHookTracker.unmounts = 0;
+        calendarHookUseEffect = (await import('react')).useEffect;
+        Object.defineProperty(window, 'requestAnimationFrame', {
+            writable: true,
+            value: (callback: FrameRequestCallback) => window.setTimeout(() => callback(Date.now()), 0),
+        });
+        Object.defineProperty(window, 'cancelAnimationFrame', {
+            writable: true,
+            value: (id: number) => window.clearTimeout(id),
+        });
         Object.defineProperty(window, 'matchMedia', {
             writable: true,
             value: vi.fn().mockImplementation((query: string) => ({

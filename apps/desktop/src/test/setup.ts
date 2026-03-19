@@ -9,6 +9,20 @@ afterEach(() => {
     cleanup();
 });
 
+if (typeof window.requestAnimationFrame !== 'function') {
+    Object.defineProperty(window, 'requestAnimationFrame', {
+        writable: true,
+        value: (callback: FrameRequestCallback) => window.setTimeout(() => callback(Date.now()), 0),
+    });
+}
+
+if (typeof window.cancelAnimationFrame !== 'function') {
+    Object.defineProperty(window, 'cancelAnimationFrame', {
+        writable: true,
+        value: (id: number) => window.clearTimeout(id),
+    });
+}
+
 const localStorageMock = (function () {
     let store: Record<string, string> = {};
     return {
