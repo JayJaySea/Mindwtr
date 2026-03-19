@@ -32,6 +32,10 @@ fi
 
 npx expo prebuild --clean --platform android
 
+if [[ "${FOSS_BUILD}" == "1" ]]; then
+  node scripts/fdroid_patch_android_jvm_targets.js
+fi
+
 python3 - <<'PY'
 from pathlib import Path
 

@@ -36,11 +36,12 @@ const TOOLCHAIN_REPLACEMENTS = new Map([
 ]);
 
 const EXPLICIT_ANDROID_OVERRIDES = [
-  'android/app/build.gradle',
   'node_modules/react-native-safe-area-context/android/build.gradle',
   'node_modules/react-native-screens/android/build.gradle',
   'node_modules/react-native-gesture-handler/android/build.gradle',
 ];
+
+const GENERATED_ANDROID_OVERRIDES = ['android/app/build.gradle'];
 
 const FDROID_JAVA17_MARKER = '// F-Droid: force Java/Kotlin Android modules to target JVM 17.';
 const FDROID_JAVA17_SNIPPET =
@@ -65,17 +66,23 @@ function writeText(relativePath, text) {
 
 function replaceRequired(relativePath, replacements) {
   let text = readText(relativePath);
-  const original = text;
+  let changed = false;
 
   for (const [oldText, newText] of replacements) {
+    if (text.includes(newText)) {
+      continue;
+    }
+    if (!text.includes(oldText)) {
+      throw new Error(`[fdroid] expected patch target not found: ${relativePath}`);
+    }
     text = text.replaceAll(oldText, newText);
+    changed = true;
   }
 
-  if (text === original) {
-    throw new Error(`[fdroid] expected patch target not found: ${relativePath}`);
+  if (changed) {
+    writeText(relativePath, text);
   }
-
-  writeText(relativePath, text);
+  return changed;
 }
 
 function appendJava17Override(relativePath) {
@@ -87,6 +94,13 @@ function appendJava17Override(relativePath) {
   text = text.replace(/\r\n/g, '\n').trimEnd() + `\n\n${FDROID_JAVA17_SNIPPET}`;
   writeText(relativePath, text);
   return true;
+}
+
+function appendJava17OverrideIfExists(relativePath) {
+  if (!fs.existsSync(path.join(mobileRoot, relativePath))) {
+    return false;
+  }
+  return appendJava17Override(relativePath);
 }
 
 function listPackageDirs() {
@@ -150,12 +164,19 @@ function listExpoAndroidModulesWithKotlin() {
 const changed = [];
 
 for (const [relativePath, replacements] of TOOLCHAIN_REPLACEMENTS.entries()) {
-  replaceRequired(relativePath, replacements);
-  changed.push(relativePath);
+  if (replaceRequired(relativePath, replacements)) {
+    changed.push(relativePath);
+  }
 }
 
 for (const relativePath of [...EXPLICIT_ANDROID_OVERRIDES, ...listExpoAndroidModulesWithKotlin()]) {
   if (appendJava17Override(relativePath)) {
+    changed.push(relativePath);
+  }
+}
+
+for (const relativePath of GENERATED_ANDROID_OVERRIDES) {
+  if (appendJava17OverrideIfExists(relativePath)) {
     changed.push(relativePath);
   }
 }
