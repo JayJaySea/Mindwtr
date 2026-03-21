@@ -10,6 +10,7 @@ export * from './sync-orchestrator';
 export * from './sync-service-utils';
 export * from './task-utils';
 export * from './task-token-usage';
+export * from './bulk-task-tokens';
 export * from './contexts';
 export * from './i18n';
 export * from './i18n/i18n-storage';

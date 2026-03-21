@@ -1,5 +1,26 @@
-import { View, Text, ScrollView, Pressable, StyleSheet, TextInput } from 'react-native';
-import { useTaskStore, getUsedTaskTokens, sortTasksBy, matchesHierarchicalToken, type Task, type TaskSortBy, type TaskStatus } from '@mindwtr/core';
+import {
+  View,
+  Text,
+  ScrollView,
+  Pressable,
+  StyleSheet,
+  TextInput,
+  TouchableOpacity,
+  Alert,
+  ActivityIndicator,
+} from 'react-native';
+import {
+  useTaskStore,
+  getUsedTaskTokens,
+  getFrequentTaskTokens,
+  sortTasksBy,
+  matchesHierarchicalToken,
+  buildBulkTaskTokenUpdates,
+  collectBulkTaskTokens,
+  type Task,
+  type TaskSortBy,
+  type TaskStatus,
+} from '@mindwtr/core';
 import { useEffect, useMemo, useState } from 'react';
 import { useLocalSearchParams } from 'expo-router';
 import { useTheme } from '../../contexts/theme-context';
@@ -10,22 +31,41 @@ import { useThemeColors } from '@/hooks/use-theme-colors';
 import { taskMatchesAreaFilter } from '@/lib/area-filter';
 import { openProjectScreen } from '@/lib/task-meta-navigation';
 import { TaskEditModal } from '../task-edit-modal';
+import { TokenPickerModal } from '../token-picker-modal';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SwipeableTaskItem } from '../swipeable-task-item';
 
+type BulkTokenPickerState = {
+  field: 'tags' | 'contexts';
+  action: 'add' | 'remove';
+} | null;
 
 export function ContextsView() {
-  const { tasks, projects, updateTask, deleteTask, settings } = useTaskStore();
+  const {
+    tasks,
+    projects,
+    updateTask,
+    deleteTask,
+    batchMoveTasks,
+    batchDeleteTasks,
+    batchUpdateTasks,
+    settings,
+  } = useTaskStore();
   const { isDark } = useTheme();
   const { t } = useLanguage();
   const { token } = useLocalSearchParams<{ token?: string | string[] }>();
   const [selectedContexts, setSelectedContexts] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkActionLoading, setBulkActionLoading] = useState(false);
+  const [bulkActionLabel, setBulkActionLabel] = useState('');
+  const [bulkTokenPicker, setBulkTokenPicker] = useState<BulkTokenPickerState>(null);
 
   const tc = useThemeColors();
   const { areaById, resolvedAreaFilter } = useMobileAreaFilter();
-  const projectById = new Map(projects.map((project) => [project.id, project]));
+  const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const requestedTokens = useMemo(() => {
     if (Array.isArray(token)) return token.filter(Boolean);
     if (typeof token === 'string' && token.trim()) return [token];
@@ -49,6 +89,21 @@ export function ContextsView() {
     contextSourceTasks,
     (task) => [...(task.contexts || []), ...(task.tags || [])]
   );
+  const addTagOptions = useMemo(
+    () => Array.from(new Set([
+      ...getFrequentTaskTokens(contextSourceTasks, (task) => task.tags, 12, { prefix: '#' }),
+      ...getUsedTaskTokens(contextSourceTasks, (task) => task.tags, { prefix: '#' }),
+    ])),
+    [contextSourceTasks]
+  );
+  const addContextOptions = useMemo(
+    () => Array.from(new Set([
+      ...getFrequentTaskTokens(contextSourceTasks, (task) => task.contexts, 12, { prefix: '@' }),
+      ...getUsedTaskTokens(contextSourceTasks, (task) => task.contexts, { prefix: '@' }),
+    ])),
+    [contextSourceTasks]
+  );
+  const tasksById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
 
   // Filter contexts by search query
   const filteredContexts = searchQuery
@@ -72,6 +127,16 @@ export function ContextsView() {
 
   const sortBy = (settings?.taskSortBy ?? 'default') as TaskSortBy;
   const sortedTasks = sortTasksBy(filteredTasks, sortBy);
+  const selectedIdsArray = useMemo(() => Array.from(multiSelectedIds), [multiSelectedIds]);
+  const hasSelection = selectedIdsArray.length > 0;
+  const removableTagOptions = useMemo(
+    () => collectBulkTaskTokens(selectedIdsArray, tasksById, 'tags'),
+    [selectedIdsArray, tasksById]
+  );
+  const removableContextOptions = useMemo(
+    () => collectBulkTaskTokens(selectedIdsArray, tasksById, 'contexts'),
+    [selectedIdsArray, tasksById]
+  );
 
   const handleStatusChange = (taskId: string, newStatus: TaskStatus) => {
     updateTask(taskId, { status: newStatus });
@@ -83,6 +148,111 @@ export function ContextsView() {
 
   const handleSaveTask = (taskId: string, updates: Partial<Task>) => {
     updateTask(taskId, updates);
+  };
+
+  const exitSelectionMode = () => {
+    setSelectionMode(false);
+    setMultiSelectedIds(new Set());
+  };
+
+  const toggleMultiSelect = (taskId: string) => {
+    if (!selectionMode) {
+      setSelectionMode(true);
+    }
+    setMultiSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    setMultiSelectedIds((prev) => {
+      const visibleIds = new Set(sortedTasks.map((task) => task.id));
+      const next = new Set(Array.from(prev).filter((id) => visibleIds.has(id)));
+      if (next.size === prev.size) return prev;
+      return next;
+    });
+  }, [sortedTasks]);
+
+  const runBulkAction = async (label: string, action: () => Promise<void>) => {
+    if (bulkActionLoading) return;
+    setBulkActionLabel(label);
+    setBulkActionLoading(true);
+    try {
+      await action();
+    } finally {
+      setBulkActionLoading(false);
+      setBulkActionLabel('');
+    }
+  };
+
+  const handleBatchMove = async (newStatus: TaskStatus) => {
+    if (!hasSelection || bulkActionLoading) return;
+    await runBulkAction(t('bulk.moveTo'), async () => {
+      await batchMoveTasks(selectedIdsArray, newStatus);
+      exitSelectionMode();
+      Alert.alert(t('common.done'), `${selectedIdsArray.length} ${t('common.tasks')}`);
+    });
+  };
+
+  const handleBatchDelete = () => {
+    if (!hasSelection || bulkActionLoading) return;
+    Alert.alert(
+      t('bulk.confirmDeleteTitle') || t('common.delete'),
+      t('bulk.confirmDeleteBody') || t('list.confirmBatchDelete'),
+      [
+        { text: t('common.cancel'), style: 'cancel' },
+        {
+          text: t('common.delete'),
+          style: 'destructive',
+          onPress: () => {
+            void runBulkAction(t('common.delete'), async () => {
+              await batchDeleteTasks(selectedIdsArray);
+              exitSelectionMode();
+              Alert.alert(t('common.done'), `${selectedIdsArray.length} ${t('common.tasks')}`);
+            });
+          },
+        },
+      ]
+    );
+  };
+
+  const removeTagLabelRaw = t('bulk.removeTag');
+  const removeTagLabel = removeTagLabelRaw === 'bulk.removeTag' ? 'Remove tag' : removeTagLabelRaw;
+  const tokenPickerTitle = (() => {
+    if (!bulkTokenPicker) return '';
+    if (bulkTokenPicker.field === 'tags') {
+      return bulkTokenPicker.action === 'add' ? t('bulk.addTag') : removeTagLabel;
+    }
+    return bulkTokenPicker.action === 'add' ? t('bulk.addContext') : t('bulk.removeContext');
+  })();
+  const tokenPickerOptions = (() => {
+    if (!bulkTokenPicker) return [] as string[];
+    if (bulkTokenPicker.field === 'tags') {
+      return bulkTokenPicker.action === 'add' ? addTagOptions : removableTagOptions;
+    }
+    return bulkTokenPicker.action === 'add' ? addContextOptions : removableContextOptions;
+  })();
+  const tokenPickerPlaceholder = bulkTokenPicker?.field === 'tags' ? '#tag' : '@context';
+
+  const handleBulkTokenConfirm = async (value: string) => {
+    if (!bulkTokenPicker || !hasSelection) return;
+    await runBulkAction(tokenPickerTitle, async () => {
+      const updates = buildBulkTaskTokenUpdates(
+        selectedIdsArray,
+        tasksById,
+        bulkTokenPicker.field,
+        value,
+        bulkTokenPicker.action
+      );
+      setBulkTokenPicker(null);
+      if (updates.length === 0) return;
+      await batchUpdateTasks(updates);
+      exitSelectionMode();
+      Alert.alert(t('common.done'), `${selectedIdsArray.length} ${t('common.tasks')}`);
+    });
   };
 
   return (
@@ -224,13 +394,140 @@ export function ContextsView() {
 
         <View style={styles.content}>
           <View style={[styles.contentHeader, { backgroundColor: tc.cardBg, borderBottomColor: tc.border }]}>
-            <Text style={[styles.contentTitle, { color: tc.text }]}>
-              {noContextSelected
-                ? t('contexts.none')
-                : (selectedContexts.length > 0 ? selectedContexts.join(', ') : t('contexts.all'))}
-            </Text>
-            <Text style={[styles.contentCount, { color: tc.secondaryText }]}>{sortedTasks.length} {t('common.tasks')}</Text>
+            <View style={styles.contentHeaderMain}>
+              <Text style={[styles.contentTitle, { color: tc.text }]}>
+                {noContextSelected
+                  ? t('contexts.none')
+                  : (selectedContexts.length > 0 ? selectedContexts.join(', ') : t('contexts.all'))}
+              </Text>
+              <Text style={[styles.contentCount, { color: tc.secondaryText }]}>
+                {sortedTasks.length} {t('common.tasks')}
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => (selectionMode ? exitSelectionMode() : setSelectionMode(true))}
+              style={[
+                styles.selectButton,
+                {
+                  borderColor: tc.border,
+                  backgroundColor: selectionMode ? tc.filterBg : 'transparent',
+                },
+              ]}
+            >
+              <Text style={[styles.selectButtonText, { color: tc.text }]}>
+                {selectionMode ? t('bulk.exitSelect') : t('bulk.select')}
+              </Text>
+            </TouchableOpacity>
           </View>
+
+          {selectionMode ? (
+            <View style={[styles.bulkBar, { backgroundColor: tc.cardBg, borderBottomColor: tc.border }]}>
+              <View style={styles.bulkHeaderRow}>
+                <Text style={[styles.bulkCount, { color: tc.secondaryText }]}>
+                  {selectedIdsArray.length} {t('bulk.selected')}
+                </Text>
+                {bulkActionLoading ? (
+                  <View style={styles.bulkLoadingRow}>
+                    <ActivityIndicator size="small" color={tc.tint} />
+                    <Text style={[styles.bulkLoadingText, { color: tc.secondaryText }]}>
+                      {bulkActionLabel || t('common.loading')}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bulkRow}>
+                {(['inbox', 'next', 'waiting', 'someday', 'reference', 'done'] as TaskStatus[]).map((status) => (
+                  <TouchableOpacity
+                    key={status}
+                    onPress={() => void handleBatchMove(status)}
+                    disabled={!hasSelection || bulkActionLoading}
+                    style={[
+                      styles.bulkButton,
+                      {
+                        backgroundColor: tc.filterBg,
+                        borderColor: tc.border,
+                        opacity: hasSelection && !bulkActionLoading ? 1 : 0.5,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.bulkButtonText, { color: tc.text }]}>{t(`status.${status}`)}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bulkRow}>
+                <TouchableOpacity
+                  onPress={() => setBulkTokenPicker({ field: 'tags', action: 'add' })}
+                  disabled={!hasSelection || bulkActionLoading}
+                  style={[
+                    styles.bulkButton,
+                    {
+                      backgroundColor: tc.filterBg,
+                      borderColor: tc.border,
+                      opacity: hasSelection && !bulkActionLoading ? 1 : 0.5,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.bulkButtonText, { color: tc.text }]}>{t('bulk.addTag')}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setBulkTokenPicker({ field: 'tags', action: 'remove' })}
+                  disabled={!hasSelection || bulkActionLoading || removableTagOptions.length === 0}
+                  style={[
+                    styles.bulkButton,
+                    {
+                      backgroundColor: tc.filterBg,
+                      borderColor: tc.border,
+                      opacity: hasSelection && !bulkActionLoading && removableTagOptions.length > 0 ? 1 : 0.5,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.bulkButtonText, { color: tc.text }]}>{removeTagLabel}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setBulkTokenPicker({ field: 'contexts', action: 'add' })}
+                  disabled={!hasSelection || bulkActionLoading}
+                  style={[
+                    styles.bulkButton,
+                    {
+                      backgroundColor: tc.filterBg,
+                      borderColor: tc.border,
+                      opacity: hasSelection && !bulkActionLoading ? 1 : 0.5,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.bulkButtonText, { color: tc.text }]}>{t('bulk.addContext')}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setBulkTokenPicker({ field: 'contexts', action: 'remove' })}
+                  disabled={!hasSelection || bulkActionLoading || removableContextOptions.length === 0}
+                  style={[
+                    styles.bulkButton,
+                    {
+                      backgroundColor: tc.filterBg,
+                      borderColor: tc.border,
+                      opacity: hasSelection && !bulkActionLoading && removableContextOptions.length > 0 ? 1 : 0.5,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.bulkButtonText, { color: tc.text }]}>{t('bulk.removeContext')}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={handleBatchDelete}
+                  disabled={!hasSelection || bulkActionLoading}
+                  style={[
+                    styles.bulkButton,
+                    {
+                      backgroundColor: tc.filterBg,
+                      borderColor: tc.border,
+                      opacity: hasSelection && !bulkActionLoading ? 1 : 0.5,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.bulkButtonText, { color: tc.text }]}>{t('bulk.delete')}</Text>
+                </TouchableOpacity>
+              </ScrollView>
+            </View>
+          ) : null}
 
           <ScrollView style={[styles.taskList, { backgroundColor: tc.bg }]} showsVerticalScrollIndicator={false}>
             {sortedTasks.length > 0 ? (
@@ -241,6 +538,9 @@ export function ContextsView() {
                   isDark={isDark}
                   tc={tc}
                   onPress={() => setEditingTask(task)}
+                  selectionMode={selectionMode}
+                  isMultiSelected={multiSelectedIds.has(task.id)}
+                  onToggleSelect={() => toggleMultiSelect(task.id)}
                   onStatusChange={(status) => handleStatusChange(task.id, status)}
                   onDelete={() => handleDelete(task.id)}
                   onProjectPress={openProjectScreen}
@@ -273,6 +573,19 @@ export function ContextsView() {
             )}
           </ScrollView>
         </View>
+
+        <TokenPickerModal
+          visible={bulkTokenPicker !== null}
+          title={tokenPickerTitle}
+          description={tokenPickerTitle}
+          tokens={tokenPickerOptions}
+          placeholder={tokenPickerPlaceholder}
+          allowCustomValue={bulkTokenPicker?.action === 'add'}
+          onClose={() => setBulkTokenPicker(null)}
+          onConfirm={(value) => {
+            void handleBulkTokenConfirm(value);
+          }}
+        />
 
         {/* Task Edit Modal */}
         <TaskEditModal
@@ -357,6 +670,11 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#E5E7EB',
   },
+  contentHeaderMain: {
+    flex: 1,
+    marginRight: 12,
+    gap: 4,
+  },
   contentTitle: {
     fontSize: 18,
     fontWeight: '600',
@@ -365,6 +683,53 @@ const styles = StyleSheet.create({
   contentCount: {
     fontSize: 14,
     color: '#6B7280',
+  },
+  selectButton: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  selectButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  bulkBar: {
+    borderBottomWidth: 1,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    gap: 10,
+  },
+  bulkHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  bulkCount: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  bulkLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  bulkLoadingText: {
+    fontSize: 12,
+  },
+  bulkRow: {
+    gap: 8,
+  },
+  bulkButton: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  bulkButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
   },
   taskList: {
     flex: 1,

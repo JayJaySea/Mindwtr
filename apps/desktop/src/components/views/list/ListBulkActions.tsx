@@ -6,8 +6,11 @@ type ListBulkActionsProps = {
     onAssignArea?: (areaId: string | null) => void;
     areaOptions?: Array<{ id: string; name: string }>;
     onAddTag: () => void;
+    onRemoveTag?: () => void;
+    disableRemoveTag?: boolean;
     onAddContext: () => void;
-    onRemoveContext: () => void;
+    onRemoveContext?: () => void;
+    disableRemoveContext?: boolean;
     onDelete: () => void;
     isDeleting?: boolean;
     t: (key: string) => string;
@@ -21,8 +24,11 @@ export function ListBulkActions({
     onAssignArea,
     areaOptions,
     onAddTag,
+    onRemoveTag,
+    disableRemoveTag = false,
     onAddContext,
     onRemoveContext,
+    disableRemoveContext = false,
     onDelete,
     isDeleting = false,
     t,
@@ -32,6 +38,8 @@ export function ListBulkActions({
     const areaLabel = areaLabelRaw === 'projects.areaLabel' ? 'Area' : areaLabelRaw;
     const noAreaLabelRaw = t('taskEdit.noAreaOption');
     const noAreaLabel = noAreaLabelRaw === 'taskEdit.noAreaOption' ? 'No area' : noAreaLabelRaw;
+    const removeTagLabelRaw = t('bulk.removeTag');
+    const removeTagLabel = removeTagLabelRaw === 'bulk.removeTag' ? 'Remove tag' : removeTagLabelRaw;
     const hasAreaAssignment = Boolean(onAssignArea) && (areaOptions?.length ?? 0) > 0;
 
     return (
@@ -79,6 +87,16 @@ export function ListBulkActions({
             >
                 {t('bulk.addTag')}
             </button>
+            {onRemoveTag && (
+                <button
+                    onClick={onRemoveTag}
+                    disabled={disableRemoveTag}
+                    className="text-xs px-2 py-1 rounded bg-muted/50 hover:bg-muted transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                    aria-label={removeTagLabel}
+                >
+                    {removeTagLabel}
+                </button>
+            )}
             <button
                 onClick={onAddContext}
                 className="text-xs px-2 py-1 rounded bg-muted/50 hover:bg-muted transition-colors"
@@ -86,13 +104,16 @@ export function ListBulkActions({
             >
                 {t('bulk.addContext')}
             </button>
-            <button
-                onClick={onRemoveContext}
-                className="text-xs px-2 py-1 rounded bg-muted/50 hover:bg-muted transition-colors"
-                aria-label={t('bulk.removeContext')}
-            >
-                {t('bulk.removeContext')}
-            </button>
+            {onRemoveContext && (
+                <button
+                    onClick={onRemoveContext}
+                    disabled={disableRemoveContext}
+                    className="text-xs px-2 py-1 rounded bg-muted/50 hover:bg-muted transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                    aria-label={t('bulk.removeContext')}
+                >
+                    {t('bulk.removeContext')}
+                </button>
+            )}
             <button
                 onClick={onDelete}
                 className="text-xs px-2 py-1 rounded bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"

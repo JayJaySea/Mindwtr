@@ -1,8 +1,18 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useTaskStore, matchesHierarchicalToken, isTaskInActiveProject, shallow, TaskStatus } from '@mindwtr/core';
+import {
+    useTaskStore,
+    matchesHierarchicalToken,
+    isTaskInActiveProject,
+    shallow,
+    TaskStatus,
+    getFrequentTaskTokens,
+    getUsedTaskTokens,
+    buildBulkTaskTokenUpdates,
+    collectBulkTaskTokens,
+} from '@mindwtr/core';
 import { TaskItem } from '../TaskItem';
 import { Tag, Filter } from 'lucide-react';
-import { PromptModal } from '../PromptModal';
+import { TokenPickerModal } from '../TokenPickerModal';
 import { ListBulkActions } from './list/ListBulkActions';
 import { cn } from '../../lib/utils';
 import { useLanguage } from '../../contexts/language-context';
@@ -10,6 +20,11 @@ import { usePerformanceMonitor } from '../../hooks/usePerformanceMonitor';
 import { checkBudget } from '../../config/performanceBudgets';
 import { resolveAreaFilter, taskMatchesAreaFilter } from '../../lib/area-filter';
 import { reportError } from '../../lib/report-error';
+
+type BulkTokenPickerState = {
+    field: 'tags' | 'contexts';
+    action: 'add' | 'remove';
+} | null;
 
 export function ContextsView() {
     const perf = usePerformanceMonitor('ContextsView');
@@ -27,11 +42,7 @@ export function ContextsView() {
     const [searchQuery, setSearchQuery] = useState('');
     const [selectionMode, setSelectionMode] = useState(false);
     const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set());
-    const [tagPromptOpen, setTagPromptOpen] = useState(false);
-    const [tagPromptIds, setTagPromptIds] = useState<string[]>([]);
-    const [contextPromptOpen, setContextPromptOpen] = useState(false);
-    const [contextPromptMode, setContextPromptMode] = useState<'add' | 'remove'>('add');
-    const [contextPromptIds, setContextPromptIds] = useState<string[]>([]);
+    const [bulkTokenPicker, setBulkTokenPicker] = useState<BulkTokenPickerState>(null);
     const [isBatchDeleting, setIsBatchDeleting] = useState(false);
     const areaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
     const resolvedAreaFilter = useMemo(
@@ -82,6 +93,20 @@ export function ContextsView() {
         ? contextFilteredTasks.filter((task) => task.title.toLowerCase().includes(normalizedSearchQuery))
         : contextFilteredTasks;
     const tasksById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+    const addTagOptions = useMemo(
+        () => Array.from(new Set([
+            ...getFrequentTaskTokens(activeTasks, (task) => task.tags, 12, { prefix: '#' }),
+            ...getUsedTaskTokens(activeTasks, (task) => task.tags, { prefix: '#' }),
+        ])),
+        [activeTasks]
+    );
+    const addContextOptions = useMemo(
+        () => Array.from(new Set([
+            ...getFrequentTaskTokens(activeTasks, (task) => task.contexts, 12, { prefix: '@' }),
+            ...getUsedTaskTokens(activeTasks, (task) => task.contexts, { prefix: '@' }),
+        ])),
+        [activeTasks]
+    );
 
     const exitSelectionMode = () => {
         setSelectionMode(false);
@@ -98,6 +123,14 @@ export function ContextsView() {
     };
 
     const selectedIdsArray = useMemo(() => Array.from(multiSelectedIds), [multiSelectedIds]);
+    const removableTagOptions = useMemo(
+        () => collectBulkTaskTokens(selectedIdsArray, tasksById, 'tags'),
+        [selectedIdsArray, tasksById]
+    );
+    const removableContextOptions = useMemo(
+        () => collectBulkTaskTokens(selectedIdsArray, tasksById, 'contexts'),
+        [selectedIdsArray, tasksById]
+    );
     const bulkAreaOptions = useMemo(
         () => [...areas]
             .sort((a, b) => a.name.localeCompare(b.name))
@@ -130,24 +163,24 @@ export function ContextsView() {
         }
     };
 
-    const handleBatchAddTag = () => {
+    const handleBatchRemoveTag = () => {
         if (selectedIdsArray.length === 0) return;
-        setTagPromptIds(selectedIdsArray);
-        setTagPromptOpen(true);
+        setBulkTokenPicker({ field: 'tags', action: 'remove' });
     };
 
-    const handleBatchAddContext = () => {
+    const handleBatchPickTag = () => {
         if (selectedIdsArray.length === 0) return;
-        setContextPromptIds(selectedIdsArray);
-        setContextPromptMode('add');
-        setContextPromptOpen(true);
+        setBulkTokenPicker({ field: 'tags', action: 'add' });
+    };
+
+    const handleBatchPickContext = (action: 'add' | 'remove') => {
+        if (selectedIdsArray.length === 0) return;
+        setBulkTokenPicker({ field: 'contexts', action });
     };
 
     const handleBatchRemoveContext = () => {
         if (selectedIdsArray.length === 0) return;
-        setContextPromptIds(selectedIdsArray);
-        setContextPromptMode('remove');
-        setContextPromptOpen(true);
+        setBulkTokenPicker({ field: 'contexts', action: 'remove' });
     };
 
     const handleBatchAssignArea = async (areaId: string | null) => {
@@ -172,12 +205,55 @@ export function ContextsView() {
         });
     }, [filteredTasks]);
 
+    const removeTagLabelRaw = t('bulk.removeTag');
+    const removeTagLabel = removeTagLabelRaw === 'bulk.removeTag' ? 'Remove tag' : removeTagLabelRaw;
+    const tokenPickerTitle = (() => {
+        if (!bulkTokenPicker) return '';
+        if (bulkTokenPicker.field === 'tags') {
+            return bulkTokenPicker.action === 'add' ? t('bulk.addTag') : removeTagLabel;
+        }
+        return bulkTokenPicker.action === 'add' ? t('bulk.addContext') : t('bulk.removeContext');
+    })();
+    const tokenPickerOptions = (() => {
+        if (!bulkTokenPicker) return [] as string[];
+        if (bulkTokenPicker.field === 'tags') {
+            return bulkTokenPicker.action === 'add' ? addTagOptions : removableTagOptions;
+        }
+        return bulkTokenPicker.action === 'add' ? addContextOptions : removableContextOptions;
+    })();
+    const tokenPickerPlaceholder = bulkTokenPicker?.field === 'tags' ? '#tag' : '@context';
+
     const statusOptions: Array<{ value: TaskStatus | 'all'; label: string }> = [
+        { value: 'all', label: t('common.all') || 'All' },
+        { value: 'inbox', label: t('status.inbox') },
         { value: 'next', label: t('status.next') },
         { value: 'waiting', label: t('status.waiting') },
         { value: 'someday', label: t('status.someday') },
-        { value: 'all', label: t('common.all') || 'All' },
+        { value: 'reference', label: t('status.reference') },
+        { value: 'done', label: t('status.done') },
     ];
+
+    const handleBulkTokenConfirm = async (value: string) => {
+        if (!bulkTokenPicker || selectedIdsArray.length === 0) return;
+        try {
+            const updates = buildBulkTaskTokenUpdates(
+                selectedIdsArray,
+                tasksById,
+                bulkTokenPicker.field,
+                value,
+                bulkTokenPicker.action
+            );
+            if (updates.length === 0) {
+                setBulkTokenPicker(null);
+                return;
+            }
+            await batchUpdateTasks(updates);
+            setBulkTokenPicker(null);
+            exitSelectionMode();
+        } catch (error) {
+            reportError('Failed to batch update tokens in contexts view', error);
+        }
+    };
 
     return (
         <>
@@ -274,20 +350,29 @@ export function ContextsView() {
                                     >
                                         {selectionMode ? t('bulk.exitSelect') : t('bulk.select')}
                                     </button>
-                                    <select
-                                        value={statusFilter}
-                                        onChange={(event) => setStatusFilter(event.target.value as TaskStatus | 'all')}
-                                        className="text-xs bg-muted/50 border border-border rounded px-2 py-1 text-foreground"
-                                    >
-                                        {statusOptions.map((option) => (
-                                            <option key={option.value} value={option.value}>
-                                                {option.label}
-                                            </option>
-                                        ))}
-                                    </select>
                                 </div>
                             </div>
                         </header>
+                        <div className="mb-4 flex flex-wrap gap-2">
+                            {statusOptions.map((option) => {
+                                const isActive = statusFilter === option.value;
+                                return (
+                                    <button
+                                        key={option.value}
+                                        onClick={() => setStatusFilter(option.value)}
+                                        className={cn(
+                                            'rounded-full border px-3 py-1.5 text-xs font-medium transition-colors',
+                                            isActive
+                                                ? 'border-primary bg-primary/10 text-primary'
+                                                : 'border-border bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground'
+                                        )}
+                                        aria-pressed={isActive}
+                                    >
+                                        {option.label}
+                                    </button>
+                                );
+                            })}
+                        </div>
                         <div className="mb-4">
                             <input
                                 type="text"
@@ -306,9 +391,12 @@ export function ContextsView() {
                                     onMoveToStatus={handleBatchMove}
                                     onAssignArea={handleBatchAssignArea}
                                     areaOptions={bulkAreaOptions}
-                                    onAddTag={handleBatchAddTag}
-                                    onAddContext={handleBatchAddContext}
+                                    onAddTag={handleBatchPickTag}
+                                    onRemoveTag={handleBatchRemoveTag}
+                                    disableRemoveTag={removableTagOptions.length === 0}
+                                    onAddContext={() => handleBatchPickContext('add')}
                                     onRemoveContext={handleBatchRemoveContext}
+                                    disableRemoveContext={removableContextOptions.length === 0}
                                     onDelete={handleBatchDelete}
                                     isDeleting={isBatchDeleting}
                                     t={t}
@@ -337,61 +425,17 @@ export function ContextsView() {
                     </div>
                 </div>
             </div>
-            <PromptModal
-                isOpen={tagPromptOpen}
-                title={t('bulk.addTag')}
-                description={t('bulk.addTag')}
-                placeholder="#tag"
-                defaultValue=""
+            <TokenPickerModal
+                isOpen={bulkTokenPicker !== null}
+                title={tokenPickerTitle}
+                description={tokenPickerTitle}
+                tokens={tokenPickerOptions}
+                placeholder={tokenPickerPlaceholder}
+                allowCustomValue={bulkTokenPicker?.action === 'add'}
                 confirmLabel={t('common.save')}
                 cancelLabel={t('common.cancel')}
-                onCancel={() => setTagPromptOpen(false)}
-                onConfirm={async (value) => {
-                    const input = value.trim();
-                    if (!input) return;
-                    const tag = input.startsWith('#') ? input : `#${input}`;
-                    try {
-                        await batchUpdateTasks(tagPromptIds.map((id) => {
-                            const task = tasksById.get(id);
-                            const existingTags = task?.tags || [];
-                            const nextTags = Array.from(new Set([...existingTags, tag]));
-                            return { id, updates: { tags: nextTags } };
-                        }));
-                        setTagPromptOpen(false);
-                        exitSelectionMode();
-                    } catch (error) {
-                        reportError('Failed to batch add tag in contexts view', error);
-                    }
-                }}
-            />
-            <PromptModal
-                isOpen={contextPromptOpen}
-                title={contextPromptMode === 'add' ? t('bulk.addContext') : t('bulk.removeContext')}
-                description={contextPromptMode === 'add' ? t('bulk.addContext') : t('bulk.removeContext')}
-                placeholder="@context"
-                defaultValue=""
-                confirmLabel={t('common.save')}
-                cancelLabel={t('common.cancel')}
-                onCancel={() => setContextPromptOpen(false)}
-                onConfirm={async (value) => {
-                    const input = value.trim();
-                    if (!input) return;
-                    const ctx = input.startsWith('@') ? input : `@${input}`;
-                    try {
-                        await batchUpdateTasks(contextPromptIds.map((id) => {
-                            const task = tasksById.get(id);
-                            const existing = task?.contexts || [];
-                            const nextContexts = contextPromptMode === 'add'
-                                ? Array.from(new Set([...existing, ctx]))
-                                : existing.filter((token) => token !== ctx);
-                            return { id, updates: { contexts: nextContexts } };
-                        }));
-                        setContextPromptOpen(false);
-                        exitSelectionMode();
-                    } catch (error) {
-                        reportError('Failed to batch update context in contexts view', error);
-                    }
-                }}
+                onCancel={() => setBulkTokenPicker(null)}
+                onConfirm={handleBulkTokenConfirm}
             />
         </>
     );
