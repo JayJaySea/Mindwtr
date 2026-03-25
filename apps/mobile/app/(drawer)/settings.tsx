@@ -303,6 +303,7 @@ export default function SettingsPage() {
     const timeFormat = normalizeTimeFormatSetting(settings.timeFormat);
     const loggingEnabled = settings.diagnostics?.loggingEnabled === true;
     const lastSyncStats = settings.lastSyncStats ?? null;
+    const showLastSyncStats = Boolean(lastSyncStats) && (settings.lastSyncStatus === 'success' || settings.lastSyncStatus === 'conflict');
     const syncConflictCount = (lastSyncStats?.tasks.conflicts || 0) + (lastSyncStats?.projects.conflicts || 0);
     const maxClockSkewMs = Math.max(lastSyncStats?.tasks.maxClockSkewMs || 0, lastSyncStats?.projects.maxClockSkewMs || 0);
     const timestampAdjustments = (lastSyncStats?.tasks.timestampAdjustments || 0) + (lastSyncStats?.projects.timestampAdjustments || 0);
@@ -4952,22 +4953,22 @@ export default function SettingsPage() {
                                             {settings.lastSyncStatus === 'error' && t('settings.syncStatusFailedSuffix')}
                                             {settings.lastSyncStatus === 'conflict' && t('settings.syncStatusConflictsSuffix')}
                                         </Text>
-                                        {lastSyncStats && (
+                                        {showLastSyncStats && (
                                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
                                                 {t('settings.lastSyncConflicts')}: {syncConflictCount}
                                             </Text>
                                         )}
-                                        {lastSyncStats && maxClockSkewMs > 0 && (
+                                        {showLastSyncStats && maxClockSkewMs > 0 && (
                                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
                                                 {t('settings.lastSyncSkew')}: {formatClockSkew(maxClockSkewMs)}
                                             </Text>
                                         )}
-                                        {lastSyncStats && timestampAdjustments > 0 && (
+                                        {showLastSyncStats && timestampAdjustments > 0 && (
                                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
                                                 {t('settings.lastSyncAdjusted')}: {timestampAdjustments}
                                             </Text>
                                         )}
-                                        {lastSyncStats && conflictIds.length > 0 && (
+                                        {showLastSyncStats && conflictIds.length > 0 && (
                                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
                                                 {t('settings.lastSyncConflictIds')}: {conflictIds.join(', ')}
                                             </Text>
@@ -5124,22 +5125,22 @@ export default function SettingsPage() {
                                             {settings.lastSyncStatus === 'error' && t('settings.syncStatusFailedSuffix')}
                                             {settings.lastSyncStatus === 'conflict' && t('settings.syncStatusConflictsSuffix')}
                                         </Text>
-                                        {lastSyncStats && (
+                                        {showLastSyncStats && (
                                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
                                                 {t('settings.lastSyncConflicts')}: {syncConflictCount}
                                             </Text>
                                         )}
-                                        {lastSyncStats && maxClockSkewMs > 0 && (
+                                        {showLastSyncStats && maxClockSkewMs > 0 && (
                                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
                                                 {t('settings.lastSyncSkew')}: {formatClockSkew(maxClockSkewMs)}
                                             </Text>
                                         )}
-                                        {lastSyncStats && timestampAdjustments > 0 && (
+                                        {showLastSyncStats && timestampAdjustments > 0 && (
                                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
                                                 {t('settings.lastSyncAdjusted')}: {timestampAdjustments}
                                             </Text>
                                         )}
-                                        {lastSyncStats && conflictIds.length > 0 && (
+                                        {showLastSyncStats && conflictIds.length > 0 && (
                                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
                                                 {t('settings.lastSyncConflictIds')}: {conflictIds.join(', ')}
                                             </Text>
@@ -5424,22 +5425,22 @@ export default function SettingsPage() {
                                             {settings.lastSyncStatus === 'error' && t('settings.syncStatusFailedSuffix')}
                                             {settings.lastSyncStatus === 'conflict' && t('settings.syncStatusConflictsSuffix')}
                                         </Text>
-                                        {lastSyncStats && (
+                                        {showLastSyncStats && (
                                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
                                                 {t('settings.lastSyncConflicts')}: {syncConflictCount}
                                             </Text>
                                         )}
-                                        {lastSyncStats && maxClockSkewMs > 0 && (
+                                        {showLastSyncStats && maxClockSkewMs > 0 && (
                                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
                                                 {t('settings.lastSyncSkew')}: {formatClockSkew(maxClockSkewMs)}
                                             </Text>
                                         )}
-                                        {lastSyncStats && timestampAdjustments > 0 && (
+                                        {showLastSyncStats && timestampAdjustments > 0 && (
                                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
                                                 {t('settings.lastSyncAdjusted')}: {timestampAdjustments}
                                             </Text>
                                         )}
-                                        {lastSyncStats && conflictIds.length > 0 && (
+                                        {showLastSyncStats && conflictIds.length > 0 && (
                                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
                                                 {t('settings.lastSyncConflictIds')}: {conflictIds.join(', ')}
                                             </Text>
