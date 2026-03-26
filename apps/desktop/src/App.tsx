@@ -310,6 +310,10 @@ function App() {
             reportError,
             onSyncFailure: handleSyncFailure,
             isRuntimeActive: () => isActiveRef.current && isTauriRuntime(),
+            shouldPauseWindowSync: () => (
+                useTaskStore.getState().editLockCount > 0
+                || useUiStore.getState().editingTaskId !== null
+            ),
         });
 
         const focusListener = () => {
