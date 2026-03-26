@@ -32,6 +32,7 @@ import {
     applyThemeMode,
     mapSyncedThemeToDesktop,
     resolveNativeTheme,
+    watchNativeSystemThemePreference,
     watchSystemThemePreference,
 } from './lib/theme';
 import { useUiStore } from './store/ui-store';
@@ -139,32 +140,17 @@ function App() {
             };
         }
 
-        let cancelled = false;
-        let stopWatchingNativeTheme = () => { };
-        import('@tauri-apps/api/window')
-            .then(async ({ getCurrentWindow }) => {
-                const currentWindow = getCurrentWindow();
-                try {
-                    const nativeTheme = await currentWindow.theme();
-                    if (!cancelled && nativeTheme) {
-                        applyThemeMode('system', nativeTheme);
-                    }
-                } catch (error) {
-                    void logError(error, { scope: 'theme', step: 'resolveSystem' });
-                }
-                const unlisten = await currentWindow.onThemeChanged(({ payload }) => {
-                    applyThemeMode('system', payload);
-                });
-                if (cancelled) {
-                    unlisten();
-                    return;
-                }
-                stopWatchingNativeTheme = unlisten;
-            })
-            .catch((error) => void logError(error, { scope: 'theme', step: 'watch' }));
+        const stopWatchingNativeTheme = watchNativeSystemThemePreference(
+            () => import('@tauri-apps/api/window'),
+            (theme) => {
+                applyThemeMode('system', theme);
+            },
+            (step, error) => {
+                void logError(error, { scope: 'theme', step });
+            }
+        );
 
         return () => {
-            cancelled = true;
             stopWatchingSystemTheme();
             stopWatchingNativeTheme();
         };

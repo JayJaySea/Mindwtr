@@ -1,5 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyThemeMode, watchSystemThemePreference } from './theme';
+import { applyThemeMode, watchNativeSystemThemePreference, watchSystemThemePreference } from './theme';
+
+const flushMicrotasks = async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+};
+
+const createDeferred = <T,>() => {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((nextResolve, nextReject) => {
+        resolve = nextResolve;
+        reject = nextReject;
+    });
+    return { promise, resolve, reject };
+};
 
 describe('applyThemeMode', () => {
     beforeEach(() => {
@@ -70,5 +85,59 @@ describe('watchSystemThemePreference', () => {
 
         expect(removeEventListener).toHaveBeenCalledWith('change', expect.any(Function));
         expect(listeners.size).toBe(0);
+    });
+});
+
+describe('watchNativeSystemThemePreference', () => {
+    it('does not touch the native window api after cleanup when the module resolves late', async () => {
+        const windowModuleDeferred = createDeferred<{
+            getCurrentWindow: () => {
+                theme: ReturnType<typeof vi.fn>;
+                onThemeChanged: ReturnType<typeof vi.fn>;
+            };
+        }>();
+        const theme = vi.fn(async () => 'dark');
+        const onThemeChanged = vi.fn(async () => vi.fn());
+        const onChange = vi.fn();
+
+        const stopWatching = watchNativeSystemThemePreference(
+            () => windowModuleDeferred.promise,
+            onChange,
+        );
+        stopWatching();
+        windowModuleDeferred.resolve({
+            getCurrentWindow: () => ({
+                theme,
+                onThemeChanged,
+            }),
+        });
+        await flushMicrotasks();
+
+        expect(theme).not.toHaveBeenCalled();
+        expect(onThemeChanged).not.toHaveBeenCalled();
+        expect(onChange).not.toHaveBeenCalled();
+    });
+
+    it('unsubscribes a late native theme listener after cleanup', async () => {
+        const unlisten = vi.fn();
+        const onThemeChangedDeferred = createDeferred<() => void>();
+        const onChange = vi.fn();
+
+        const stopWatching = watchNativeSystemThemePreference(
+            async () => ({
+                getCurrentWindow: () => ({
+                    theme: async () => 'dark',
+                    onThemeChanged: vi.fn(async () => onThemeChangedDeferred.promise),
+                }),
+            }),
+            onChange,
+        );
+        await flushMicrotasks();
+        stopWatching();
+        onThemeChangedDeferred.resolve(unlisten);
+        await flushMicrotasks();
+
+        expect(onChange).toHaveBeenCalledWith('dark');
+        expect(unlisten).toHaveBeenCalledTimes(1);
     });
 });

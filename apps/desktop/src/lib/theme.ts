@@ -2,6 +2,16 @@ import type { AppData } from '@mindwtr/core';
 
 export type DesktopThemeMode = 'system' | 'light' | 'dark' | 'eink' | 'nord' | 'sepia';
 export type SystemThemePreference = 'light' | 'dark' | null;
+type NativeThemePreference = Exclude<SystemThemePreference, null>;
+type NativeThemeWindow = {
+    theme: () => Promise<SystemThemePreference>;
+    onThemeChanged: (
+        listener: (event: { payload: NativeThemePreference }) => void
+    ) => Promise<() => void>;
+};
+type NativeThemeWindowModule = {
+    getCurrentWindow: () => NativeThemeWindow;
+};
 
 export const THEME_STORAGE_KEY = 'mindwtr-theme';
 const SYSTEM_THEME_MEDIA_QUERY = '(prefers-color-scheme: dark)';
@@ -38,7 +48,7 @@ export const resolveSystemThemePreference = (override?: SystemThemePreference): 
 };
 
 export const watchSystemThemePreference = (
-    onChange: (theme: Exclude<SystemThemePreference, null>) => void
+    onChange: (theme: NativeThemePreference) => void
 ): (() => void) => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return () => { };
 
@@ -58,6 +68,59 @@ export const watchSystemThemePreference = (
     }
 
     return () => { };
+};
+
+export const watchNativeSystemThemePreference = (
+    loadWindowModule: () => Promise<NativeThemeWindowModule>,
+    onChange: (theme: NativeThemePreference) => void,
+    onError?: (step: 'resolveSystem' | 'watch', error: unknown) => void,
+): (() => void) => {
+    let cancelled = false;
+    let stopWatchingNativeTheme = () => { };
+
+    void loadWindowModule()
+        .then(async ({ getCurrentWindow }) => {
+            if (cancelled) return;
+            const currentWindow = getCurrentWindow();
+
+            try {
+                const nativeTheme = await currentWindow.theme();
+                if (!cancelled && nativeTheme) {
+                    onChange(nativeTheme);
+                }
+            } catch (error) {
+                if (!cancelled) {
+                    onError?.('resolveSystem', error);
+                }
+            }
+
+            if (cancelled) return;
+
+            try {
+                const unlisten = await currentWindow.onThemeChanged(({ payload }) => {
+                    onChange(payload);
+                });
+                if (cancelled) {
+                    unlisten();
+                    return;
+                }
+                stopWatchingNativeTheme = unlisten;
+            } catch (error) {
+                if (!cancelled) {
+                    onError?.('watch', error);
+                }
+            }
+        })
+        .catch((error) => {
+            if (!cancelled) {
+                onError?.('watch', error);
+            }
+        });
+
+    return () => {
+        cancelled = true;
+        stopWatchingNativeTheme();
+    };
 };
 
 export const applyThemeMode = (mode: DesktopThemeMode | null, systemTheme?: SystemThemePreference) => {
