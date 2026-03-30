@@ -284,6 +284,8 @@ export interface AppData {
         lastSyncStatus?: 'idle' | 'syncing' | 'success' | 'error' | 'conflict';
         lastSyncError?: string;
         pendingRemoteWriteAt?: string;
+        pendingRemoteWriteRetryAt?: string;
+        pendingRemoteWriteAttempts?: number;
         lastSyncStats?: MergeStats;
         lastSyncHistory?: SyncHistoryEntry[];
         diagnostics?: {

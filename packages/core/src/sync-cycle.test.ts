@@ -474,6 +474,80 @@ describe('performSyncCycle', () => {
         expect(result.data.settings.pendingRemoteWriteAt).toBeUndefined();
     });
 
+    it('records retry backoff when remote write fails after the local pending flag is saved', async () => {
+        const localWrites: AppData[] = [];
+
+        await expect(performSyncCycle({
+            readLocal: async () => mockAppData([createMockTask('1', '2024-01-01T00:00:00.000Z')]),
+            readRemote: async () => mockAppData(),
+            writeLocal: async (data) => {
+                localWrites.push(data);
+            },
+            writeRemote: async () => {
+                throw new Error('remote write failed');
+            },
+            now: () => '2026-01-01T00:00:00.000Z',
+        })).rejects.toThrow('remote write failed');
+
+        expect(localWrites).toHaveLength(2);
+        expect(localWrites[0].settings.pendingRemoteWriteAt).toBe('2026-01-01T00:00:00.000Z');
+        expect(localWrites[0].settings.pendingRemoteWriteRetryAt).toBeUndefined();
+        expect(localWrites[0].settings.pendingRemoteWriteAttempts).toBeUndefined();
+        expect(localWrites[1].settings.pendingRemoteWriteAt).toBe('2026-01-01T00:00:00.000Z');
+        expect(localWrites[1].settings.pendingRemoteWriteRetryAt).toBe('2026-01-01T00:00:05.000Z');
+        expect(localWrites[1].settings.pendingRemoteWriteAttempts).toBe(1);
+    });
+
+    it('pauses pending remote write recovery until the retry window expires', async () => {
+        const localWithPending = mockAppData([createMockTask('1', '2024-01-01T00:00:00.000Z')]);
+        localWithPending.settings.pendingRemoteWriteAt = '2025-12-31T23:59:59.000Z';
+        localWithPending.settings.pendingRemoteWriteRetryAt = '2026-01-01T00:00:10.000Z';
+        localWithPending.settings.pendingRemoteWriteAttempts = 2;
+        let readRemoteCalled = false;
+        let writeRemoteCalled = false;
+
+        await expect(performSyncCycle({
+            readLocal: async () => localWithPending,
+            readRemote: async () => {
+                readRemoteCalled = true;
+                return mockAppData();
+            },
+            writeLocal: async () => undefined,
+            writeRemote: async () => {
+                writeRemoteCalled = true;
+            },
+            now: () => '2026-01-01T00:00:05.000Z',
+        })).rejects.toThrow('Retry in about 5s');
+
+        expect(readRemoteCalled).toBe(false);
+        expect(writeRemoteCalled).toBe(false);
+    });
+
+    it('increases pending remote write backoff when a recovery write fails again', async () => {
+        const localWrites: AppData[] = [];
+        const localWithPending = mockAppData([createMockTask('1', '2024-01-01T00:00:00.000Z')]);
+        localWithPending.settings.pendingRemoteWriteAt = '2025-12-31T23:59:59.000Z';
+        localWithPending.settings.pendingRemoteWriteRetryAt = '2025-12-31T23:59:59.000Z';
+        localWithPending.settings.pendingRemoteWriteAttempts = 1;
+
+        await expect(performSyncCycle({
+            readLocal: async () => localWithPending,
+            readRemote: async () => mockAppData(),
+            writeLocal: async (data) => {
+                localWrites.push(data);
+            },
+            writeRemote: async () => {
+                throw new Error('recovery write failed');
+            },
+            now: () => '2026-01-01T00:00:00.000Z',
+        })).rejects.toThrow('recovery write failed');
+
+        expect(localWrites).toHaveLength(1);
+        expect(localWrites[0].settings.pendingRemoteWriteAt).toBe('2025-12-31T23:59:59.000Z');
+        expect(localWrites[0].settings.pendingRemoteWriteRetryAt).toBe('2026-01-01T00:00:10.000Z');
+        expect(localWrites[0].settings.pendingRemoteWriteAttempts).toBe(2);
+    });
+
     it('retries pending remote write before reading remote data', async () => {
         const sequence: string[] = [];
         const localWithPending = mockAppData([createMockTask('1', '2024-01-01T00:00:00.000Z')]);

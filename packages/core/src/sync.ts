@@ -88,6 +88,8 @@ function createEmptyEntityStats(localTotal: number, incomingTotal: number): Enti
 const CONFLICT_SAMPLE_LIMIT = 5;
 const CONFLICT_DIFF_KEY_LIMIT = 8;
 const DELETE_VS_LIVE_AMBIGUOUS_WINDOW_MS = 5 * 1000;
+const PENDING_REMOTE_WRITE_RETRY_BASE_MS = 5 * 1000;
+const PENDING_REMOTE_WRITE_RETRY_MAX_MS = 5 * 60 * 1000;
 const ATTACHMENT_URI_DECODE_LIMIT = 32;
 const ATTACHMENT_TRAVERSAL_SEGMENT_PATTERN = /(^|[\\/])\.\.([\\/]|$)/;
 
@@ -607,21 +609,67 @@ const withPendingRemoteWriteFlag = (data: AppData, pendingAt: string): AppData =
     settings: {
         ...data.settings,
         pendingRemoteWriteAt: pendingAt,
+        pendingRemoteWriteRetryAt: undefined,
+        pendingRemoteWriteAttempts: undefined,
     },
 });
 
 const clearPendingRemoteWriteFlag = (data: AppData): AppData => {
-    if (!data.settings.pendingRemoteWriteAt) return data;
+    if (
+        !data.settings.pendingRemoteWriteAt
+        && data.settings.pendingRemoteWriteRetryAt === undefined
+        && data.settings.pendingRemoteWriteAttempts === undefined
+    ) {
+        return data;
+    }
     return {
         ...data,
         settings: {
             ...data.settings,
             pendingRemoteWriteAt: undefined,
+            pendingRemoteWriteRetryAt: undefined,
+            pendingRemoteWriteAttempts: undefined,
         },
     };
 };
 
 const hasPendingRemoteWriteFlag = (data: AppData): boolean => isValidTimestamp(data.settings.pendingRemoteWriteAt);
+
+const getPendingRemoteWriteAttemptCount = (data: AppData): number => {
+    const attempts = data.settings.pendingRemoteWriteAttempts;
+    if (typeof attempts !== 'number' || !Number.isFinite(attempts) || attempts < 0) {
+        return 0;
+    }
+    return Math.floor(attempts);
+};
+
+const getPendingRemoteWriteBlockedMs = (data: AppData, nowIso: string): number => {
+    if (!isValidTimestamp(data.settings.pendingRemoteWriteRetryAt)) return 0;
+    const retryAtMs = Date.parse(data.settings.pendingRemoteWriteRetryAt as string);
+    const nowMs = Date.parse(nowIso);
+    if (!Number.isFinite(retryAtMs) || !Number.isFinite(nowMs)) return 0;
+    return Math.max(0, retryAtMs - nowMs);
+};
+
+const withPendingRemoteWriteRetry = (data: AppData, nowIso: string): AppData => {
+    const nextAttempts = getPendingRemoteWriteAttemptCount(data) + 1;
+    const backoffMs = Math.min(
+        PENDING_REMOTE_WRITE_RETRY_MAX_MS,
+        PENDING_REMOTE_WRITE_RETRY_BASE_MS * (2 ** Math.max(0, nextAttempts - 1))
+    );
+    const baseMs = Date.parse(nowIso);
+    const retryAt = Number.isFinite(baseMs)
+        ? new Date(baseMs + backoffMs).toISOString()
+        : new Date(Date.now() + backoffMs).toISOString();
+    return {
+        ...data,
+        settings: {
+            ...data.settings,
+            pendingRemoteWriteRetryAt: retryAt,
+            pendingRemoteWriteAttempts: nextAttempts,
+        },
+    };
+};
 
 export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult> {
     const nowIso = io.now ? io.now() : new Date().toISOString();
@@ -643,10 +691,23 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
     let localData = purgeExpiredTombstones(localNormalized, nowIso, io.tombstoneRetentionDays).data;
 
     if (hasPendingRemoteWriteFlag(localData)) {
+        const blockedMs = getPendingRemoteWriteBlockedMs(localData, nowIso);
+        if (blockedMs > 0) {
+            const seconds = Math.max(1, Math.ceil(blockedMs / 1000));
+            throw new Error(`Sync paused briefly after remote write failure. Retry in about ${seconds}s.`);
+        }
         const recoveredLocalData = clearPendingRemoteWriteFlag(localData);
         io.onStep?.('write-remote');
         await yieldToUi();
-        await io.writeRemote(recoveredLocalData);
+        try {
+            await io.writeRemote(recoveredLocalData);
+        } catch (error) {
+            const localDataWithRetry = withPendingRemoteWriteRetry(localData, nowIso);
+            io.onStep?.('write-local');
+            await yieldToUi();
+            await io.writeLocal(localDataWithRetry);
+            throw error;
+        }
         io.onStep?.('write-local');
         await yieldToUi();
         await io.writeLocal(recoveredLocalData);
@@ -764,7 +825,15 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
 
     io.onStep?.('write-remote');
     await yieldToUi();
-    await io.writeRemote(persistedFinalData);
+    try {
+        await io.writeRemote(persistedFinalData);
+    } catch (error) {
+        const localDataWithRetry = withPendingRemoteWriteRetry(finalDataWithPendingRemoteWrite, nowIso);
+        io.onStep?.('write-local');
+        await yieldToUi();
+        await io.writeLocal(localDataWithRetry);
+        throw error;
+    }
 
     io.onStep?.('write-local');
     await yieldToUi();

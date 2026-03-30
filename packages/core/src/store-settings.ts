@@ -30,6 +30,8 @@ const NON_MUTATING_SETTINGS_KEYS = new Set<keyof AppData['settings']>([
     'lastSyncStatus',
     'lastSyncError',
     'pendingRemoteWriteAt',
+    'pendingRemoteWriteRetryAt',
+    'pendingRemoteWriteAttempts',
     'lastSyncStats',
     'lastSyncHistory',
 ]);
