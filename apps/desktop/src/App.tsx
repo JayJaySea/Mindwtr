@@ -4,8 +4,8 @@ import { ListView } from './components/views/ListView';
 import { CalendarView } from './components/views/CalendarView';
 const BoardView = lazy(() => import('./components/views/BoardView').then((m) => ({ default: m.BoardView })));
 const ObsidianView = lazy(() => import('./components/views/ObsidianView').then((m) => ({ default: m.ObsidianView })));
-const ProjectsView = lazy(() => import('./components/views/ProjectsView').then((m) => ({ default: m.ProjectsView })));
 import { ContextsView } from './components/views/ContextsView';
+import { ProjectsView as ProjectsViewEager } from './components/views/ProjectsView';
 const ReviewView = lazy(() => import('./components/views/ReviewView').then((m) => ({ default: m.ReviewView })));
 import { TutorialView } from './components/views/TutorialView';
 import { ArchiveView } from './components/views/ArchiveView';
@@ -38,6 +38,9 @@ import {
 import { useUiStore } from './store/ui-store';
 import { useObsidianStore } from './store/obsidian-store';
 
+const ProjectsView = import.meta.env.DEV
+    ? ProjectsViewEager
+    : lazy(() => import('./components/views/ProjectsView').then((m) => ({ default: m.ProjectsView })));
 const SettingsView = lazy(wrapSettingsOpenImport(
     'settings-view-chunk',
     () => import('./components/views/SettingsView').then((m) => ({ default: m.SettingsView }))
@@ -443,7 +446,9 @@ function App() {
         const id = idleCallback(() => {
             void import('./components/views/BoardView');
             void import('./components/views/ObsidianView');
-            void import('./components/views/ProjectsView');
+            if (!import.meta.env.DEV) {
+                void import('./components/views/ProjectsView');
+            }
             void import('./components/views/ReviewView');
         });
         return () => idleCancel(id);

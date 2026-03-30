@@ -88,7 +88,6 @@ export function ProjectsView() {
     );
     const [isCreating, setIsCreating] = useState(false);
     const [newProjectTitle, setNewProjectTitle] = useState('');
-    const [notesExpanded, setNotesExpanded] = useState(false);
     const [showNotesPreview, setShowNotesPreview] = useState(true);
     const [showDeferredProjects, setShowDeferredProjects] = useState(false);
     const [collapsedAreas, setCollapsedAreas] = useState<Record<string, boolean>>({});
@@ -886,61 +885,55 @@ export function ProjectsView() {
                                         t={t}
                                     />
 
-                                    <ProjectNotesSection
-                                        project={selectedProject}
-                                        notesExpanded={notesExpanded}
-                                        onToggleNotes={() => {
-                                            setNotesExpanded((prev) => {
-                                                const next = !prev;
-                                                if (next) setShowNotesPreview(true);
-                                                return next;
-                                            });
-                                        }}
-                                        showNotesPreview={showNotesPreview}
-                                        onTogglePreview={() => setShowNotesPreview((value) => !value)}
-                                        onAddFile={addProjectFileAttachment}
-                                        onAddLink={addProjectLinkAttachment}
-                                        attachmentsBusy={isProjectAttachmentBusy}
-                                        visibleAttachments={visibleAttachments}
-                                        attachmentError={attachmentError}
-                                        onOpenAttachment={openAttachment}
-                                        onRemoveAttachment={removeProjectAttachment}
-                                        onUpdateNotes={(value) => updateProject(selectedProject.id, { supportNotes: value })}
-                                        t={t}
-                                    />
-
                                     {projectDetailsExpanded && (
-                                        <ProjectDetailsFields
-                                            project={selectedProject}
-                                            selectedAreaId={
-                                                selectedProject.areaId && areaById.has(selectedProject.areaId)
-                                                    ? selectedProject.areaId
-                                                    : NO_AREA
-                                            }
-                                            sortedAreas={sortedAreas}
-                                            noAreaId={NO_AREA}
-                                            t={t}
-                                            tagDraft={tagDraft}
-                                            onTagDraftChange={setTagDraft}
-                                            onCommitTags={() => {
-                                                const tags = parseTagInput(tagDraft);
-                                                updateProject(selectedProject.id, { tagIds: tags });
-                                            }}
-                                            onNewArea={() => {
-                                                setPendingAreaAssignProjectId(selectedProject.id);
-                                                setShowQuickAreaPrompt(true);
-                                            }}
-                                            onManageAreas={() => setShowAreaManager(true)}
-                                            onAreaChange={(value) => {
-                                                updateProject(selectedProject.id, { areaId: value === NO_AREA ? undefined : value });
-                                            }}
-                                            isSequential={selectedProject.isSequential === true}
-                                            onToggleSequential={() => updateProject(selectedProject.id, { isSequential: !selectedProject.isSequential })}
-                                            status={selectedProject.status}
-                                            onChangeStatus={(status) => updateProject(selectedProject.id, { status })}
-                                            reviewAtValue={toDateTimeLocalValue(selectedProject.reviewAt)}
-                                            onReviewAtChange={(value) => updateProject(selectedProject.id, { reviewAt: value || undefined })}
-                                        />
+                                        <>
+                                            <ProjectDetailsFields
+                                                project={selectedProject}
+                                                selectedAreaId={
+                                                    selectedProject.areaId && areaById.has(selectedProject.areaId)
+                                                        ? selectedProject.areaId
+                                                        : NO_AREA
+                                                }
+                                                sortedAreas={sortedAreas}
+                                                noAreaId={NO_AREA}
+                                                t={t}
+                                                tagDraft={tagDraft}
+                                                onTagDraftChange={setTagDraft}
+                                                onCommitTags={() => {
+                                                    const tags = parseTagInput(tagDraft);
+                                                    updateProject(selectedProject.id, { tagIds: tags });
+                                                }}
+                                                onNewArea={() => {
+                                                    setPendingAreaAssignProjectId(selectedProject.id);
+                                                    setShowQuickAreaPrompt(true);
+                                                }}
+                                                onManageAreas={() => setShowAreaManager(true)}
+                                                onAreaChange={(value) => {
+                                                    updateProject(selectedProject.id, { areaId: value === NO_AREA ? undefined : value });
+                                                }}
+                                                isSequential={selectedProject.isSequential === true}
+                                                onToggleSequential={() => updateProject(selectedProject.id, { isSequential: !selectedProject.isSequential })}
+                                                status={selectedProject.status}
+                                                onChangeStatus={(status) => updateProject(selectedProject.id, { status })}
+                                                reviewAtValue={toDateTimeLocalValue(selectedProject.reviewAt)}
+                                                onReviewAtChange={(value) => updateProject(selectedProject.id, { reviewAt: value || undefined })}
+                                            />
+
+                                            <ProjectNotesSection
+                                                project={selectedProject}
+                                                showNotesPreview={showNotesPreview}
+                                                onTogglePreview={() => setShowNotesPreview((value) => !value)}
+                                                onAddFile={addProjectFileAttachment}
+                                                onAddLink={addProjectLinkAttachment}
+                                                attachmentsBusy={isProjectAttachmentBusy}
+                                                visibleAttachments={visibleAttachments}
+                                                attachmentError={attachmentError}
+                                                onOpenAttachment={openAttachment}
+                                                onRemoveAttachment={removeProjectAttachment}
+                                                onUpdateNotes={(value) => updateProject(selectedProject.id, { supportNotes: value })}
+                                                t={t}
+                                            />
+                                        </>
                                     )}
 
                                     <section className="py-5 border-t border-border/50">

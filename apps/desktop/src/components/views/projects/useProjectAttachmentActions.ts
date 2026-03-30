@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
 import { type Attachment, generateUUID, type Project, validateAttachmentForUpload } from '@mindwtr/core';
-import { invoke } from '@tauri-apps/api/core';
-import { size } from '@tauri-apps/plugin-fs';
 import { isTauriRuntime } from '../../../lib/runtime';
 import { logWarn } from '../../../lib/app-log';
 
@@ -31,6 +29,7 @@ export function useProjectAttachmentActions({
         const normalized = hasScheme ? attachment.uri : `file://${attachment.uri}`;
         if (isTauriRuntime()) {
             try {
+                const { invoke } = await import('@tauri-apps/api/core');
                 await invoke('open_path', { path: attachment.uri });
                 return;
             } catch (error) {
@@ -61,6 +60,7 @@ export function useProjectAttachmentActions({
             });
             if (!selected || typeof selected !== 'string') return;
             try {
+                const { size } = await import('@tauri-apps/plugin-fs');
                 const fileSize = await size(selected);
                 const validation = await validateAttachmentForUpload(
                     {
