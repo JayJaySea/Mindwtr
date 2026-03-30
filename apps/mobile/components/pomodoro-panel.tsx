@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   type Task,
@@ -40,6 +40,7 @@ export function PomodoroPanel({
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>(undefined);
   const [phaseEndsAt, setPhaseEndsAt] = useState<string | undefined>(undefined);
   const [lastEvent, setLastEvent] = useState<PomodoroEvent>(null);
+  const [isHydratingSession, setIsHydratingSession] = useState(true);
   const previousEventRef = useRef<PomodoroEvent>(null);
   const hasHydratedRef = useRef(false);
   const persistedRemainingSeconds = timerState.isRunning && phaseEndsAt
@@ -97,6 +98,7 @@ export function PomodoroPanel({
       } finally {
         if (!cancelled) {
           hasHydratedRef.current = true;
+          setIsHydratingSession(false);
         }
       }
     };
@@ -167,6 +169,7 @@ export function PomodoroPanel({
   const phaseLabel = phaseRaw.startsWith('pomodoro.') ? (timerState.phase === 'focus' ? 'Focus session' : 'Break') : phaseRaw;
   const noTaskRaw = t('pomodoro.noTask');
   const noTaskLabel = noTaskRaw.startsWith('pomodoro.') ? 'No available focus task' : noTaskRaw;
+  const loadingLabel = t('common.loading') === 'common.loading' ? 'Loading...' : t('common.loading');
 
   useEffect(() => {
     const previous = previousEventRef.current;
@@ -274,6 +277,13 @@ export function PomodoroPanel({
         </View>
       </View>
 
+      {isHydratingSession && (
+        <View style={styles.loadingRow}>
+          <ActivityIndicator size="small" color={tc.tint} />
+          <Text style={[styles.loadingText, { color: tc.secondaryText }]}>{loadingLabel}</Text>
+        </View>
+      )}
+
       <View style={styles.presetRow}>
         {POMODORO_PRESETS.map((preset) => {
           const active = durations.focusMinutes === preset.focusMinutes && durations.breakMinutes === preset.breakMinutes;
@@ -281,9 +291,11 @@ export function PomodoroPanel({
             <Pressable
               key={preset.id}
               onPress={() => handleApplyPreset(preset.focusMinutes, preset.breakMinutes)}
+              disabled={isHydratingSession}
               style={[
                 styles.presetChip,
                 {
+                  opacity: isHydratingSession ? 0.6 : 1,
                   borderColor: active ? tc.tint : tc.border,
                   backgroundColor: active ? tc.tint : tc.filterBg,
                 },
@@ -338,11 +350,11 @@ export function PomodoroPanel({
       <View style={styles.actionRow}>
         <Pressable
           onPress={handleToggleRun}
-          disabled={!selectedTask}
+          disabled={!selectedTask || isHydratingSession}
           style={[
             styles.actionPrimary,
             {
-              opacity: selectedTask ? 1 : 0.5,
+              opacity: selectedTask && !isHydratingSession ? 1 : 0.5,
               backgroundColor: tc.tint,
               borderColor: tc.tint,
             },
@@ -356,6 +368,7 @@ export function PomodoroPanel({
         </Pressable>
         <Pressable
           onPress={handleReset}
+          disabled={isHydratingSession}
           style={[styles.actionSecondary, { borderColor: tc.border, backgroundColor: tc.filterBg }]}
         >
           <Text style={[styles.actionSecondaryText, { color: tc.secondaryText }]}>
@@ -364,6 +377,7 @@ export function PomodoroPanel({
         </Pressable>
         <Pressable
           onPress={handleSwitchPhase}
+          disabled={isHydratingSession}
           style={[styles.actionSecondary, { borderColor: tc.border, backgroundColor: tc.filterBg }]}
         >
           <Text style={[styles.actionSecondaryText, { color: tc.secondaryText }]}>
@@ -372,11 +386,11 @@ export function PomodoroPanel({
         </Pressable>
         <Pressable
           onPress={handleMarkDone}
-          disabled={!selectedTask}
+          disabled={!selectedTask || isHydratingSession}
           style={[
             styles.actionDone,
             {
-              opacity: selectedTask ? 1 : 0.5,
+              opacity: selectedTask && !isHydratingSession ? 1 : 0.5,
               borderColor: '#059669',
               backgroundColor: '#059669',
             },
@@ -414,6 +428,15 @@ const styles = StyleSheet.create({
   headerText: {
     flex: 1,
     gap: 2,
+  },
+  loadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  loadingText: {
+    fontSize: 12,
+    fontWeight: '500',
   },
   title: {
     fontSize: 16,
