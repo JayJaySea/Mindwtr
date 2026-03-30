@@ -3,6 +3,7 @@ import { act, cleanup, render } from '@testing-library/react';
 import { useTaskStore } from '@mindwtr/core';
 
 import { LanguageProvider } from '../contexts/language-context';
+import { KeybindingProvider } from '../contexts/keybinding-context';
 import { useUiStore } from '../store/ui-store';
 import { useObsidianStore } from '../store/obsidian-store';
 import { Layout } from './Layout';
@@ -17,12 +18,15 @@ vi.mock('../lib/sync-service', () => ({
 const initialTaskState = useTaskStore.getState();
 const initialUiState = useUiStore.getState();
 const initialObsidianState = useObsidianStore.getState();
+const onNavigate = vi.fn();
 
 const renderLayout = () => render(
     <LanguageProvider>
-        <Layout currentView="inbox" onViewChange={vi.fn()}>
-            <div>Main content</div>
-        </Layout>
+        <KeybindingProvider currentView="inbox" onNavigate={onNavigate}>
+            <Layout currentView="inbox" onViewChange={vi.fn()}>
+                <div>Main content</div>
+            </Layout>
+        </KeybindingProvider>
     </LanguageProvider>
 );
 
