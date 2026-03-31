@@ -266,7 +266,7 @@ export function Layout({ children, currentView, onViewChange }: LayoutProps) {
                 href="#main-content"
                 className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:px-3 focus:py-2 focus:rounded-md focus:bg-primary focus:text-primary-foreground"
             >
-                {t('accessibility.skipToContent') || 'Skip to content'}
+                {tOrFallback('accessibility.skipToContent', 'Skip to content')}
             </a>
             {/* Sidebar */}
             {!isFocusMode && (
@@ -448,7 +448,7 @@ export function Layout({ children, currentView, onViewChange }: LayoutProps) {
                 data-main-content
                 tabIndex={-1}
                 role="main"
-                aria-label={t('accessibility.mainContent') || 'Main content'}
+                aria-label={tOrFallback('accessibility.mainContent', 'Main content')}
             >
                 <div className={cn(
                     "mx-auto p-8 h-full",
