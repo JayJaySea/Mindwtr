@@ -20,6 +20,8 @@ on:
         required: false
       APPLE_SIGNING_IDENTITY:
         required: false
+      APPLE_PROVISIONING_PROFILE:
+        required: false
   workflow_dispatch:
     inputs:
       tag:
@@ -149,6 +151,130 @@ jobs:
           echo "Resolved macOS signing identity: ${RESOLVED_IDENTITY}"
           echo "APPLE_SIGNING_IDENTITY=${RESOLVED_IDENTITY}" >> "$GITHUB_ENV"
 
+      - name: Install Developer ID provisioning profile
+        env:
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          PROFILE_PATH="$RUNNER_TEMP/mindwtr-dev-id.provisionprofile"
+          PROFILE_PLIST="$RUNNER_TEMP/mindwtr-dev-id-profile.plist"
+          EXPECTED_BUNDLE_ID="tech.dongdongbh.mindwtr"
+          EXPECTED_ICLOUD_CONTAINER="iCloud.tech.dongdongbh.mindwtr"
+
+          rm -f apps/desktop/src-tauri/embedded.provisionprofile
+
+          if [ -z "${APPLE_PROVISIONING_PROFILE:-}" ]; then
+            echo "HAS_APPLE_PROVISIONING_PROFILE=0" >> "$GITHUB_ENV"
+            echo "Developer ID provisioning profile not configured."
+            exit 0
+          fi
+
+          if ! printf '%s' "$APPLE_PROVISIONING_PROFILE" | tr -d '\r' | base64 --decode > "$PROFILE_PATH" 2>/dev/null; then
+            printf '%s' "$APPLE_PROVISIONING_PROFILE" | tr -d '\r' | base64 -D > "$PROFILE_PATH"
+          fi
+
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+
+          profile_field() {
+            local plist_path="$1"
+            local key_path="$2"
+            /usr/libexec/PlistBuddy -c "Print :${key_path}" "$plist_path" 2>/dev/null || true
+          }
+
+          verify_profile_bundle() {
+            local app_id="$1"
+            local expected_bundle_id="$2"
+            local profile_label="$3"
+            local expected_id=""
+            local wildcard_id=""
+            if [ -n "${APPLE_TEAM_ID:-}" ]; then
+              expected_id="${APPLE_TEAM_ID}.${expected_bundle_id}"
+              wildcard_id="${APPLE_TEAM_ID}.*"
+            fi
+
+            if [ -n "$expected_id" ] && [ "$app_id" != "$expected_id" ] && [ "$app_id" != "$wildcard_id" ]; then
+              echo "::error::${profile_label} application-identifier (${app_id}) does not match expected (${expected_id}) or wildcard (${wildcard_id})."
+              exit 1
+            fi
+          }
+
+          PROFILE_NAME="$(profile_field "$PROFILE_PLIST" "Name")"
+          PROFILE_TEAM_ID="$(profile_field "$PROFILE_PLIST" "TeamIdentifier:0")"
+          PROFILE_APP_ID="$(profile_field "$PROFILE_PLIST" "Entitlements:application-identifier")"
+          PROFILE_ICLOUD_SERVICES="$(profile_field "$PROFILE_PLIST" "Entitlements:com.apple.developer.icloud-services")"
+          PROFILE_ICLOUD_CONTAINERS="$(profile_field "$PROFILE_PLIST" "Entitlements:com.apple.developer.icloud-container-identifiers")"
+          PROFILE_APS_ENV="$(profile_field "$PROFILE_PLIST" "Entitlements:com.apple.developer.aps-environment")"
+
+          if [ -n "${APPLE_TEAM_ID:-}" ] && [ "$PROFILE_TEAM_ID" != "$APPLE_TEAM_ID" ]; then
+            echo "::error::Developer ID provisioning profile TeamIdentifier (${PROFILE_TEAM_ID}) does not match expected team (${APPLE_TEAM_ID})."
+            exit 1
+          fi
+
+          verify_profile_bundle "$PROFILE_APP_ID" "$EXPECTED_BUNDLE_ID" "Developer ID provisioning profile"
+
+          if ! printf '%s\n' "$PROFILE_ICLOUD_SERVICES" | grep -Eq '(^CloudKit$|^[[:space:]]*CloudKit$|^\*$|^[[:space:]]*\*$)'; then
+            echo "::error::Developer ID provisioning profile (${PROFILE_NAME:-unknown}) is missing the CloudKit entitlement."
+            exit 1
+          fi
+
+          if ! printf '%s\n' "$PROFILE_ICLOUD_CONTAINERS" | grep -Fq "$EXPECTED_ICLOUD_CONTAINER" \
+            && ! printf '%s\n' "$PROFILE_ICLOUD_CONTAINERS" | grep -Eq '^[[:space:]]*\\*[[:space:]]*$'; then
+            echo "::error::Developer ID provisioning profile (${PROFILE_NAME:-unknown}) does not include iCloud container ${EXPECTED_ICLOUD_CONTAINER}."
+            exit 1
+          fi
+
+          if [ "$PROFILE_APS_ENV" != "production" ]; then
+            echo "::error::Developer ID provisioning profile (${PROFILE_NAME:-unknown}) has com.apple.developer.aps-environment='${PROFILE_APS_ENV:-}'. Expected 'production'."
+            exit 1
+          fi
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/mindwtr-dev-id.provisionprofile"
+          cp "$PROFILE_PATH" apps/desktop/src-tauri/embedded.provisionprofile
+          echo "HAS_APPLE_PROVISIONING_PROFILE=1" >> "$GITHUB_ENV"
+          echo "Installed Developer ID provisioning profile: ${PROFILE_NAME:-unknown}"
+
+      - name: Validate macOS Developer ID entitlements
+        env:
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import plistlib
+          from pathlib import Path
+
+          path = Path("apps/desktop/src-tauri/Entitlements.mac.plist")
+          entitlements = plistlib.loads(path.read_bytes())
+
+          if "aps-environment" in entitlements:
+              raise SystemExit("Invalid macOS entitlement: use com.apple.developer.aps-environment, not aps-environment")
+
+          advanced_keys = [
+              "com.apple.developer.icloud-services",
+              "com.apple.developer.icloud-container-identifiers",
+              "com.apple.developer.aps-environment",
+          ]
+          requested_advanced = [key for key in advanced_keys if key in entitlements]
+          has_profile = bool(os.environ.get("APPLE_PROVISIONING_PROFILE", "").strip())
+
+          if requested_advanced and not has_profile:
+              raise SystemExit(
+                  "Entitlements.mac.plist requests advanced capabilities "
+                  f"({', '.join(requested_advanced)}) but APPLE_PROVISIONING_PROFILE is not configured. "
+                  "Developer ID builds with CloudKit/push entitlements require an embedded provisioning profile."
+              )
+
+          aps_env = entitlements.get("com.apple.developer.aps-environment")
+          if aps_env not in (None, "production"):
+              raise SystemExit(
+                  f"Invalid com.apple.developer.aps-environment in {path}: expected 'production' or unset, got {aps_env!r}"
+              )
+
+          print(f"Validated Developer ID entitlements in {path}")
+          PY
+
       - name: Prepare macOS release Tauri config
         run: |
           python3 - <<'PY'
@@ -159,12 +285,17 @@ jobs:
           config = json.loads(path.read_text(encoding="utf-8"))
           mac = config.setdefault("bundle", {}).setdefault("macOS", {})
           files = mac.get("files")
-          if isinstance(files, dict):
-            files.pop("Info.plist", None)
-            if files:
-              mac["files"] = files
-            else:
-              mac.pop("files", None)
+          if not isinstance(files, dict):
+            files = {}
+          files.pop("Info.plist", None)
+          if Path("apps/desktop/src-tauri/embedded.provisionprofile").exists():
+            files["embedded.provisionprofile"] = "./embedded.provisionprofile"
+          else:
+            files.pop("embedded.provisionprofile", None)
+          if files:
+            mac["files"] = files
+          else:
+            mac.pop("files", None)
           mac["infoPlist"] = "./Info.plist"
           path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
           print("Prepared tauri.conf.json for notarized macOS build")
@@ -254,6 +385,23 @@ jobs:
             echo "Resolved entitlements:"
             cat "$ENTITLEMENTS_PATH" || true
             exit 1
+          fi
+          if [ "${HAS_APPLE_PROVISIONING_PROFILE:-0}" = "1" ]; then
+            if [ ! -f "$APP_PATH/Contents/embedded.provisionprofile" ]; then
+              echo "::error::Signed macOS app is missing embedded.provisionprofile."
+              exit 1
+            fi
+            for key in \
+              com.apple.developer.icloud-services \
+              com.apple.developer.icloud-container-identifiers \
+              com.apple.developer.aps-environment; do
+              if ! grep -Fq "<key>${key}</key>" "$ENTITLEMENTS_PATH"; then
+                echo "::error::Signed macOS app is missing expected entitlement ${key}."
+                echo "Resolved entitlements:"
+                cat "$ENTITLEMENTS_PATH" || true
+                exit 1
+              fi
+            done
           fi
         shell: bash
 
