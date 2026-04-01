@@ -640,7 +640,7 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                     'info',
                     5000,
                     {
-                        label: 'Undo',
+                        label: t('common.undo') || 'Undo',
                         onClick: () => {
                             void moveTask(task.id, task.status);
                         },

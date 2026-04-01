@@ -719,6 +719,11 @@ export const TaskItem = memo(function TaskItem({
         if (translated === 'common.skip') return 'Skip';
         return translated;
     }, [t]);
+    const undoLabel = useMemo(() => {
+        const translated = t('common.undo');
+        if (translated === 'common.undo') return 'Undo';
+        return translated;
+    }, [t]);
     const handleMoveToWaitingWithPrompt = useCallback(() => {
         setShowWaitingDuePrompt(true);
     }, []);
@@ -732,7 +737,7 @@ export const TaskItem = memo(function TaskItem({
                     'info',
                     5000,
                     {
-                        label: 'Undo',
+                        label: undoLabel,
                         onClick: () => {
                             void moveTask(task.id, previousStatus);
                         },
@@ -740,7 +745,7 @@ export const TaskItem = memo(function TaskItem({
                 );
             })
             .catch((error) => reportError('Failed to change task status', error));
-    }, [moveTask, showToast, task.id, task.status, task.title, undoNotificationsEnabled]);
+    }, [moveTask, showToast, task.id, task.status, task.title, undoLabel, undoNotificationsEnabled]);
     const hasPendingEdits = useCallback(() => {
         if (editTitle !== task.title) return true;
         if (editDescription !== (task.description || '')) return true;
@@ -1107,7 +1112,7 @@ export const TaskItem = memo(function TaskItem({
                 <ConfirmModal
                     isOpen={showDeleteConfirm}
                     title={resolveText('common.delete', 'Delete task')}
-                    description={resolveText('list.confirmBatchDelete', 'Delete selected tasks?')}
+                    description={resolveText('task.deleteConfirmBody', 'Move this task to Trash?')}
                     confirmLabel={resolveText('common.delete', 'Delete')}
                     cancelLabel={t('common.cancel')}
                     onCancel={() => setShowDeleteConfirm(false)}
@@ -1121,7 +1126,7 @@ export const TaskItem = memo(function TaskItem({
                             'info',
                             5000,
                             {
-                                label: 'Undo',
+                                label: undoLabel,
                                 onClick: () => {
                                     void restoreTask(task.id);
                                 },
