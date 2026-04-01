@@ -666,6 +666,40 @@ describe('cloud server api', () => {
         expect(payload.error).toContain('Unsupported task props');
     });
 
+    test('accepts quick-add input longer than the task title limit when the parsed title stays short', async () => {
+        const input = `Cloud Task /note:${'x'.repeat(700)}`;
+        expect(input.length).toBeGreaterThan(500);
+
+        const createResponse = await fetch(`${baseUrl}/v1/tasks`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ input }),
+        });
+
+        expect(createResponse.status).toBe(201);
+        const payload = await createResponse.json();
+        expect(payload.task.title).toBe('Cloud Task');
+    });
+
+    test('rejects quick-add input above the cloud quick-add length cap', async () => {
+        const input = `Cloud Task /note:${'x'.repeat(2100)}`;
+
+        const createResponse = await fetch(`${baseUrl}/v1/tasks`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ input }),
+        });
+
+        expect(createResponse.status).toBe(400);
+        expect((await createResponse.json()).error).toBe('Quick-add input too long (max 2000 characters)');
+    });
+
     test('auth failure rate limiting does not trust spoofed forwarded IP headers by default', async () => {
         let lastStatus = 0;
         for (let attempt = 0; attempt < 31; attempt += 1) {

@@ -31,6 +31,7 @@ import {
     logError,
     logInfo,
     logWarn,
+    MAX_TASK_QUICK_ADD_LENGTH,
     MAX_TASK_TITLE_LENGTH,
     normalizeRevision,
     parseArgs,
@@ -342,8 +343,8 @@ export async function startCloudServer(options: CloudServerOptions = {}): Promis
                                 return errorResponse(validatedInitialProps.error, 400);
                             }
                             const initialProps = validatedInitialProps.props;
-                            if (input.trim().length > MAX_TASK_TITLE_LENGTH) {
-                                return errorResponse(`Quick-add input too long (max ${MAX_TASK_TITLE_LENGTH} characters)`, 400);
+                            if (input.trim().length > MAX_TASK_QUICK_ADD_LENGTH) {
+                                return errorResponse(`Quick-add input too long (max ${MAX_TASK_QUICK_ADD_LENGTH} characters)`, 400);
                             }
 
                             const parsed = input

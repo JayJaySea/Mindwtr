@@ -63,6 +63,7 @@ Optional but useful:
 | `MINDWTR_CLOUD_MAX_ATTACHMENT_BYTES` | Max attachment upload size. | `50000000` |
 | `MINDWTR_CLOUD_REQUEST_TIMEOUT_MS` | Per-request timeout for cloud handlers. | `30000` |
 | `MINDWTR_CLOUD_MAX_TASK_TITLE_LENGTH` | Max task title length accepted by cloud task endpoints. | `500` |
+| `MINDWTR_CLOUD_MAX_TASK_QUICK_ADD_LENGTH` | Max quick-add input length accepted by cloud task creation. | `2000` |
 | `MINDWTR_CLOUD_MAX_ITEMS_PER_COLLECTION` | Max tasks/projects/sections/areas per uploaded collection. | `50000` |
 
 ### Pagination and list shaping

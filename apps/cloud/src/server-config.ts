@@ -63,6 +63,10 @@ const maxTaskTitleLengthValue = Number(process.env.MINDWTR_CLOUD_MAX_TASK_TITLE_
 export const MAX_TASK_TITLE_LENGTH = Number.isFinite(maxTaskTitleLengthValue) && maxTaskTitleLengthValue > 0
     ? Math.floor(maxTaskTitleLengthValue)
     : 500;
+const maxTaskQuickAddLengthValue = Number(process.env.MINDWTR_CLOUD_MAX_TASK_QUICK_ADD_LENGTH || 2000);
+export const MAX_TASK_QUICK_ADD_LENGTH = Number.isFinite(maxTaskQuickAddLengthValue) && maxTaskQuickAddLengthValue > 0
+    ? Math.floor(maxTaskQuickAddLengthValue)
+    : 2000;
 const maxItemsPerCollectionValue = Number(process.env.MINDWTR_CLOUD_MAX_ITEMS_PER_COLLECTION || 50_000);
 export const MAX_ITEMS_PER_COLLECTION = Number.isFinite(maxItemsPerCollectionValue) && maxItemsPerCollectionValue > 0
     ? Math.floor(maxItemsPerCollectionValue)

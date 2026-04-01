@@ -279,6 +279,7 @@ These limits are useful when wiring Mindwtr into agent workflows:
 
 - `mindwtr_list_tasks` defaults to `limit: 200` and caps `limit` at `500`.
 - Task titles are capped at `500` characters for MCP task creation/update validation.
+- Quick-add inputs are capped at `2000` characters for MCP task creation, matching the cloud task API quick-add limit.
 - The SQLite layer uses a `busy_timeout` of 5 seconds, so a locked database should fail instead of hanging indefinitely.
 
 If you need more than 500 tasks, page with `limit` + `offset` instead of expecting one unbounded response.
