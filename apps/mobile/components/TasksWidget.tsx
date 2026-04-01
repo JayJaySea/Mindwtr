@@ -3,6 +3,8 @@ import { FlexWidget, TextWidget } from 'react-native-android-widget';
 
 import type { TasksWidgetPayload } from '../lib/widget-data';
 
+const TASK_ITEM_FONT_SIZE = 13;
+
 export function buildTasksWidgetTree(payload: TasksWidgetPayload) {
     const { headerTitle, subtitle, items, emptyMessage, captureLabel, focusUri, quickCaptureUri, palette } = payload;
     const contentChildren: React.ReactElement[] = [
@@ -32,7 +34,7 @@ export function buildTasksWidgetTree(payload: TasksWidgetPayload) {
                     text: `• ${item.title}`,
                     style: {
                         color: palette.text,
-                        fontSize: 12,
+                        fontSize: TASK_ITEM_FONT_SIZE,
                         marginTop: index === 0 ? 7 : 4,
                     },
                     maxLines: 1,
