@@ -217,4 +217,52 @@ export const styles = StyleSheet.create({
     },
     inputGroup: { padding: 16 },
     textInput: { marginTop: 8, borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14 },
+    manageColorPicker: {
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        gap: 10,
+        marginTop: 16,
+    },
+    manageColorOption: {
+        width: 32,
+        height: 32,
+        borderRadius: 16,
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderWidth: 1,
+        borderColor: 'rgba(15, 23, 42, 0.15)',
+    },
+    manageColorOptionSelected: {
+        borderWidth: 2,
+        borderColor: '#0f172a',
+    },
+    manageEditorActions: {
+        flexDirection: 'row',
+        justifyContent: 'flex-end',
+        gap: 10,
+        marginTop: 20,
+    },
+    manageEditorButton: {
+        minWidth: 92,
+        minHeight: 42,
+        borderRadius: 10,
+        borderWidth: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingHorizontal: 14,
+    },
+    manageEditorButtonPrimary: {
+        backgroundColor: '#2563eb',
+        borderColor: '#2563eb',
+    },
+    manageEditorButtonDisabled: {
+        opacity: 0.5,
+    },
+    manageEditorButtonText: {
+        fontSize: 14,
+        fontWeight: '600',
+    },
+    manageEditorButtonPrimaryText: {
+        color: '#FFFFFF',
+    },
 });

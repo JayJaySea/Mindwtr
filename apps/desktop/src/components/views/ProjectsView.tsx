@@ -1025,7 +1025,7 @@ export function ProjectsView() {
                         onDeleteArea={handleDeleteArea}
                         onUpdateArea={updateArea}
                         newAreaColor={newAreaColor}
-                        onChangeNewAreaColor={(event) => setNewAreaColor(event.target.value)}
+                        onChangeNewAreaColor={setNewAreaColor}
                         newAreaName={newAreaName}
                         onChangeNewAreaName={(event) => setNewAreaName(event.target.value)}
                         onCreateArea={async () => {

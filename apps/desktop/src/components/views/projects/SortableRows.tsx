@@ -1,8 +1,9 @@
-import { DEFAULT_AREA_COLOR, type Area, type Project, type Task } from '@mindwtr/core';
+import { type Area, type Project, type Task } from '@mindwtr/core';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { GripVertical, Trash2 } from 'lucide-react';
 import { TaskItem } from '../../TaskItem';
+import { AreaColorPicker } from './AreaColorPicker';
 
 type AreaRowProps = {
     area: Area;
@@ -46,12 +47,9 @@ export function SortableAreaRow({
             >
                 <GripVertical className="w-4 h-4" />
             </button>
-            <input
-                type="color"
-                value={area.color || DEFAULT_AREA_COLOR}
-                onInput={(e) => commitAreaColor(e.currentTarget.value)}
-                onChange={(e) => commitAreaColor(e.currentTarget.value)}
-                className="w-8 h-8 rounded cursor-pointer border-0 p-0"
+            <AreaColorPicker
+                value={area.color}
+                onChange={commitAreaColor}
                 title={t('projects.color')}
             />
             <input

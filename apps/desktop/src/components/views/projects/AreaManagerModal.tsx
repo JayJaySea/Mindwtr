@@ -1,8 +1,9 @@
 import { DndContext, type DragEndEvent, closestCenter } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import type { Area } from '@mindwtr/core';
-import type { MouseEventHandler, ChangeEventHandler } from 'react';
+import type { ChangeEventHandler, MouseEventHandler } from 'react';
 import { SortableAreaRow } from './SortableRows';
+import { AreaColorPicker } from './AreaColorPicker';
 
 type AreaManagerModalProps = {
     sortedAreas: Area[];
@@ -11,7 +12,7 @@ type AreaManagerModalProps = {
     onDeleteArea: (areaId: string) => void;
     onUpdateArea: (areaId: string, updates: Partial<Area>) => Promise<void> | void;
     newAreaColor: string;
-    onChangeNewAreaColor: ChangeEventHandler<HTMLInputElement>;
+    onChangeNewAreaColor: (color: string) => void;
     newAreaName: string;
     onChangeNewAreaName: ChangeEventHandler<HTMLInputElement>;
     onCreateArea: () => void;
@@ -119,11 +120,10 @@ export function AreaManagerModal({
                             {newAreaLabel}
                         </label>
                         <div className="flex items-center gap-2">
-                            <input
-                                type="color"
+                            <AreaColorPicker
                                 value={newAreaColor}
                                 onChange={onChangeNewAreaColor}
-                                className="w-8 h-8 rounded cursor-pointer border-0 p-0"
+                                title={t('projects.color')}
                             />
                             <input
                                 type="text"

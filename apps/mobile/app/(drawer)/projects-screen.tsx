@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { View, Text, TextInput, TouchableOpacity, Modal, Alert, Pressable, ScrollView, SectionList, Dimensions, Platform, Keyboard, ActionSheetIOS } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { Area, Attachment, DEFAULT_PROJECT_COLOR, generateUUID, getAttachmentDisplayTitle, normalizeLinkAttachmentInput, Project, Task, useTaskStore, validateAttachmentForUpload } from '@mindwtr/core';
+import { AREA_PRESET_COLORS, Area, Attachment, DEFAULT_PROJECT_COLOR, generateUUID, getAttachmentDisplayTitle, normalizeLinkAttachmentInput, Project, Task, useTaskStore, validateAttachmentForUpload } from '@mindwtr/core';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as Linking from 'expo-linking';
@@ -85,7 +85,7 @@ export default function ProjectsScreen() {
   const areaManagerListMaxHeight = Math.min(windowHeight * 0.45, 320);
   const overlayModalPresentation = Platform.OS === 'ios' ? 'overFullScreen' : 'fullScreen';
 
-  const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
+  const colors = AREA_PRESET_COLORS;
   const colorDisplayByHex: Record<string, { nameKey: string; swatch: string }> = {
     '#3b82f6': { nameKey: 'projects.colorBlue', swatch: '🔵' },
     '#10b981': { nameKey: 'projects.colorGreen', swatch: '🟢' },

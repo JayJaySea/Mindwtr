@@ -4,6 +4,7 @@ import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-
 import { CSS } from '@dnd-kit/utilities';
 import { GripVertical, Trash2, ChevronDown, ChevronRight, Pencil, Check, X } from 'lucide-react';
 import { DEFAULT_AREA_COLOR, useTaskStore, type Area } from '@mindwtr/core';
+import { AreaColorPicker } from '../projects/AreaColorPicker';
 
 type Labels = {
     manage: string;
@@ -58,12 +59,9 @@ function SortableAreaRow({
             >
                 <GripVertical className="w-4 h-4" />
             </button>
-            <input
-                type="color"
-                value={area.color || DEFAULT_AREA_COLOR}
-                onInput={(e) => commitColor(e.currentTarget.value)}
-                onChange={(e) => commitColor(e.currentTarget.value)}
-                className="w-8 h-8 rounded cursor-pointer border-0 p-0 shrink-0"
+            <AreaColorPicker
+                value={area.color}
+                onChange={commitColor}
                 title={translate('projects.color')}
             />
             <input
@@ -327,11 +325,10 @@ export function SettingsManagePage({ t: _t, translate }: SettingsManagePageProps
                         {resolveText('areas.new', 'New Area')}
                     </label>
                     <div className="flex items-center gap-2">
-                        <input
-                            type="color"
+                        <AreaColorPicker
                             value={newAreaColor}
-                            onChange={(e) => setNewAreaColor(e.target.value)}
-                            className="w-8 h-8 rounded cursor-pointer border-0 p-0"
+                            onChange={setNewAreaColor}
+                            title={translate('projects.color')}
                         />
                         <input
                             type="text"

@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
-import { Alert, ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, Modal, Pressable, ScrollView, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { useTaskStore } from '@mindwtr/core';
+import { AREA_PRESET_COLORS, DEFAULT_AREA_COLOR, type Area, useTaskStore } from '@mindwtr/core';
 
 import { useThemeColors } from '@/hooks/use-theme-colors';
 
@@ -25,6 +25,13 @@ export function ManageSettingsScreen() {
     const renameContext = useTaskStore((state) => state.renameContext);
     const sortedAreas = [...areas].sort((a, b) => a.order - b.order);
     const { allContexts, allTags } = derivedState;
+    const [editorTarget, setEditorTarget] = useState<
+        | { type: 'area'; id: string; name: string; color?: string }
+        | { type: 'context' | 'tag'; name: string }
+        | null
+    >(null);
+    const [editorName, setEditorName] = useState('');
+    const [editorColor, setEditorColor] = useState(DEFAULT_AREA_COLOR);
 
     const localize2 = (en: string, zh: string) => localize(en, zh);
     const confirmDelete = (label: string, onConfirm: () => void) => {
@@ -38,25 +45,55 @@ export function ManageSettingsScreen() {
         );
     };
 
-    const promptRename = (currentValue: string, onRename: (newValue: string) => void) => {
-        Alert.prompt(
-            localize2('Rename', '重命名'),
-            undefined,
-            [
-                { text: localize2('Cancel', '取消'), style: 'cancel' },
-                {
-                    text: localize2('Save', '保存'),
-                    onPress: (newValue: string | undefined) => {
-                        const trimmed = (newValue ?? '').trim();
-                        if (trimmed && trimmed !== currentValue) {
-                            onRename(trimmed);
-                        }
-                    },
-                },
-            ],
-            'plain-text',
-            currentValue,
-        );
+    const closeEditor = () => {
+        setEditorTarget(null);
+        setEditorName('');
+        setEditorColor(DEFAULT_AREA_COLOR);
+    };
+
+    const openValueEditor = (type: 'context' | 'tag', name: string) => {
+        setEditorTarget({ type, name });
+        setEditorName(name);
+        setEditorColor(DEFAULT_AREA_COLOR);
+    };
+
+    const openAreaEditor = (area: Area) => {
+        setEditorTarget({ type: 'area', id: area.id, name: area.name, color: area.color });
+        setEditorName(area.name);
+        setEditorColor(area.color || DEFAULT_AREA_COLOR);
+    };
+
+    const saveEditor = async () => {
+        if (!editorTarget) return;
+        const trimmed = editorName.trim();
+        if (!trimmed) return;
+
+        if (editorTarget.type === 'area') {
+            const updates: Partial<Area> = {};
+            if (trimmed !== editorTarget.name) {
+                updates.name = trimmed;
+            }
+            if (editorColor !== (editorTarget.color || DEFAULT_AREA_COLOR)) {
+                updates.color = editorColor;
+            }
+            if (Object.keys(updates).length > 0) {
+                await updateArea(editorTarget.id, updates);
+            }
+            closeEditor();
+            return;
+        }
+
+        if (trimmed === editorTarget.name) {
+            closeEditor();
+            return;
+        }
+
+        if (editorTarget.type === 'context') {
+            void renameContext(editorTarget.name, trimmed);
+        } else {
+            void renameTag(editorTarget.name, trimmed);
+        }
+        closeEditor();
     };
 
     const ManageRow = ({ label, onRename, onDelete }: { label: string; onRename?: () => void; onDelete: () => void }) => (
@@ -78,7 +115,7 @@ export function ManageSettingsScreen() {
             <View style={{ width: 24, height: 24, borderRadius: 6, backgroundColor: area.color || '#94a3b8', marginRight: 12 }} />
             <Text style={[styles.settingLabel, { color: tc.text, flex: 1 }]} numberOfLines={1}>{area.name}</Text>
             <TouchableOpacity
-                onPress={() => promptRename(area.name, (name) => void updateArea(area.id, { name }))}
+                onPress={() => openAreaEditor(area)}
                 style={{ padding: 8 }}
             >
                 <Ionicons name="pencil-outline" size={18} color={tc.secondaryText} />
@@ -145,7 +182,7 @@ export function ManageSettingsScreen() {
                         <ManageRow
                             key={ctx}
                             label={ctx}
-                            onRename={() => promptRename(ctx, (newVal) => void renameContext(ctx, newVal))}
+                            onRename={() => openValueEditor('context', ctx)}
                             onDelete={() => confirmDelete(ctx, () => void deleteContext(ctx))}
                         />
                     ))}
@@ -161,12 +198,97 @@ export function ManageSettingsScreen() {
                         <ManageRow
                             key={tag}
                             label={tag}
-                            onRename={() => promptRename(tag, (newVal) => void renameTag(tag, newVal))}
+                            onRename={() => openValueEditor('tag', tag)}
                             onDelete={() => confirmDelete(tag, () => void deleteTag(tag))}
                         />
                     ))}
                 </CollapsibleSection>
             </ScrollView>
+            <Modal
+                visible={Boolean(editorTarget)}
+                transparent
+                animationType="fade"
+                onRequestClose={closeEditor}
+            >
+                <Pressable style={styles.pickerOverlay} onPress={closeEditor}>
+                    <Pressable
+                        style={[styles.pickerCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}
+                        onPress={(event) => event.stopPropagation()}
+                    >
+                        <Text style={[styles.pickerTitle, { color: tc.text }]}>
+                            {editorTarget?.type === 'area'
+                                ? localize2('Edit area', '编辑领域')
+                                : localize2('Rename', '重命名')}
+                        </Text>
+                        <TextInput
+                            value={editorName}
+                            onChangeText={setEditorName}
+                            placeholder={
+                                editorTarget?.type === 'area'
+                                    ? t('projects.areaLabel')
+                                    : localize2('Name', '名称')
+                            }
+                            placeholderTextColor={tc.secondaryText}
+                            style={[
+                                styles.textInput,
+                                {
+                                    marginTop: 0,
+                                    backgroundColor: tc.bg,
+                                    borderColor: tc.border,
+                                    color: tc.text,
+                                },
+                            ]}
+                            autoFocus
+                        />
+                        {editorTarget?.type === 'area' ? (
+                            <View style={styles.manageColorPicker}>
+                                {AREA_PRESET_COLORS.map((color) => (
+                                    <TouchableOpacity
+                                        key={color}
+                                        onPress={() => setEditorColor(color)}
+                                        style={[
+                                            styles.manageColorOption,
+                                            { backgroundColor: color },
+                                            editorColor === color && styles.manageColorOptionSelected,
+                                        ]}
+                                        accessibilityRole="button"
+                                        accessibilityLabel={`${t('projects.changeColor')}: ${color}`}
+                                    >
+                                        {editorColor === color ? (
+                                            <Ionicons name="checkmark" size={16} color="#FFFFFF" />
+                                        ) : null}
+                                    </TouchableOpacity>
+                                ))}
+                            </View>
+                        ) : null}
+                        <View style={styles.manageEditorActions}>
+                            <TouchableOpacity
+                                onPress={closeEditor}
+                                style={[styles.manageEditorButton, { borderColor: tc.border }]}
+                            >
+                                <Text style={[styles.manageEditorButtonText, { color: tc.secondaryText }]}>
+                                    {localize2('Cancel', '取消')}
+                                </Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                                disabled={!editorName.trim()}
+                                onPress={() => {
+                                    void saveEditor();
+                                }}
+                                style={[
+                                    styles.manageEditorButton,
+                                    styles.manageEditorButtonPrimary,
+                                    !editorName.trim() && styles.manageEditorButtonDisabled,
+                                ]}
+                            >
+                                <Text style={[styles.manageEditorButtonText, styles.manageEditorButtonPrimaryText]}>
+                                    {localize2('Save', '保存')}
+                                </Text>
+                            </TouchableOpacity>
+                        </View>
+                    </Pressable>
+                </Pressable>
+            </Modal>
         </SafeAreaView>
     );
 }
