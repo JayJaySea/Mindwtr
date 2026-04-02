@@ -5,25 +5,20 @@ import {
     Task,
     TaskEditorFieldId,
     TaskStatus,
-    TaskPriority,
     TimeEstimate,
     useTaskStore,
     createAIProvider,
     generateUUID,
-    RecurrenceRule,
     type AIProviderId,
     type RecurrenceWeekday,
     type RecurrenceByDay,
     buildRRuleString,
     parseRRuleString,
-    RECURRENCE_RULES,
-    safeParseDate,
     resolveAutoTextDirection,
     parseQuickAdd,
     DEFAULT_PROJECT_COLOR,
     getLocalizedWeekdayButtons,
     getLocalizedWeekdayLabels,
-    filterProjectsBySelectedArea,
     getUsedTaskTokens,
 } from '@mindwtr/core';
 import { useLanguage } from '../contexts/language-context';
@@ -40,24 +35,16 @@ import { TaskEditOverlayStack } from './task-edit/TaskEditOverlayStack';
 import { TaskEditTabs } from './task-edit/TaskEditTabs';
 import { areTaskFieldValuesEqual } from './task-edit/task-edit-modal.helpers';
 import {
-    WEEKDAY_ORDER,
     getRecurrenceRuleValue,
     getRecurrenceStrategyValue,
     buildRecurrenceValue,
-    getRecurrenceRRuleValue,
 } from './task-edit/recurrence-utils';
 import { useTaskEditCopilot } from './task-edit/use-task-edit-copilot';
 import {
-    DEFAULT_TASK_EDITOR_ORDER,
-    TASK_EDITOR_FIXED_FIELDS,
-    DEFAULT_TASK_EDITOR_VISIBLE,
-    getTaskEditorSectionAssignments,
-    getTaskEditorSectionOpenDefaults,
     getInitialWindowWidth,
     getTaskEditTabOffset,
     logTaskError,
     logTaskWarn,
-    STATUS_OPTIONS,
     syncTaskEditPagerPosition,
 } from './task-edit/task-edit-modal.utils';
 import {
@@ -72,6 +59,7 @@ import {
     type TaskEditTab,
     useTaskEditState,
 } from './task-edit/use-task-edit-state';
+import { useTaskEditDerivedState } from './task-edit/use-task-edit-derived-state';
 import { useTaskTokenSuggestions } from './task-edit/use-task-token-suggestions';
 
 
@@ -287,16 +275,43 @@ function TaskEditModalInner({
             setEditedTask((prev) => ({ ...prev, title: text }));
         }, 250);
     }, [resetCopilotDraft, setEditedTask]);
-
-    const activeProjectId = editedTask.projectId ?? task?.projectId;
-    const projectFilterAreaId =
-        typeof editedTask.areaId === 'string' && editedTask.areaId.trim().length > 0
-            ? editedTask.areaId
-            : undefined;
-    const filteredProjectsForPicker = useMemo(
-        () => filterProjectsBySelectedArea(projects, projectFilterAreaId),
-        [projectFilterAreaId, projects]
-    );
+    const {
+        activeProjectId,
+        availableStatusOptions,
+        basicFields,
+        dailyInterval,
+        detailsFields,
+        filteredProjectsForPicker,
+        formatTimeEstimateLabel,
+        monthlyAnchorDate,
+        monthlyPattern,
+        monthlyWeekdayCode,
+        organizationFields,
+        priorityOptions,
+        projectFilterAreaId,
+        projectSections,
+        recurrenceOptions,
+        recurrenceRRuleValue,
+        recurrenceRuleValue,
+        recurrenceStrategyValue,
+        schedulingFields,
+        sectionOpenDefaults,
+        timeEstimateOptions,
+    } = useTaskEditDerivedState({
+        task,
+        editedTask,
+        settings,
+        projects,
+        sections,
+        prioritiesEnabled,
+        timeEstimatesEnabled,
+        contextInputDraft,
+        descriptionDraft,
+        tagInputDraft,
+        visibleAttachmentsLength: visibleAttachments.length,
+        t,
+    });
+    const isReference = (editedTask.status ?? task?.status) === 'reference';
 
     useEffect(() => {
         const projectId = editedTask.projectId ?? task?.projectId;
@@ -514,242 +529,10 @@ function TaskEditModalInner({
         t,
     });
 
-    const formatTimeEstimateLabel = (value: TimeEstimate) => {
-        if (value === '5min') return '5m';
-        if (value === '10min') return '10m';
-        if (value === '15min') return '15m';
-        if (value === '30min') return '30m';
-        if (value === '1hr') return '1h';
-        if (value === '2hr') return '2h';
-        if (value === '3hr') return '3h';
-        if (value === '4hr') return '4h';
-        return '4h+';
-    };
-
-    const defaultTimeEstimatePresets: TimeEstimate[] = ['10min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
-    const allTimeEstimates: TimeEstimate[] = ['5min', '10min', '15min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
-    const savedPresets = settings.gtd?.timeEstimatePresets;
-    const basePresets = savedPresets?.length ? savedPresets : defaultTimeEstimatePresets;
-    const normalizedPresets = allTimeEstimates.filter((value) => basePresets.includes(value));
-    const currentEstimate = editedTask.timeEstimate as TimeEstimate | undefined;
-    const effectivePresets = currentEstimate && !normalizedPresets.includes(currentEstimate)
-        ? [...normalizedPresets, currentEstimate]
-        : normalizedPresets;
-
-    const timeEstimateOptions: { value: TimeEstimate | ''; label: string }[] = [
-        { value: '', label: t('common.none') },
-        ...effectivePresets.map((value) => ({ value, label: formatTimeEstimateLabel(value) })),
-    ];
-    const priorityOptions: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
-
-    const savedOrder = useMemo(() => settings.gtd?.taskEditor?.order ?? [], [settings.gtd?.taskEditor?.order]);
-    const savedHidden = useMemo(() => {
-        const featureHiddenFields = new Set<TaskEditorFieldId>();
-        if (!prioritiesEnabled) featureHiddenFields.add('priority');
-        if (!timeEstimatesEnabled) featureHiddenFields.add('timeEstimate');
-        const defaultHidden = DEFAULT_TASK_EDITOR_ORDER.filter(
-            (fieldId) => !DEFAULT_TASK_EDITOR_VISIBLE.includes(fieldId) || featureHiddenFields.has(fieldId)
-        );
-        return settings.gtd?.taskEditor?.hidden ?? defaultHidden;
-    }, [prioritiesEnabled, settings.gtd?.taskEditor?.hidden, timeEstimatesEnabled]);
-    const isReference = (editedTask.status ?? task?.status) === 'reference';
-    const availableStatusOptions = useMemo(
-        () => (isReference ? STATUS_OPTIONS : STATUS_OPTIONS.filter((status) => status !== 'reference')),
-        [isReference]
-    );
-    const disabledFields = useMemo(() => {
-        const next = new Set<TaskEditorFieldId>();
-        if (!prioritiesEnabled) next.add('priority');
-        if (!timeEstimatesEnabled) next.add('timeEstimate');
-        return next;
-    }, [prioritiesEnabled, timeEstimatesEnabled]);
-
-    const taskEditorOrder = useMemo(() => {
-        const known = new Set(DEFAULT_TASK_EDITOR_ORDER);
-        const normalized = savedOrder.filter((id) => known.has(id));
-        const missing = DEFAULT_TASK_EDITOR_ORDER.filter((id) => !normalized.includes(id));
-        return [...normalized, ...missing].filter((id) => !disabledFields.has(id));
-    }, [savedOrder, disabledFields]);
-    const sectionAssignments = useMemo(
-        () => getTaskEditorSectionAssignments(settings.gtd?.taskEditor),
-        [settings.gtd?.taskEditor]
-    );
-    const sectionOpenDefaults = useMemo(
-        () => getTaskEditorSectionOpenDefaults(settings.gtd?.taskEditor),
-        [settings.gtd?.taskEditor]
-    );
-    const hiddenSet = useMemo(() => {
-        const known = new Set(taskEditorOrder);
-        const next = new Set(savedHidden.filter((id) => known.has(id)));
-        if (settings.features?.priorities === false) next.add('priority');
-        if (settings.features?.timeEstimates === false) next.add('timeEstimate');
-        return next;
-    }, [savedHidden, settings.features?.priorities, settings.features?.timeEstimates, taskEditorOrder]);
-
-    const orderFields = useCallback(
-        (fields: TaskEditorFieldId[]) => {
-            const ordered = taskEditorOrder.filter((id) => fields.includes(id));
-            const missing = fields.filter((id) => !ordered.includes(id));
-            return [...ordered, ...missing];
-        },
-        [taskEditorOrder]
-    );
-
-    const referenceHiddenFields = useMemo(() => new Set<TaskEditorFieldId>([
-        'startTime',
-        'dueDate',
-        'reviewAt',
-        'recurrence',
-        'priority',
-        'timeEstimate',
-        'checklist',
-    ]), []);
-    const hasValue = useCallback((fieldId: TaskEditorFieldId) => {
-        switch (fieldId) {
-            case 'status':
-                return (editedTask.status ?? task?.status) !== 'inbox';
-            case 'project':
-                return Boolean(editedTask.projectId ?? task?.projectId);
-            case 'section':
-                return Boolean(editedTask.sectionId ?? task?.sectionId);
-            case 'area':
-                return Boolean(editedTask.areaId ?? task?.areaId);
-            case 'priority':
-                if (!prioritiesEnabled) return false;
-                return Boolean(editedTask.priority ?? task?.priority);
-            case 'contexts':
-                return Boolean(contextInputDraft.trim());
-            case 'description':
-                return Boolean(descriptionDraft.trim());
-            case 'tags':
-                return Boolean(tagInputDraft.trim());
-            case 'timeEstimate':
-                if (!timeEstimatesEnabled) return false;
-                return Boolean(editedTask.timeEstimate ?? task?.timeEstimate);
-            case 'recurrence':
-                return Boolean(editedTask.recurrence ?? task?.recurrence);
-            case 'startTime':
-                return Boolean(editedTask.startTime ?? task?.startTime);
-            case 'dueDate':
-                return Boolean(editedTask.dueDate ?? task?.dueDate);
-            case 'reviewAt':
-                return Boolean(editedTask.reviewAt ?? task?.reviewAt);
-            case 'attachments':
-                return visibleAttachments.length > 0;
-            case 'checklist':
-                return (editedTask.checklist ?? task?.checklist ?? []).length > 0;
-            default:
-                return false;
-        }
-    }, [
-        contextInputDraft,
-        descriptionDraft,
-        editedTask.areaId,
-        editedTask.checklist,
-        editedTask.dueDate,
-        editedTask.priority,
-        editedTask.projectId,
-        editedTask.recurrence,
-        editedTask.reviewAt,
-        editedTask.sectionId,
-        editedTask.startTime,
-        editedTask.status,
-        editedTask.timeEstimate,
-        prioritiesEnabled,
-        tagInputDraft,
-        task?.areaId,
-        task?.checklist,
-        task?.dueDate,
-        task?.priority,
-        task?.projectId,
-        task?.recurrence,
-        task?.reviewAt,
-        task?.sectionId,
-        task?.startTime,
-        task?.status,
-        task?.timeEstimate,
-        timeEstimatesEnabled,
-        visibleAttachments.length,
-    ]);
-    const isFieldVisible = useCallback(
-        (fieldId: TaskEditorFieldId) => {
-            if (isReference && referenceHiddenFields.has(fieldId)) return false;
-            return !hiddenSet.has(fieldId) || hasValue(fieldId);
-        },
-        [hasValue, hiddenSet, isReference, referenceHiddenFields]
-    );
-    const filterVisibleFields = useCallback(
-        (fields: TaskEditorFieldId[]) => fields.filter(isFieldVisible),
-        [isFieldVisible]
-    );
-    const basicFields = useMemo(
-        () => filterVisibleFields(orderFields(
-            taskEditorOrder.filter((fieldId) => {
-                if (TASK_EDITOR_FIXED_FIELDS.includes(fieldId)) return true;
-                return sectionAssignments[fieldId] === 'basic';
-            })
-        )),
-        [filterVisibleFields, orderFields, sectionAssignments, taskEditorOrder]
-    );
-    const schedulingFields = useMemo(
-        () => filterVisibleFields(orderFields(taskEditorOrder.filter((fieldId) => sectionAssignments[fieldId] === 'scheduling'))),
-        [filterVisibleFields, orderFields, sectionAssignments, taskEditorOrder]
-    );
-    const organizationFields = useMemo(
-        () => filterVisibleFields(orderFields(taskEditorOrder.filter((fieldId) => sectionAssignments[fieldId] === 'organization'))),
-        [filterVisibleFields, orderFields, sectionAssignments, taskEditorOrder]
-    );
-    const detailsFields = useMemo(
-        () => filterVisibleFields(orderFields(taskEditorOrder.filter((fieldId) => sectionAssignments[fieldId] === 'details'))),
-        [filterVisibleFields, orderFields, sectionAssignments, taskEditorOrder]
-    );
-
     const mergedTask = useMemo(() => ({
         ...(task ?? {}),
         ...editedTask,
     }), [task, editedTask]);
-
-    const projectSections = useMemo(() => {
-        if (!activeProjectId) return [];
-        return sections
-            .filter((section) => section.projectId === activeProjectId && !section.deletedAt)
-            .sort((a, b) => {
-                const aOrder = Number.isFinite(a.order) ? a.order : 0;
-                const bOrder = Number.isFinite(b.order) ? b.order : 0;
-                if (aOrder !== bOrder) return aOrder - bOrder;
-                return a.title.localeCompare(b.title);
-            });
-    }, [activeProjectId, sections]);
-
-    const recurrenceOptions: { value: RecurrenceRule | ''; label: string }[] = [
-        { value: '', label: t('recurrence.none') },
-        ...RECURRENCE_RULES.map((rule) => ({
-            value: rule,
-            label: t(`recurrence.${rule}`),
-        })),
-    ];
-    const recurrenceRuleValue = getRecurrenceRuleValue(editedTask.recurrence);
-    const recurrenceStrategyValue = getRecurrenceStrategyValue(editedTask.recurrence);
-    const recurrenceRRuleValue = getRecurrenceRRuleValue(editedTask.recurrence);
-    const dailyInterval = useMemo(() => {
-        if (recurrenceRuleValue !== 'daily') return 1;
-        const parsed = parseRRuleString(recurrenceRRuleValue);
-        return parsed.interval && parsed.interval > 0 ? parsed.interval : 1;
-    }, [recurrenceRuleValue, recurrenceRRuleValue]);
-    const monthlyAnchorDate = useMemo(() => {
-        return safeParseDate(editedTask.dueDate ?? task?.dueDate) ?? new Date();
-    }, [editedTask.dueDate, task?.dueDate]);
-    const monthlyWeekdayCode = WEEKDAY_ORDER[monthlyAnchorDate.getDay()];
-    const monthlyPattern = useMemo<'date' | 'custom'>(() => {
-        if (recurrenceRuleValue !== 'monthly') return 'date';
-        const parsed = parseRRuleString(recurrenceRRuleValue);
-        const hasLast = parsed.byDay?.some((day) => String(day).startsWith('-1'));
-        const hasNth = parsed.byDay?.some((day) => /^[1-4]/.test(String(day)));
-        const hasByMonthDay = parsed.byMonthDay && parsed.byMonthDay.length > 0;
-        const interval = parsed.interval && parsed.interval > 0 ? parsed.interval : 1;
-        const isCustomDay = hasByMonthDay && parsed.byMonthDay?.[0] !== monthlyAnchorDate.getDate();
-        return hasNth || hasLast || interval > 1 || isCustomDay ? 'custom' : 'date';
-    }, [recurrenceRuleValue, recurrenceRRuleValue, monthlyAnchorDate]);
 
     const [customRecurrenceVisible, setCustomRecurrenceVisible] = useState(false);
     const [customInterval, setCustomInterval] = useState(1);
