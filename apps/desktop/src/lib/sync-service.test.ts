@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AppData, Attachment } from '@mindwtr/core';
+import type { Attachment } from '@mindwtr/core';
 import { DropboxUnauthorizedError } from './dropbox-sync';
 import { getFileSyncDir, hashString, normalizeSyncBackend } from './sync-service-utils';
 
@@ -460,5 +460,28 @@ describe('SyncService orchestration', () => {
                 lastResult: 'success',
             });
         });
+    });
+
+    it('does not advance the last successful local change marker if sync status persistence fails', async () => {
+        const updateSettings = vi.fn(async () => {
+            throw new Error('disk full');
+        });
+        const storeState = {
+            lastDataChangeAt: 123,
+            updateSettings,
+        };
+        __syncServiceTestUtils.setDependenciesForTests({
+            getStoreState: () => storeState as any,
+            logWarn: vi.fn(async () => undefined) as any,
+        });
+
+        const persisted = await (SyncService as any).persistSuccessfulSyncStatus(
+            'success',
+            '2026-04-01T00:00:00.000Z'
+        );
+
+        expect(persisted).toBe(false);
+        expect(updateSettings).toHaveBeenCalledTimes(1);
+        expect((SyncService as any).lastSuccessfulSyncLocalChangeAt).toBe(0);
     });
 });

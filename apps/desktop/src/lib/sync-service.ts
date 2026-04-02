@@ -688,6 +688,27 @@ export class SyncService {
         }
     }
 
+    private static async persistSuccessfulSyncStatus(
+        syncStatus: string,
+        now: string,
+        lastSyncHistory?: ReturnType<typeof appendSyncHistory>
+    ): Promise<boolean> {
+        const state = getStoreState();
+        try {
+            await state.updateSettings({
+                lastSyncAt: now,
+                lastSyncStatus: syncStatus,
+                lastSyncError: undefined,
+                ...(lastSyncHistory ? { lastSyncHistory } : {}),
+            });
+            SyncService.lastSuccessfulSyncLocalChangeAt = state.lastDataChangeAt;
+            return true;
+        } catch (error) {
+            logSyncWarning('Failed to persist sync status', error);
+            return false;
+        }
+    }
+
     private static hasPendingLocalChangesForExternalSync(): boolean {
         const state = getStoreState();
         if (!state.settings?.lastSyncAt) return false;
@@ -735,13 +756,10 @@ export class SyncService {
                 timestampAdjustments: 0,
                 details: 'external_override',
             });
-            await getStoreState().updateSettings({
-                lastSyncAt: now,
-                lastSyncStatus: 'success',
-                lastSyncError: undefined,
-                lastSyncHistory: nextHistory,
-            });
-            SyncService.lastSuccessfulSyncLocalChangeAt = getStoreState().lastDataChangeAt;
+            const persisted = await SyncService.persistSuccessfulSyncStatus('success', now, nextHistory);
+            if (!persisted) {
+                throw new Error('Failed to persist sync status');
+            }
             if (pendingChange?.incomingHash) {
                 SyncService.lastObservedHash = pendingChange.incomingHash;
             }
@@ -1422,16 +1440,7 @@ export class SyncService {
 
             const syncStatus = syncResult.status;
             const now = new Date().toISOString();
-            try {
-                await getStoreState().updateSettings({
-                    lastSyncAt: now,
-                    lastSyncStatus: syncStatus,
-                    lastSyncError: undefined,
-                });
-            } catch (error) {
-                logSyncWarning('Failed to persist sync status', error);
-            }
-            SyncService.lastSuccessfulSyncLocalChangeAt = getStoreState().lastDataChangeAt;
+            await SyncService.persistSuccessfulSyncStatus(syncStatus, now);
             SyncService.setPendingExternalSyncChange(null);
 
             getStoreState().setError(null);
