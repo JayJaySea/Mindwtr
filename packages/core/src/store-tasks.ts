@@ -763,13 +763,18 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
     batchUpdateTasks: async (updatesList: Array<{ id: string; updates: Partial<Task> }>) => {
         if (updatesList.length === 0) return actionOk();
         const state = get();
-        const duplicateIds = Array.from(new Set(
-            updatesList
-                .map((update) => update.id)
-                .filter((id, index, ids) => ids.indexOf(id) !== index)
-        ));
-        if (duplicateIds.length > 0) {
-            const message = `Duplicate task ids in batch update: ${duplicateIds.join(', ')}`;
+        const seenIds = new Set<string>();
+        const duplicateIds = new Set<string>();
+        for (const { id } of updatesList) {
+            if (seenIds.has(id)) {
+                duplicateIds.add(id);
+                continue;
+            }
+            seenIds.add(id);
+        }
+        const duplicateTaskIds = Array.from(duplicateIds);
+        if (duplicateTaskIds.length > 0) {
+            const message = `Duplicate task ids in batch update: ${duplicateTaskIds.join(', ')}`;
             set({ error: message });
             return actionFail(message);
         }
