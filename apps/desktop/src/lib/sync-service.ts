@@ -122,6 +122,7 @@ export type ExternalSyncChange = {
 
 const SYNC_FILE_NAME = 'data.json';
 const LEGACY_SYNC_FILE_NAME = 'mindwtr-sync.json';
+const DROPBOX_AUTH_RETRY_LIMIT = 1;
 const WEBDAV_READ_RETRY_OPTIONS = {
     maxAttempts: 5,
     baseDelayMs: 2000,
@@ -667,6 +668,26 @@ export class SyncService {
         SyncService.ignoreFileEventsUntil = SyncService.getMonotonicNow() + 2000;
     }
 
+    private static async runDropboxWithRetry<T>(
+        resolveAccessToken: (forceRefresh?: boolean) => Promise<string>,
+        operation: (token: string) => Promise<T>
+    ): Promise<T> {
+        let forceRefresh = false;
+        let unauthorizedRetries = 0;
+        while (true) {
+            try {
+                const token = await resolveAccessToken(forceRefresh);
+                return await operation(token);
+            } catch (error) {
+                if (!(error instanceof DropboxUnauthorizedError) || unauthorizedRetries >= DROPBOX_AUTH_RETRY_LIMIT) {
+                    throw error;
+                }
+                unauthorizedRetries += 1;
+                forceRefresh = true;
+            }
+        }
+    }
+
     private static hasPendingLocalChangesForExternalSync(): boolean {
         const state = getStoreState();
         if (!state.settings?.lastSyncAt) return false;
@@ -1039,18 +1060,8 @@ export class SyncService {
                 }
                 return cachedDropboxAccessToken;
             };
-            const runDropboxWithRetry = async <T>(operation: (token: string) => Promise<T>): Promise<T> => {
-                try {
-                    const token = await resolveDropboxAccessToken(false);
-                    return await operation(token);
-                } catch (error) {
-                    if (error instanceof DropboxUnauthorizedError) {
-                        const refreshed = await resolveDropboxAccessToken(true);
-                        return await operation(refreshed);
-                    }
-                    throw error;
-                }
-            };
+            const runDropboxWithRetry = async <T>(operation: (token: string) => Promise<T>): Promise<T> =>
+                SyncService.runDropboxWithRetry(resolveDropboxAccessToken, operation);
             const syncPath = backend === 'file' ? await SyncService.getSyncPath() : '';
             const fileBaseDir = backend === 'file' ? getFileSyncDir(syncPath, SYNC_FILE_NAME, LEGACY_SYNC_FILE_NAME) : '';
             let remoteDataForCompare: AppData | null = null;

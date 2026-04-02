@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AppData, Attachment } from '@mindwtr/core';
+import { DropboxUnauthorizedError } from './dropbox-sync';
 import { getFileSyncDir, hashString, normalizeSyncBackend } from './sync-service-utils';
 
 const markLocalWriteMock = vi.hoisted(() => vi.fn());
@@ -238,6 +239,24 @@ describe('SyncService testability hooks', () => {
         expect((SyncService as any).fileWriteIgnoreActive).toBe(false);
         expect((SyncService as any).ignoreFileEventsUntil).toBe(11_000);
         getMonotonicNowSpy.mockRestore();
+    });
+
+    it('bounds Dropbox authorization retries to one forced refresh', async () => {
+        const resolveAccessToken = vi.fn(async (forceRefresh = false) => forceRefresh ? 'token-2' : 'token-1');
+        const operation = vi.fn(async () => {
+            throw new DropboxUnauthorizedError('Dropbox upload failed: HTTP 401');
+        });
+
+        await expect((SyncService as any).runDropboxWithRetry(resolveAccessToken, operation))
+            .rejects
+            .toBeInstanceOf(DropboxUnauthorizedError);
+
+        expect(resolveAccessToken).toHaveBeenNthCalledWith(1, false);
+        expect(resolveAccessToken).toHaveBeenNthCalledWith(2, true);
+        expect(resolveAccessToken).toHaveBeenCalledTimes(2);
+        expect(operation).toHaveBeenNthCalledWith(1, 'token-1');
+        expect(operation).toHaveBeenNthCalledWith(2, 'token-2');
+        expect(operation).toHaveBeenCalledTimes(2);
     });
 });
 
