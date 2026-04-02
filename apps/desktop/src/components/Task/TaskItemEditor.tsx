@@ -139,14 +139,9 @@ export function TaskItemEditor({
     const sortedAreas = [...areas].sort((a, b) => compareLabels(a.name, b.name));
     const projectFilterAreaId = editAreaId || undefined;
     const filteredProjects = filterProjectsBySelectedArea(sortedProjects, projectFilterAreaId);
-    const [schedulingOpen, setSchedulingOpen] = useState(sectionOpenDefaults.scheduling || sectionCounts.scheduling > 0);
-    const [organizationOpen, setOrganizationOpen] = useState(sectionOpenDefaults.organization || sectionCounts.organization > 0);
-    const [detailsOpen, setDetailsOpen] = useState(
-        sectionOpenDefaults.details
-            || sectionCounts.details > 0
-            || detailsFields.includes('description')
-            || detailsFields.includes('checklist')
-    );
+    const [schedulingOpen, setSchedulingOpen] = useState(sectionOpenDefaults.scheduling);
+    const [organizationOpen, setOrganizationOpen] = useState(sectionOpenDefaults.organization);
+    const [detailsOpen, setDetailsOpen] = useState(sectionOpenDefaults.details);
     const [aiMenuOpen, setAiMenuOpen] = useState(false);
     const aiMenuRef = useRef<HTMLDivElement>(null);
 
