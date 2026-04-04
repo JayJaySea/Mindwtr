@@ -1,6 +1,7 @@
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { type AppData, useTaskStore } from '@mindwtr/core';
+import { type AppData, type Language, useTaskStore } from '@mindwtr/core';
+import { requestWidgetUpdate, type WidgetInfo } from 'react-native-android-widget';
 
 import { buildTasksWidgetTree } from '../components/TasksWidget';
 import {
@@ -14,6 +15,7 @@ import {
 } from './widget-data';
 import { logError, logWarn } from './app-log';
 import { getSystemColorSchemeForWidget } from './system-color-scheme';
+import { getAdaptiveWidgetTaskLimit } from './widget-layout';
 
 export function isAndroidWidgetSupported(): boolean {
     return Platform.OS === 'android';
@@ -23,36 +25,11 @@ export function isIosWidgetSupported(): boolean {
     return Platform.OS === 'ios';
 }
 
-type AndroidWidgetApi = {
-    requestWidgetUpdate: (params: {
-        widgetName: string;
-        renderWidget: () => unknown;
-    }) => Promise<void>;
-};
-
 type IosWidgetApi = {
     setItem: (key: string, value: string, appGroup: string) => Promise<void>;
     reloadTimelines?: (ofKind: string) => void;
     reloadAllTimelines?: () => void;
 };
-
-async function getAndroidWidgetApi(): Promise<AndroidWidgetApi | null> {
-    if (Platform.OS !== 'android') return null;
-    try {
-        // Use require to avoid dynamic import issues in Hermes
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const api = require('react-native-android-widget');
-        return api as AndroidWidgetApi;
-    } catch (error) {
-        if (__DEV__) {
-            void logWarn('[RNWidget] Android widget API unavailable', {
-                scope: 'widget',
-                extra: { error: error instanceof Error ? error.message : String(error) },
-            });
-        }
-        return null;
-    }
-}
 
 async function getIosWidgetApi(): Promise<IosWidgetApi | null> {
     if (Platform.OS !== 'ios') return null;
@@ -71,27 +48,37 @@ async function getIosWidgetApi(): Promise<IosWidgetApi | null> {
     }
 }
 
-async function buildPayloadFromData(data: AppData): Promise<TasksWidgetPayload> {
+async function resolvePayloadLanguage(data: AppData): Promise<Language> {
     const languageValue = await AsyncStorage.getItem(WIDGET_LANGUAGE_KEY);
-    const language = resolveWidgetLanguage(languageValue, data.settings?.language);
-    const maxItems = Platform.OS === 'ios' ? 8 : undefined;
+    return resolveWidgetLanguage(languageValue, data.settings?.language);
+}
+
+function buildPayloadFromData(
+    data: AppData,
+    language: Language,
+    maxItems?: number,
+): TasksWidgetPayload {
     return buildWidgetPayload(data, language, {
         systemColorScheme: getSystemColorSchemeForWidget(),
         maxItems,
     });
 }
 
-async function updateAndroidWidgetFromPayload(payload: TasksWidgetPayload): Promise<boolean> {
+async function updateAndroidWidgetsFromData(data: AppData, language: Language): Promise<boolean> {
     if (Platform.OS !== 'android') return false;
-    const widgetApi = await getAndroidWidgetApi();
-    if (!widgetApi) return false;
 
     try {
         for (let attempt = 0; attempt < 2; attempt += 1) {
             try {
-                await widgetApi.requestWidgetUpdate({
+                await requestWidgetUpdate({
                     widgetName: 'TasksWidget',
-                    renderWidget: () => buildTasksWidgetTree(payload),
+                    renderWidget: (widgetInfo) => buildTasksWidgetTree(
+                        buildPayloadFromData(
+                            data,
+                            language,
+                            getAdaptiveWidgetTaskLimit(widgetInfo.height),
+                        ),
+                    ),
                 });
                 return true;
             } catch (error) {
@@ -153,10 +140,11 @@ async function updateIosWidgetFromPayload(payload: TasksWidgetPayload): Promise<
 
 export async function updateMobileWidgetFromData(data: AppData): Promise<boolean> {
     if (Platform.OS !== 'android' && Platform.OS !== 'ios') return false;
-    const payload = await buildPayloadFromData(data);
+    const language = await resolvePayloadLanguage(data);
     if (Platform.OS === 'android') {
-        return await updateAndroidWidgetFromPayload(payload);
+        return await updateAndroidWidgetsFromData(data, language);
     }
+    const payload = buildPayloadFromData(data, language, 8);
     return await updateIosWidgetFromPayload(payload);
 }
 
