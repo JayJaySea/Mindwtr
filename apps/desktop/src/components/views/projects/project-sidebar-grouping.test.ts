@@ -10,6 +10,7 @@ const buildProject = (id: string, status: Project['status']): Project => ({
     title: id,
     status,
     color: '#3b82f6',
+    order: 0,
     tagIds: [],
     createdAt: now,
     updatedAt: now,

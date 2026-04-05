@@ -23,6 +23,7 @@ import {
     parseTagInput,
     sortAreasByColor as sortAreasByColorIds,
     sortAreasByName as sortAreasByNameIds,
+    toDateInputValue,
     toDateTimeLocalValue,
 } from './projects/projects-utils';
 import { usePerformanceMonitor } from '../../hooks/usePerformanceMonitor';
@@ -876,6 +877,7 @@ export function ProjectsView() {
                                         projectColor={getProjectColorForTask(selectedProject)}
                                         areaLabel={selectedProjectAreaLabel}
                                         isSequential={selectedProject.isSequential === true}
+                                        dueDate={selectedProject.dueDate}
                                         reviewAt={selectedProject.reviewAt}
                                         editTitle={editProjectTitle}
                                         onEditTitleChange={setEditProjectTitle}
@@ -927,6 +929,8 @@ export function ProjectsView() {
                                                 onToggleSequential={() => updateProject(selectedProject.id, { isSequential: !selectedProject.isSequential })}
                                                 status={selectedProject.status}
                                                 onChangeStatus={(status) => updateProject(selectedProject.id, { status })}
+                                                dueDateValue={toDateInputValue(selectedProject.dueDate)}
+                                                onDueDateChange={(value) => updateProject(selectedProject.id, { dueDate: value || undefined })}
                                                 reviewAtValue={toDateTimeLocalValue(selectedProject.reviewAt)}
                                                 onReviewAtChange={(value) => updateProject(selectedProject.id, { reviewAt: value || undefined })}
                                             />

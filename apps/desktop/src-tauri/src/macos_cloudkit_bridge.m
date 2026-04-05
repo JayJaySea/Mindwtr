@@ -158,6 +158,7 @@ static const MWFieldSpec kProjectFields[] = {
     {"isFocused",    "isFocused",    MWFieldKindBool},
     {"supportNotes", "supportNotes", MWFieldKindString},
     {"attachments",  "attachments",  MWFieldKindJsonString},
+    {"dueDate",      "dueDate",      MWFieldKindDate},
     {"reviewAt",     "reviewAt",     MWFieldKindDate},
     {"areaId",       "areaId",       MWFieldKindString},
     {"areaTitle",    "areaTitle",    MWFieldKindString},

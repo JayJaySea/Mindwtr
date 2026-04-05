@@ -149,6 +149,7 @@ export type AddProjectInput = {
   areaId?: string | null;
   isSequential?: boolean;
   isFocused?: boolean;
+  dueDate?: string | null;
   reviewAt?: string | null;
   supportNotes?: string | null;
 };
@@ -161,6 +162,7 @@ export type UpdateProjectInput = {
   areaId?: string | null;
   isSequential?: boolean;
   isFocused?: boolean;
+  dueDate?: string | null;
   reviewAt?: string | null;
   supportNotes?: string | null;
 };
@@ -288,6 +290,7 @@ export const createService = (options: DbOptions, deps: ServiceDeps = defaultSer
             areaId: input.areaId ?? undefined,
             isSequential: input.isSequential,
             isFocused: input.isFocused,
+            dueDate: input.dueDate ?? undefined,
             reviewAt: input.reviewAt ?? undefined,
             supportNotes: input.supportNotes ?? undefined,
           }) as Partial<CoreProject>,
@@ -302,6 +305,7 @@ export const createService = (options: DbOptions, deps: ServiceDeps = defaultSer
           areaId: input.areaId ?? undefined,
           isSequential: input.isSequential,
           isFocused: input.isFocused,
+          dueDate: input.dueDate ?? undefined,
           reviewAt: input.reviewAt ?? undefined,
           supportNotes: input.supportNotes ?? undefined,
         }) as Partial<CoreProject>;

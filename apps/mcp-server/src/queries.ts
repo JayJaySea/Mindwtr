@@ -45,6 +45,7 @@ export type Project = {
   isFocused?: boolean;
   supportNotes?: string;
   attachments?: unknown[];
+  dueDate?: string;
   reviewAt?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -329,6 +330,7 @@ const BASE_PROJECT_COLUMNS = [
   'isFocused',
   'supportNotes',
   'attachments',
+  'dueDate',
   'reviewAt',
   'createdAt',
   'updatedAt',
@@ -344,7 +346,10 @@ const getProjectColumns = (db: DbClient) => {
     const columns = db.prepare('PRAGMA table_info(projects)').all();
     const names = new Set<string>(columns.map((col: any) => String(col.name)));
     const hasOrderNum = names.has('orderNum');
-    const selectColumns = BASE_PROJECT_COLUMNS.filter((name) => hasOrderNum || name !== 'orderNum');
+    const hasDueDate = names.has('dueDate');
+    const selectColumns = BASE_PROJECT_COLUMNS.filter(
+      (name) => (hasOrderNum || name !== 'orderNum') && (hasDueDate || name !== 'dueDate')
+    );
     const resolved = { hasOrderNum, selectColumns };
     projectColumnsCache.set(db, resolved);
     return resolved;
@@ -379,6 +384,7 @@ const mapProjectRow = (row: any): Project => ({
   isFocused: row.isFocused === 1,
   supportNotes: row.supportNotes ?? undefined,
   attachments: parseJson(row.attachments, []),
+  dueDate: row.dueDate ?? undefined,
   reviewAt: row.reviewAt ?? undefined,
   areaId: row.areaId ?? undefined,
   areaTitle: row.areaTitle ?? undefined,

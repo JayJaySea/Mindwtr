@@ -99,6 +99,8 @@ export const normalizeProjectForSyncMerge = (project: Project): Project => {
         tagIds: normalizeStringArray(project.tagIds),
         isSequential: project.isSequential === true,
         isFocused: project.isFocused === true,
+        dueDate: normalizeOptionalString(project.dueDate),
+        reviewAt: normalizeOptionalString(project.reviewAt),
         areaId: normalizeOptionalString(project.areaId),
         areaTitle: normalizeOptionalString(project.areaTitle),
     };

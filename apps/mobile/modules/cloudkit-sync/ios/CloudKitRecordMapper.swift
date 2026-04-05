@@ -150,6 +150,7 @@ enum CloudKitRecordMapper {
         FieldSpec(jsKey: "isFocused", ckKey: "isFocused", kind: .bool),
         FieldSpec(jsKey: "supportNotes", ckKey: "supportNotes", kind: .string),
         FieldSpec(jsKey: "attachments", ckKey: "attachments", kind: .jsonString),
+        FieldSpec(jsKey: "dueDate", ckKey: "dueDate", kind: .date),
         FieldSpec(jsKey: "reviewAt", ckKey: "reviewAt", kind: .date),
         FieldSpec(jsKey: "areaId", ckKey: "areaId", kind: .string),
         FieldSpec(jsKey: "areaTitle", ckKey: "areaTitle", kind: .string),

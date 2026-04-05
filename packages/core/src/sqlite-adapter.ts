@@ -368,6 +368,7 @@ export class SqliteAdapter {
             { name: 'isFocused', sql: 'ALTER TABLE projects ADD COLUMN isFocused INTEGER' },
             { name: 'supportNotes', sql: 'ALTER TABLE projects ADD COLUMN supportNotes TEXT' },
             { name: 'attachments', sql: 'ALTER TABLE projects ADD COLUMN attachments TEXT' },
+            { name: 'dueDate', sql: 'ALTER TABLE projects ADD COLUMN dueDate TEXT' },
             { name: 'reviewAt', sql: 'ALTER TABLE projects ADD COLUMN reviewAt TEXT' },
             { name: 'areaId', sql: 'ALTER TABLE projects ADD COLUMN areaId TEXT' },
             { name: 'areaTitle', sql: 'ALTER TABLE projects ADD COLUMN areaTitle TEXT' },
@@ -384,6 +385,9 @@ export class SqliteAdapter {
         }
         await this.client.run(
             'CREATE INDEX IF NOT EXISTS idx_projects_area_order ON projects(areaId, orderNum)'
+        );
+        await this.client.run(
+            'CREATE INDEX IF NOT EXISTS idx_projects_dueDate ON projects(dueDate)'
         );
     }
 
@@ -604,6 +608,7 @@ export class SqliteAdapter {
             isFocused: fromBool(row.isFocused),
             supportNotes: row.supportNotes as string | undefined,
             attachments: toAttachments(fromJson<unknown>(row.attachments, undefined)),
+            dueDate: row.dueDate as string | undefined,
             reviewAt: row.reviewAt as string | undefined,
             areaId: row.areaId as string | undefined,
             areaTitle: row.areaTitle as string | undefined,
@@ -884,6 +889,7 @@ export class SqliteAdapter {
                     'isFocused',
                     'supportNotes',
                     'attachments',
+                    'dueDate',
                     'reviewAt',
                     'areaId',
                     'areaTitle',
@@ -904,6 +910,7 @@ export class SqliteAdapter {
                     toBool(project.isFocused),
                     project.supportNotes ?? null,
                     toJson(project.attachments),
+                    project.dueDate ?? null,
                     project.reviewAt ?? null,
                     project.areaId ?? null,
                     project.areaTitle ?? null,
@@ -922,6 +929,7 @@ export class SqliteAdapter {
                  isFocused=excluded.isFocused,
                  supportNotes=excluded.supportNotes,
                  attachments=excluded.attachments,
+                 dueDate=excluded.dueDate,
                  reviewAt=excluded.reviewAt,
                  areaId=excluded.areaId,
                  areaTitle=excluded.areaTitle,

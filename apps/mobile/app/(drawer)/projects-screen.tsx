@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { View, Text, TextInput, TouchableOpacity, Modal, Alert, Pressable, ScrollView, SectionList, Dimensions, Platform, Keyboard, ActionSheetIOS } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { AREA_PRESET_COLORS, Area, Attachment, DEFAULT_PROJECT_COLOR, generateUUID, getAttachmentDisplayTitle, normalizeLinkAttachmentInput, Project, Task, useTaskStore, validateAttachmentForUpload } from '@mindwtr/core';
+import { AREA_PRESET_COLORS, Area, Attachment, DEFAULT_PROJECT_COLOR, generateUUID, getAttachmentDisplayTitle, normalizeLinkAttachmentInput, Project, safeParseDate, Task, useTaskStore, validateAttachmentForUpload } from '@mindwtr/core';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as Linking from 'expo-linking';
@@ -11,7 +11,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { projectsScreenStyles as styles } from '@/app/(drawer)/projects-screen.styles';
 import {
-  formatProjectReviewDate,
+  formatProjectDate,
   normalizeProjectTag,
   resolveAttachmentValidationMessage,
 } from '@/app/(drawer)/projects-screen.utils';
@@ -48,6 +48,7 @@ export default function ProjectsScreen() {
   const [notesExpanded, setNotesExpanded] = useState(false);
   const [showNotesPreview, setShowNotesPreview] = useState(false);
   const [showProjectMeta, setShowProjectMeta] = useState(false);
+  const [showDueDatePicker, setShowDueDatePicker] = useState(false);
   const [showReviewPicker, setShowReviewPicker] = useState(false);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const [linkModalVisible, setLinkModalVisible] = useState(false);
@@ -117,6 +118,7 @@ export default function ProjectsScreen() {
     setNotesExpanded(false);
     setShowNotesPreview(false);
     setShowProjectMeta(false);
+    setShowDueDatePicker(false);
     setShowReviewPicker(false);
     setShowStatusMenu(false);
     setLinkModalVisible(false);
@@ -1182,6 +1184,48 @@ export default function ProjectsScreen() {
                       )}
                     </View>
 
+                    <View style={[styles.reviewContainer, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
+                      <Text style={[styles.reviewLabel, { color: tc.text }]}>
+                        {t('taskEdit.dueDateLabel') || 'Due Date'}
+                      </Text>
+                      <TouchableOpacity
+                        style={[styles.reviewButton, { backgroundColor: tc.inputBg, borderColor: tc.border }]}
+                        onPress={() => setShowDueDatePicker(true)}
+                      >
+                        <Text style={{ color: tc.text }}>
+                          {formatProjectDate(selectedProject.dueDate, t('common.notSet'))}
+                        </Text>
+                      </TouchableOpacity>
+                      {!!selectedProject.dueDate && (
+                        <TouchableOpacity
+                          style={styles.clearReviewBtn}
+                          onPress={() => {
+                            updateProject(selectedProject.id, { dueDate: undefined });
+                            setSelectedProject({ ...selectedProject, dueDate: undefined });
+                          }}
+                        >
+                          <Text style={[styles.clearReviewText, { color: tc.secondaryText }]}>
+                            {t('common.clear')}
+                          </Text>
+                        </TouchableOpacity>
+                      )}
+                      {showDueDatePicker && (
+                        <DateTimePicker
+                          value={safeParseDate(selectedProject.dueDate) ?? new Date()}
+                          mode="date"
+                          display="default"
+                          onChange={(_, date) => {
+                            setShowDueDatePicker(false);
+                            if (date) {
+                              const iso = date.toISOString().slice(0, 10);
+                              updateProject(selectedProject.id, { dueDate: iso });
+                              setSelectedProject({ ...selectedProject, dueDate: iso });
+                            }
+                          }}
+                        />
+                      )}
+                    </View>
+
                     {/* Project Review Date (Tickler) */}
                     <View style={[styles.reviewContainer, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
                       <Text style={[styles.reviewLabel, { color: tc.text }]}>
@@ -1192,7 +1236,7 @@ export default function ProjectsScreen() {
                         onPress={() => setShowReviewPicker(true)}
                       >
                         <Text style={{ color: tc.text }}>
-                          {formatProjectReviewDate(selectedProject.reviewAt, t('common.notSet'))}
+                          {formatProjectDate(selectedProject.reviewAt, t('common.notSet'))}
                         </Text>
                       </TouchableOpacity>
                       {!!selectedProject.reviewAt && (

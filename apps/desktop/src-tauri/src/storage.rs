@@ -95,6 +95,7 @@ pub(crate) fn open_sqlite(app: &tauri::AppHandle) -> Result<Connection, String> 
     ensure_tasks_area_column(&conn)?;
     ensure_tasks_section_column(&conn)?;
     ensure_projects_order_column(&conn)?;
+    ensure_projects_due_date_column(&conn)?;
     ensure_projects_area_order_index(&conn)?;
     ensure_sync_revision_columns(&conn)?;
     ensure_fts_triggers(&conn)?;
@@ -301,6 +302,16 @@ fn ensure_projects_order_column(conn: &Connection) -> Result<(), String> {
     }
     conn.execute("ALTER TABLE projects ADD COLUMN orderNum INTEGER", [])
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn ensure_projects_due_date_column(conn: &Connection) -> Result<(), String> {
+    ensure_column(conn, "projects", "dueDate", "TEXT")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_projects_dueDate ON projects(dueDate)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -696,6 +707,11 @@ fn row_to_project_value(row: &rusqlite::Row<'_>) -> Result<Value, rusqlite::Erro
     if !attachments_val.is_null() {
         map.insert("attachments".to_string(), attachments_val);
     }
+    if let Ok(val) = row.get::<_, Option<String>>("dueDate") {
+        if let Some(v) = val {
+            map.insert("dueDate".to_string(), Value::String(v));
+        }
+    }
     if let Ok(val) = row.get::<_, Option<String>>("reviewAt") {
         if let Some(v) = val {
             map.insert("reviewAt".to_string(), Value::String(v));
@@ -859,7 +875,7 @@ fn migrate_json_to_sqlite(conn: &mut Connection, data: &Value) -> Result<(), Str
         let tag_ids_json = json_str_or_default(project.get("tagIds"), "[]");
         let attachments_json = json_str(project.get("attachments"));
         tx.execute(
-            "INSERT OR REPLACE INTO projects (id, title, status, color, orderNum, tagIds, isSequential, isFocused, supportNotes, attachments, reviewAt, areaId, areaTitle, rev, revBy, createdAt, updatedAt, deletedAt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            "INSERT OR REPLACE INTO projects (id, title, status, color, orderNum, tagIds, isSequential, isFocused, supportNotes, attachments, dueDate, reviewAt, areaId, areaTitle, rev, revBy, createdAt, updatedAt, deletedAt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 project.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
                 project.get("title").and_then(|v| v.as_str()).unwrap_or_default(),
@@ -871,6 +887,7 @@ fn migrate_json_to_sqlite(conn: &mut Connection, data: &Value) -> Result<(), Str
                 project.get("isFocused").and_then(|v| v.as_bool()).unwrap_or(false) as i32,
                 project.get("supportNotes").and_then(|v| v.as_str()),
                 attachments_json,
+                project.get("dueDate").and_then(|v| v.as_str()),
                 project.get("reviewAt").and_then(|v| v.as_str()),
                 project.get("areaId").and_then(|v| v.as_str()),
                 project.get("areaTitle").and_then(|v| v.as_str()),

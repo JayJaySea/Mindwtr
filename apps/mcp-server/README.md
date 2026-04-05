@@ -316,9 +316,9 @@ Any MCP-compatible client can work as long as it can launch a **stdio** server w
 - `mindwtr_restore_task` **(requires `--write`)**
   - Input: `{ id }`
 - `mindwtr_add_project` **(requires `--write`)**
-  - Input: `{ title, color?, status?, areaId?, isSequential?, isFocused?, reviewAt?, supportNotes? }`
+  - Input: `{ title, color?, status?, areaId?, isSequential?, isFocused?, dueDate?, reviewAt?, supportNotes? }`
 - `mindwtr_update_project` **(requires `--write`)**
-  - Input: `{ id, title?, color?, status?, areaId?, isSequential?, isFocused?, reviewAt?, supportNotes? }`
+  - Input: `{ id, title?, color?, status?, areaId?, isSequential?, isFocused?, dueDate?, reviewAt?, supportNotes? }`
 - `mindwtr_delete_project` **(requires `--write`)**
   - Input: `{ id }`
 - `mindwtr_add_area` **(requires `--write`)**

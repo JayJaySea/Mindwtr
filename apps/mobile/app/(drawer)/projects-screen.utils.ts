@@ -1,3 +1,5 @@
+import { safeParseDate } from '@mindwtr/core';
+
 export function resolveAttachmentValidationMessage(
     error: string | undefined,
     t: (key: string) => string,
@@ -9,10 +11,11 @@ export function resolveAttachmentValidationMessage(
     return t('attachments.fileNotSupported');
 }
 
-export function formatProjectReviewDate(dateStr: string | undefined, notSetLabel: string) {
+export function formatProjectDate(dateStr: string | undefined, notSetLabel: string) {
     if (!dateStr) return notSetLabel;
     try {
-        return new Date(dateStr).toLocaleDateString();
+        const parsed = safeParseDate(dateStr);
+        return parsed ? parsed.toLocaleDateString() : dateStr;
     } catch {
         return dateStr;
     }
