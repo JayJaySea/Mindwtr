@@ -50,11 +50,14 @@ interface ProjectsSidebarProps {
     onSelectTag: (value: string) => void;
     groupedActiveProjects: GroupedProjects;
     groupedDeferredProjects: GroupedProjects;
+    groupedArchivedProjects: GroupedProjects;
     areaById: Map<string, Area>;
     collapsedAreas: Record<string, boolean>;
     onToggleAreaCollapse: (areaId: string) => void;
     showDeferredProjects: boolean;
     onToggleDeferredProjects: () => void;
+    showArchivedProjects: boolean;
+    onToggleArchivedProjects: () => void;
     selectedProjectId: string | null;
     onSelectProject: (projectId: string) => void;
     getProjectColor: (project: Project) => string;
@@ -84,11 +87,14 @@ export function ProjectsSidebar({
     onSelectTag,
     groupedActiveProjects,
     groupedDeferredProjects,
+    groupedArchivedProjects,
     areaById,
     collapsedAreas,
     onToggleAreaCollapse,
     showDeferredProjects,
     onToggleDeferredProjects,
+    showArchivedProjects,
+    onToggleArchivedProjects,
     selectedProjectId,
     onSelectProject,
     getProjectColor,
@@ -203,6 +209,7 @@ export function ProjectsSidebar({
 
     const activeProjectDnd = useMemo(() => buildProjectDndState(groupedActiveProjects), [buildProjectDndState, groupedActiveProjects]);
     const deferredProjectDnd = useMemo(() => buildProjectDndState(groupedDeferredProjects), [buildProjectDndState, groupedDeferredProjects]);
+    const archivedProjectDnd = useMemo(() => buildProjectDndState(groupedArchivedProjects), [buildProjectDndState, groupedArchivedProjects]);
 
     const handleProjectDragEnd = useCallback((dndState: ReturnType<typeof buildProjectDndState>) => (event: DragEndEvent) => {
         const { active, over } = event;
@@ -538,7 +545,103 @@ export function ProjectsSidebar({
                     </div>
                 )}
 
-                {groupedActiveProjects.length === 0 && groupedDeferredProjects.length === 0 && !isCreating && (
+                {groupedArchivedProjects.length > 0 && (
+                    <div className="pt-2 border-t border-border/60">
+                        <button
+                            type="button"
+                            onClick={onToggleArchivedProjects}
+                            className="w-full flex items-center justify-between py-2 text-xs font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground transition-colors"
+                        >
+                            <span>{t('status.archived') || 'Archived'}</span>
+                            {showArchivedProjects ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                        </button>
+                        {showArchivedProjects && (
+                            <div className="space-y-3">
+                                <DndContext
+                                    sensors={projectSensors}
+                                    collisionDetection={closestCenter}
+                                    onDragEnd={handleProjectDragEnd(archivedProjectDnd)}
+                                >
+                                    {groupedArchivedProjects.map(([areaId, areaProjects]) => {
+                                        const area = areaById.get(areaId);
+                                        const areaLabel = area ? area.name : t('projects.noArea');
+                                        const isCollapsed = collapsedAreas[areaId] ?? false;
+
+                                        return (
+                                            <div key={`archived-${areaId}`} className="space-y-1">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => onToggleAreaCollapse(areaId)}
+                                                    className="w-full flex items-center justify-between px-2 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground transition-colors"
+                                                >
+                                                    <span className="flex items-center gap-2">
+                                                        {area?.color && (
+                                                            <span
+                                                                className="w-2 h-2 rounded-full border border-border/50"
+                                                                style={{ backgroundColor: area.color }}
+                                                            />
+                                                        )}
+                                                        {area?.icon && <span className="text-[10px]">{area.icon}</span>}
+                                                        {areaLabel}
+                                                    </span>
+                                                    {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                                                </button>
+                                                {!isCollapsed && (
+                                                    <ProjectAreaDropZone id={getProjectAreaContainerId(areaId)} className="space-y-1 rounded-lg">
+                                                        <SortableContext items={areaProjects.map((project) => project.id)} strategy={verticalListSortingStrategy}>
+                                                            {areaProjects.map((project) => (
+                                                                <SortableProjectRow key={project.id} projectId={project.id}>
+                                                                    {({ handle, isDragging }) => (
+                                                                        <div
+                                                                            className={cn(
+                                                                                "group rounded-lg cursor-pointer transition-colors text-sm",
+                                                                                selectedProjectId === project.id
+                                                                                    ? "bg-primary/10 text-primary"
+                                                                                    : "hover:bg-muted/40 text-foreground",
+                                                                                isDragging && "opacity-70",
+                                                                            )}
+                                                                            role="button"
+                                                                            tabIndex={0}
+                                                                            aria-pressed={selectedProjectId === project.id}
+                                                                            onMouseDown={(event) => handleProjectMouseDown(event, project.id)}
+                                                                            onClick={(event) => handleProjectClick(event, project.id)}
+                                                                            onKeyDown={(event) => handleProjectKeyDown(event, project.id)}
+                                                                            onContextMenu={(event) => {
+                                                                                event.preventDefault();
+                                                                                setContextMenu({
+                                                                                    projectId: project.id,
+                                                                                    x: event.clientX,
+                                                                                    y: event.clientY,
+                                                                                });
+                                                                            }}
+                                                                        >
+                                                                            <div className="flex items-center gap-2 px-2 py-2">
+                                                                                <span className="opacity-40 group-hover:opacity-100 transition-opacity">
+                                                                                    {handle}
+                                                                                </span>
+                                                                                <Folder className="w-4 h-4" style={{ color: getProjectColor(project) }} />
+                                                                                <span className="flex-1 truncate font-medium">{project.title}</span>
+                                                                                <span className="text-[10px] px-2 py-0.5 rounded-full bg-muted/60 text-muted-foreground uppercase">
+                                                                                    {t(`status.${project.status}`) || project.status}
+                                                                                </span>
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                </SortableProjectRow>
+                                                            ))}
+                                                        </SortableContext>
+                                                    </ProjectAreaDropZone>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </DndContext>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {groupedActiveProjects.length === 0 && groupedDeferredProjects.length === 0 && groupedArchivedProjects.length === 0 && !isCreating && (
                     <div className="text-sm text-muted-foreground text-center py-8 space-y-3">
                         <p className="text-base font-medium text-foreground">
                             {areaFilterLabel

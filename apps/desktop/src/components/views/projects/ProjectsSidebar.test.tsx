@@ -24,6 +24,8 @@ const translations: Record<string, string> = {
     'projects.projectName': 'Project name',
     'projects.tagFilter': 'Tag filter',
     'projects.title': 'Projects',
+    'status.archived': 'Archived',
+    'status.waiting': 'Waiting',
 };
 
 const t = (key: string) => translations[key] ?? key;
@@ -95,11 +97,14 @@ function SidebarHarness() {
                 onSelectTag={vi.fn()}
                 groupedActiveProjects={[[noAreaId, projects]]}
                 groupedDeferredProjects={[]}
+                groupedArchivedProjects={[]}
                 areaById={new Map()}
                 collapsedAreas={{}}
                 onToggleAreaCollapse={vi.fn()}
                 showDeferredProjects={false}
                 onToggleDeferredProjects={vi.fn()}
+                showArchivedProjects={false}
+                onToggleArchivedProjects={vi.fn()}
                 selectedProjectId={selectedProjectId}
                 onSelectProject={setSelectedProjectId}
                 getProjectColor={(project) => project.color}
@@ -138,11 +143,14 @@ function renderSidebarWithSpy(onSelectProject = vi.fn()) {
             onSelectTag={vi.fn()}
             groupedActiveProjects={[[noAreaId, projects]]}
             groupedDeferredProjects={[]}
+            groupedArchivedProjects={[]}
             areaById={new Map()}
             collapsedAreas={{}}
             onToggleAreaCollapse={vi.fn()}
             showDeferredProjects={false}
             onToggleDeferredProjects={vi.fn()}
+            showArchivedProjects={false}
+            onToggleArchivedProjects={vi.fn()}
             selectedProjectId={'project-alpha'}
             onSelectProject={onSelectProject}
             getProjectColor={(project) => project.color}
@@ -198,5 +206,60 @@ describe('ProjectsSidebar', () => {
         });
 
         expect(screen.getByText('Alpha updated')).toBeInTheDocument();
+    });
+
+    it('renders archived projects in a separate archived section', () => {
+        const waitingProject = { ...buildProject('project-waiting', 'Waiting Project', 0), status: 'waiting' as const };
+        const archivedProject = { ...buildProject('project-archived', 'Archived Project', 1), status: 'archived' as const };
+
+        render(
+            <ProjectsSidebar
+                t={t}
+                selectedTag={allTagsId}
+                noAreaId={noAreaId}
+                allTagsId={allTagsId}
+                noTagsId={noTagsId}
+                tagOptions={{ list: [], hasNoTags: true }}
+                isCreating={false}
+                isCreatingProject={false}
+                newProjectTitle=""
+                onStartCreate={vi.fn()}
+                onCancelCreate={vi.fn()}
+                onCreateProject={vi.fn()}
+                onChangeNewProjectTitle={vi.fn()}
+                onSelectTag={vi.fn()}
+                groupedActiveProjects={[]}
+                groupedDeferredProjects={[[noAreaId, [waitingProject]]]}
+                groupedArchivedProjects={[[noAreaId, [archivedProject]]]}
+                areaById={new Map()}
+                collapsedAreas={{}}
+                onToggleAreaCollapse={vi.fn()}
+                showDeferredProjects={true}
+                onToggleDeferredProjects={vi.fn()}
+                showArchivedProjects={true}
+                onToggleArchivedProjects={vi.fn()}
+                selectedProjectId={null}
+                onSelectProject={vi.fn()}
+                getProjectColor={(project) => project.color}
+                tasksByProject={{}}
+                projects={[waitingProject, archivedProject]}
+                toggleProjectFocus={vi.fn()}
+                updateProject={vi.fn()}
+                reorderProjects={vi.fn()}
+                onDuplicateProject={vi.fn()}
+            />
+        );
+
+        const deferredToggle = screen.getByRole('button', { name: 'Deferred projects' });
+        const deferredSection = deferredToggle.parentElement;
+        const archivedToggle = screen.getByRole('button', { name: 'Archived' });
+        const archivedSection = archivedToggle.parentElement;
+
+        expect(deferredSection).not.toBeNull();
+        expect(archivedSection).not.toBeNull();
+        expect(deferredSection).not.toBe(archivedSection);
+        expect(deferredSection).toHaveTextContent('Waiting Project');
+        expect(deferredSection).not.toHaveTextContent('Archived Project');
+        expect(archivedSection).toHaveTextContent('Archived Project');
     });
 });

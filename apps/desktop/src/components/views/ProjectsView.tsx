@@ -36,6 +36,7 @@ import { SectionDropZone, getSectionContainerId, getSectionIdFromContainer, NO_S
 import { useProjectSectionActions } from './projects/useProjectSectionActions';
 import { useProjectsViewStore } from './projects/useProjectsViewStore';
 import { projectTaskCollisionDetection } from './projects/project-task-dnd';
+import { splitProjectsForSidebar } from './projects/project-sidebar-grouping';
 
 const projectTaskDndMeasuring = {
     droppable: {
@@ -90,6 +91,7 @@ export function ProjectsView() {
     const [newProjectTitle, setNewProjectTitle] = useState('');
     const [showNotesPreview, setShowNotesPreview] = useState(true);
     const [showDeferredProjects, setShowDeferredProjects] = useState(false);
+    const [showArchivedProjects, setShowArchivedProjects] = useState(false);
     const [collapsedAreas, setCollapsedAreas] = useState<Record<string, boolean>>({});
     const [showAreaManager, setShowAreaManager] = useState(false);
     const [newAreaName, setNewAreaName] = useState('');
@@ -203,7 +205,7 @@ export function ProjectsView() {
         };
     }, [projects]);
 
-    const { groupedActiveProjects, groupedDeferredProjects } = useMemo(() => {
+    const { groupedActiveProjects, groupedDeferredProjects, groupedArchivedProjects } = useMemo(() => {
         const visibleProjects = projects.filter(p => !p.deletedAt);
         const sorted = [...visibleProjects].sort((a, b) => {
             const orderA = Number.isFinite(a.order) ? a.order : 0;
@@ -240,12 +242,12 @@ export function ProjectsView() {
             return ordered;
         };
 
-        const active = filteredByTag.filter((project) => project.status === 'active');
-        const deferred = filteredByTag.filter((project) => project.status !== 'active');
+        const { active, deferred, archived } = splitProjectsForSidebar(filteredByTag);
 
         return {
             groupedActiveProjects: groupByArea(active),
             groupedDeferredProjects: groupByArea(deferred),
+            groupedArchivedProjects: groupByArea(archived),
         };
     }, [projects, selectedArea, selectedTag, ALL_AREAS, NO_AREA, ALL_TAGS, NO_TAGS, areaById, sortedAreas]);
 
@@ -273,6 +275,13 @@ export function ProjectsView() {
     };
 
     const selectedProject = projects.find(p => p.id === selectedProjectId);
+
+    useEffect(() => {
+        if (selectedProject?.status === 'archived') {
+            setShowArchivedProjects(true);
+        }
+    }, [selectedProject?.id, selectedProject?.status]);
+
     const normalizedSearchQuery = searchQuery.trim().toLowerCase();
 
     const {
@@ -822,11 +831,14 @@ export function ProjectsView() {
                             onSelectTag={setSelectedTag}
                             groupedActiveProjects={groupedActiveProjects}
                             groupedDeferredProjects={groupedDeferredProjects}
+                            groupedArchivedProjects={groupedArchivedProjects}
                             areaById={areaById}
                             collapsedAreas={collapsedAreas}
                             onToggleAreaCollapse={toggleAreaCollapse}
                             showDeferredProjects={showDeferredProjects}
                             onToggleDeferredProjects={() => setShowDeferredProjects((prev) => !prev)}
+                            showArchivedProjects={showArchivedProjects}
+                            onToggleArchivedProjects={() => setShowArchivedProjects((prev) => !prev)}
                             selectedProjectId={selectedProjectId}
                             onSelectProject={setSelectedProjectId}
                             getProjectColor={getProjectColorForTask}
