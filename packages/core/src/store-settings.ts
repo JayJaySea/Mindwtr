@@ -13,6 +13,7 @@ import {
     ensureDeviceId,
     normalizeAiSettingsForSync,
     normalizeRevision,
+    selectVisibleTasks,
     stripSensitiveSettings,
     withTimeout,
 } from './store-helpers';
@@ -591,7 +592,7 @@ export const createSettingsActions = ({
                 }
             }
             // Filter out soft-deleted and archived items for day-to-day UI display
-            const visibleTasks = allTasks.filter(t => !t.deletedAt && t.status !== 'archived');
+            const visibleTasks = selectVisibleTasks(allTasks);
             const visibleProjects = allProjects.filter(p => !p.deletedAt);
             const visibleSections = allSections.filter((section) => !section.deletedAt);
             const visibleAreas = allAreas.filter((area) => !area.deletedAt);
@@ -741,7 +742,7 @@ export const createSettingsActions = ({
                 }
 
                 if (didAutoArchive) {
-                    const newVisibleTasks = newAllTasks.filter((t) => !t.deletedAt && t.status !== 'archived');
+                    const newVisibleTasks = selectVisibleTasks(newAllTasks);
                     snapshot = buildSaveSnapshot(state, { tasks: newAllTasks, settings: newSettings });
                     return {
                         tasks: newVisibleTasks,

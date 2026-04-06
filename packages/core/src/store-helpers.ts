@@ -107,17 +107,29 @@ export const isTaskVisible = (task?: Task | null, options?: TaskVisibilityOption
     return true;
 };
 
+export const toVisibleTask = (task: Task): Task => {
+    const attachments = task.attachments;
+    if (!attachments || attachments.length === 0) return task;
+    const visibleAttachments = attachments.filter((attachment) => !attachment.deletedAt);
+    return visibleAttachments.length === attachments.length
+        ? task
+        : { ...task, attachments: visibleAttachments };
+};
+
+export const selectVisibleTasks = (tasks: Task[]): Task[] => tasks.filter(isTaskVisible).map(toVisibleTask);
+
 export const updateVisibleTasks = (visible: Task[], previous?: Task | null, next?: Task | null): Task[] => {
     const wasVisible = isTaskVisible(previous);
     const isVisible = isTaskVisible(next);
+    const visibleNext = next && isVisible ? toVisibleTask(next) : next;
     if (wasVisible && isVisible && next) {
-        return visible.map((task) => (task.id === next.id ? next : task));
+        return visible.map((task) => (task.id === visibleNext!.id ? visibleNext! : task));
     }
     if (wasVisible && !isVisible && previous) {
         return visible.filter((task) => task.id !== previous.id);
     }
     if (!wasVisible && isVisible && next) {
-        return [...visible, next];
+        return [...visible, visibleNext!];
     }
     return visible;
 };

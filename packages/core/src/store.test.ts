@@ -249,6 +249,53 @@ describe('TaskStore', () => {
         expect(updatedProject?.tagIds).toEqual(['#bar']);
     });
 
+    it('filters soft-deleted attachments from visible tasks while preserving tombstones in _allTasks', async () => {
+        const now = '2026-03-01T10:00:00.000Z';
+        mockStorage.getData = vi.fn().mockResolvedValue({
+            tasks: [
+                {
+                    id: 'task-with-attachments',
+                    title: 'Task with attachments',
+                    status: 'next',
+                    attachments: [
+                        {
+                            id: 'keep',
+                            kind: 'file',
+                            title: 'Keep',
+                            uri: 'file:///keep.txt',
+                            createdAt: now,
+                            updatedAt: now,
+                        },
+                        {
+                            id: 'deleted',
+                            kind: 'file',
+                            title: 'Deleted',
+                            uri: 'file:///deleted.txt',
+                            createdAt: now,
+                            updatedAt: now,
+                            deletedAt: now,
+                        },
+                    ],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+            ],
+            projects: [],
+            sections: [],
+            areas: [],
+            settings: {},
+        });
+
+        await useTaskStore.getState().fetchData({ silent: true });
+        await flushPendingSave();
+
+        expect(useTaskStore.getState().tasks[0]?.attachments?.map((attachment) => attachment.id)).toEqual(['keep']);
+        expect(useTaskStore.getState()._allTasks[0]?.attachments?.map((attachment) => attachment.id)).toEqual([
+            'keep',
+            'deleted',
+        ]);
+    });
+
     it('should delete a task', () => {
         const { addTask, deleteTask } = useTaskStore.getState();
         addTask('Task to Delete');
