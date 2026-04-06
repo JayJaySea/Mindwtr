@@ -1,6 +1,13 @@
 import type { AppData, Area, Project, Section, Task, TaskStatus } from './types';
 import type { StoreActionResult, TaskStore } from './store-types';
-import { buildSaveSnapshot, ensureDeviceId, getTaskOrder, normalizeRevision, normalizeTagId } from './store-helpers';
+import {
+    buildSaveSnapshot,
+    ensureDeviceId,
+    getTaskOrder,
+    isTaskVisible,
+    normalizeRevision,
+    normalizeTagId,
+} from './store-helpers';
 import { generateUUID as uuidv4 } from './uuid';
 import { clearDerivedCache } from './store-settings';
 
@@ -198,7 +205,7 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
             );
 
             const newVisibleProjects = newAllProjects.filter(p => !p.deletedAt);
-            const newVisibleTasks = newAllTasks.filter(t => !t.deletedAt && t.status !== 'archived');
+            const newVisibleTasks = newAllTasks.filter(isTaskVisible);
             const newVisibleSections = newAllSections.filter((section) => !section.deletedAt);
 
             snapshot = buildSaveSnapshot(state, {
@@ -284,7 +291,7 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
             );
             // Filter for UI state
             const newVisibleProjects = newAllProjects.filter(p => !p.deletedAt);
-            const newVisibleTasks = newAllTasks.filter(t => !t.deletedAt && t.status !== 'archived');
+            const newVisibleTasks = newAllTasks.filter(isTaskVisible);
             const newVisibleSections = newAllSections.filter((section) => !section.deletedAt);
             clearDerivedCache();
             snapshot = buildSaveSnapshot(state, {
@@ -1244,7 +1251,7 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
                 };
             });
 
-            const newVisibleTasks = newAllTasks.filter((t) => !t.deletedAt && t.status !== 'archived');
+            const newVisibleTasks = newAllTasks.filter(isTaskVisible);
             const newVisibleProjects = newAllProjects.filter((p) => !p.deletedAt);
 
             snapshot = buildSaveSnapshot(state, {
@@ -1312,7 +1319,7 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
                 };
             });
 
-            const newVisibleTasks = newAllTasks.filter((t) => !t.deletedAt && t.status !== 'archived');
+            const newVisibleTasks = newAllTasks.filter(isTaskVisible);
             const newVisibleProjects = newAllProjects.filter((p) => !p.deletedAt);
 
             snapshot = buildSaveSnapshot(state, {
@@ -1355,7 +1362,7 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
                 };
             });
 
-            const newVisibleTasks = newAllTasks.filter((t) => !t.deletedAt && t.status !== 'archived');
+            const newVisibleTasks = newAllTasks.filter(isTaskVisible);
 
             snapshot = buildSaveSnapshot(state, {
                 tasks: newAllTasks,
@@ -1405,7 +1412,7 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
                 };
             });
 
-            const newVisibleTasks = newAllTasks.filter((t) => !t.deletedAt && t.status !== 'archived');
+            const newVisibleTasks = newAllTasks.filter(isTaskVisible);
 
             snapshot = buildSaveSnapshot(state, {
                 tasks: newAllTasks,
