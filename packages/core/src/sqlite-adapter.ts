@@ -755,7 +755,7 @@ export class SqliteAdapter {
         const ftsQuery = tokens.map((token) => `${token}*`).join(' ');
         const runSearch = async (): Promise<SearchResults> => {
             const taskRows = await this.client.all<Record<string, unknown>>(
-                `SELECT ${SEARCH_TASK_SELECT} FROM tasks_fts f JOIN tasks t ON f.id = t.id WHERE tasks_fts MATCH ? AND t.deletedAt IS NULL AND t.status != 'archived'`,
+                `SELECT ${SEARCH_TASK_SELECT} FROM tasks_fts f JOIN tasks t ON f.id = t.id WHERE tasks_fts MATCH ? AND t.deletedAt IS NULL`,
                 [ftsQuery]
             );
             const projectRows = await this.client.all<Record<string, unknown>>(

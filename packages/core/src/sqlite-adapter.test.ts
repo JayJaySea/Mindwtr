@@ -361,7 +361,7 @@ describeSqlite('SqliteAdapter', () => {
                 {
                     id: 'task-search-1',
                     title: 'Searchable task',
-                    status: 'next',
+                    status: 'archived',
                     startTime: '2025-01-01T08:00:00.000Z',
                     dueDate: '2025-01-02T00:00:00.000Z',
                     projectId: 'project-search-1',
@@ -393,7 +393,7 @@ describeSqlite('SqliteAdapter', () => {
         expect(allMock.mock.calls[0]?.[0]).toContain('SELECT t.id AS id');
         expect(allMock.mock.calls[0]?.[0]).not.toContain('t.attachments');
         expect(allMock.mock.calls[0]?.[0]).not.toContain('t.description');
-        expect(allMock.mock.calls[0]?.[0]).toContain("t.status != 'archived'");
+        expect(allMock.mock.calls[0]?.[0]).not.toContain("t.status != 'archived'");
         expect(allMock.mock.calls[1]?.[0]).toContain('SELECT p.id AS id');
         expect(allMock.mock.calls[1]?.[0]).not.toContain('p.supportNotes');
 
@@ -402,7 +402,7 @@ describeSqlite('SqliteAdapter', () => {
         expect(results.tasks[0]).toMatchObject({
             id: 'task-search-1',
             title: 'Searchable task',
-            status: 'next',
+            status: 'archived',
             startTime: '2025-01-01T08:00:00.000Z',
             dueDate: '2025-01-02T00:00:00.000Z',
             projectId: 'project-search-1',
