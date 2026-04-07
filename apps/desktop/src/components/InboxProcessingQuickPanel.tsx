@@ -1,5 +1,5 @@
 import { ArrowRight, BookOpen, CheckCircle, Clock, Trash2, User, X } from 'lucide-react';
-import { DEFAULT_PROJECT_COLOR, type Area, type Project, type Task } from '@mindwtr/core';
+import { DEFAULT_PROJECT_COLOR, type Area, type Project, type Task, type TaskPriority } from '@mindwtr/core';
 
 import { cn } from '../lib/utils';
 import { ProjectSelector } from './ui/ProjectSelector';
@@ -40,6 +40,9 @@ type InboxProcessingQuickPanelProps = {
     onSendDelegateRequest: () => void;
     selectedContexts: string[];
     selectedTags: string[];
+    prioritiesEnabled: boolean;
+    selectedPriority?: TaskPriority;
+    setSelectedPriority: (value: TaskPriority | undefined) => void;
     onContextsInputChange: (value: string) => void;
     onTagsInputChange: (value: string) => void;
     toggleContext: (ctx: string) => void;
@@ -67,6 +70,8 @@ export type {
     QuickExecutionChoice,
     QuickTwoMinuteChoice,
 };
+
+const PRIORITY_OPTIONS: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 
 export function InboxProcessingQuickPanel({
     t,
@@ -100,6 +105,9 @@ export function InboxProcessingQuickPanel({
     onSendDelegateRequest,
     selectedContexts,
     selectedTags,
+    prioritiesEnabled,
+    selectedPriority,
+    setSelectedPriority,
     onContextsInputChange,
     onTagsInputChange,
     toggleContext,
@@ -558,6 +566,32 @@ export function InboxProcessingQuickPanel({
                                 ) : null}
                             </div>
                         </div>
+
+                        {prioritiesEnabled ? (
+                            <div className="space-y-2">
+                                <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.priorityLabel')}</label>
+                                <div className="flex flex-wrap gap-2">
+                                    {PRIORITY_OPTIONS.map((priority) => {
+                                        const isSelected = selectedPriority === priority;
+                                        return (
+                                            <button
+                                                key={priority}
+                                                type="button"
+                                                onClick={() => setSelectedPriority(isSelected ? undefined : priority)}
+                                                className={cn(
+                                                    'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
+                                                    isSelected
+                                                        ? 'bg-primary text-primary-foreground border-primary'
+                                                        : 'bg-muted/40 border-border hover:bg-muted/70'
+                                                )}
+                                            >
+                                                {t(`priority.${priority}`)}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        ) : null}
                     </>
                 ) : null}
 

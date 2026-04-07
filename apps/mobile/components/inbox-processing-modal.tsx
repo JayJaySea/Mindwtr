@@ -3,7 +3,7 @@ import { View, Text, TouchableOpacity, Modal, ScrollView, TextInput, Platform, A
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { DEFAULT_PROJECT_COLOR, collectTaskTokenUsage, useTaskStore, createAIProvider, safeFormatDate, safeParseDate, resolveAutoTextDirection, type Task, type AIProviderId } from '@mindwtr/core';
+import { DEFAULT_PROJECT_COLOR, collectTaskTokenUsage, useTaskStore, createAIProvider, safeFormatDate, safeParseDate, resolveAutoTextDirection, type Task, type AIProviderId, type TaskPriority } from '@mindwtr/core';
 
 import { AIResponseModal, type AIResponseAction } from './ai-response-modal';
 import { useLanguage } from '../contexts/language-context';
@@ -19,6 +19,7 @@ type InboxProcessingModalProps = {
 };
 
 const MAX_TOKEN_SUGGESTIONS = 6;
+const PRIORITY_OPTIONS: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 
 export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalProps) {
   const { tasks, projects, areas, settings, updateTask, deleteTask, addProject } = useTaskStore();
@@ -54,6 +55,7 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
   const contextStepEnabled = inboxProcessing.contextStepEnabled !== false;
   const scheduleEnabled = inboxProcessing.scheduleEnabled === true;
   const referenceEnabled = inboxProcessing.referenceEnabled === true;
+  const prioritiesEnabled = settings?.features?.priorities === true;
 
   const aiEnabled = settings?.ai?.enabled === true;
   const aiProvider = (settings?.ai?.provider ?? 'openai') as AIProviderId;
@@ -95,6 +97,7 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
 
   const [selectedContexts, setSelectedContexts] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [selectedPriority, setSelectedPriority] = useState<TaskPriority | undefined>(undefined);
   const areaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
   const contextSuggestionPool = useMemo(() => {
     return collectTaskTokenUsage(tasks, (task) => task.contexts, { prefix: '@' })
@@ -186,6 +189,7 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
     setShowDelegateDatePicker(false);
     setSelectedContexts([]);
     setSelectedTags([]);
+    setSelectedPriority(undefined);
     setNewContext('');
     setProjectSearch('');
     setSelectedProjectId(null);
@@ -230,6 +234,7 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
     setShowDelegateDatePicker(false);
     setSelectedContexts(firstTask?.contexts ?? []);
     setSelectedTags(firstTask?.tags ?? []);
+    setSelectedPriority(firstTask?.priority);
     setNewContext('');
     setProjectSearch('');
     setSelectedProjectId(firstTask?.projectId ?? null);
@@ -264,6 +269,8 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
       setDelegateFollowUpDate(null);
       setShowDelegateDatePicker(false);
       setSelectedContexts(nextTask?.contexts ?? []);
+      setSelectedTags(nextTask?.tags ?? []);
+      setSelectedPriority(nextTask?.priority);
       setNewContext('');
       setProjectSearch('');
       setSelectedProjectId(nextTask?.projectId ?? null);
@@ -295,6 +302,7 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
     setDelegateFollowUpDate(null);
     setSelectedContexts(nextTask?.contexts ?? []);
     setSelectedTags(nextTask?.tags ?? []);
+    setSelectedPriority(nextTask?.priority);
     setNewContext('');
     setProjectSearch('');
     setSelectedProjectId(nextTask?.projectId ?? null);
@@ -331,6 +339,7 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
       projectId: selectedProjectId ?? undefined,
       contexts: selectedContexts,
       tags: selectedTags,
+      ...(prioritiesEnabled ? { priority: selectedPriority ?? undefined } : {}),
       ...(scheduleEnabled ? { startTime: pendingStartDate ? pendingStartDate.toISOString() : undefined } : {}),
     });
     setSkippedIds((prev) => {
@@ -479,6 +488,7 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
       projectId: projectId ?? undefined,
       contexts: selectedContexts,
       tags: selectedTags,
+      ...(prioritiesEnabled ? { priority: selectedPriority ?? undefined } : {}),
       startTime: scheduleEnabled && pendingStartDate ? pendingStartDate.toISOString() : undefined,
     });
     setPendingStartDate(null);
@@ -648,6 +658,38 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
                   <Text style={styles.selectedTokenText}>{tag} x</Text>
                 </TouchableOpacity>
               ))}
+            </View>
+          </View>
+        )}
+        {prioritiesEnabled && (
+          <View style={styles.prioritySection}>
+            <Text style={[styles.tokenSectionTitle, { color: tc.secondaryText }]}>{t('taskEdit.priorityLabel')}</Text>
+            <View style={styles.tokenChipWrap}>
+              {PRIORITY_OPTIONS.map((priority) => {
+                const isSelected = selectedPriority === priority;
+                return (
+                  <TouchableOpacity
+                    key={priority}
+                    style={[
+                      styles.priorityChip,
+                      {
+                        borderColor: isSelected ? tc.tint : tc.border,
+                        backgroundColor: isSelected ? tc.tint : tc.filterBg,
+                      },
+                    ]}
+                    onPress={() => setSelectedPriority(isSelected ? undefined : priority)}
+                  >
+                    <Text
+                      style={[
+                        styles.priorityChipText,
+                        { color: isSelected ? tc.onTint : tc.text },
+                      ]}
+                    >
+                      {t(`priority.${priority}`)}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
           </View>
         )}

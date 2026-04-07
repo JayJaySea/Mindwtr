@@ -1,5 +1,5 @@
 import { ArrowRight, BookOpen, CheckCircle, ChevronLeft, Clock, Trash2, User, X } from 'lucide-react';
-import { DEFAULT_PROJECT_COLOR, type Area, type Project, type Task } from '@mindwtr/core';
+import { DEFAULT_PROJECT_COLOR, type Area, type Project, type Task, type TaskPriority } from '@mindwtr/core';
 
 import { cn } from '../lib/utils';
 import { ProjectSelector } from './ui/ProjectSelector';
@@ -41,6 +41,9 @@ type InboxProcessingWizardProps = {
     handleConfirmWaiting: () => void;
     selectedContexts: string[];
     selectedTags: string[];
+    prioritiesEnabled: boolean;
+    selectedPriority?: TaskPriority;
+    setSelectedPriority: (value: TaskPriority | undefined) => void;
     allContexts: string[];
     customContext: string;
     setCustomContext: (value: string) => void;
@@ -83,6 +86,8 @@ type InboxProcessingWizardProps = {
     showScheduleFields: boolean;
 };
 
+const PRIORITY_OPTIONS: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
+
 export function InboxProcessingWizard({
     t,
     isProcessing,
@@ -118,6 +123,9 @@ export function InboxProcessingWizard({
     handleConfirmWaiting,
     selectedContexts,
     selectedTags,
+    prioritiesEnabled,
+    selectedPriority,
+    setSelectedPriority,
     allContexts,
     customContext,
     setCustomContext,
@@ -659,6 +667,33 @@ export function InboxProcessingWizard({
                             </div>
                         )}
                     </div>
+
+                    {prioritiesEnabled && (
+                        <div className="space-y-2">
+                            <div className="text-[11px] uppercase tracking-wide text-muted-foreground font-semibold">
+                                {t('taskEdit.priorityLabel')}
+                            </div>
+                            <div className="flex flex-wrap gap-2 justify-center">
+                                {PRIORITY_OPTIONS.map((priority) => {
+                                    const isSelected = selectedPriority === priority;
+                                    return (
+                                        <button
+                                            key={priority}
+                                            onClick={() => setSelectedPriority(isSelected ? undefined : priority)}
+                                            className={cn(
+                                                'px-4 py-2 rounded-full text-sm font-medium transition-colors',
+                                                isSelected
+                                                    ? 'bg-primary text-primary-foreground'
+                                                    : 'bg-muted hover:bg-muted/80'
+                                            )}
+                                        >
+                                            {t(`priority.${priority}`)}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
 
                     <button
                         onClick={handleConfirmContexts}

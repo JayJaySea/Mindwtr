@@ -11,6 +11,7 @@ import {
     type Area,
     type Project,
     type Task,
+    type TaskPriority,
 } from '@mindwtr/core';
 
 import { InboxProcessingWizard, type ProcessingStep } from '../InboxProcessingWizard';
@@ -69,6 +70,7 @@ export function InboxProcessor({
     const [quickExecutionChoice, setQuickExecutionChoice] = useState<QuickExecutionChoice>('defer');
     const [selectedContexts, setSelectedContexts] = useState<string[]>([]);
     const [selectedTags, setSelectedTags] = useState<string[]>([]);
+    const [selectedPriority, setSelectedPriority] = useState<TaskPriority | undefined>(undefined);
     const [delegateWho, setDelegateWho] = useState('');
     const [delegateFollowUp, setDelegateFollowUp] = useState('');
     const [projectSearch, setProjectSearch] = useState('');
@@ -94,6 +96,7 @@ export function InboxProcessor({
     const contextStepEnabled = inboxProcessing.contextStepEnabled !== false;
     const scheduleEnabled = inboxProcessing.scheduleEnabled === true;
     const referenceEnabled = inboxProcessing.referenceEnabled === true;
+    const prioritiesEnabled = settings?.features?.priorities === true;
 
     const areaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
     const projectMap = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
@@ -148,6 +151,7 @@ export function InboxProcessor({
         setQuickExecutionChoice('defer');
         setSelectedContexts([]);
         setSelectedTags([]);
+        setSelectedPriority(undefined);
         setDelegateWho('');
         setDelegateFollowUp('');
         setProjectSearch('');
@@ -175,6 +179,7 @@ export function InboxProcessor({
         setQuickExecutionChoice('defer');
         setSelectedContexts(task.contexts ?? []);
         setSelectedTags(task.tags ?? []);
+        setSelectedPriority(task.priority);
         setCustomContext('');
         setCustomTag('');
         setProjectSearch('');
@@ -232,6 +237,8 @@ export function InboxProcessor({
         setIsProcessing(false);
         setProcessingTask(null);
         setSelectedContexts([]);
+        setSelectedTags([]);
+        setSelectedPriority(undefined);
     }, [hydrateProcessingTask, processingTask?.id, tasks, setIsProcessing, skippedIds, matchesAreaFilter]);
 
     const handleSkip = useCallback(() => {
@@ -344,6 +351,7 @@ export function InboxProcessor({
                 status: 'waiting',
                 description: nextDescription.length > 0 ? nextDescription : undefined,
                 reviewAt: followUpIso,
+                ...(prioritiesEnabled ? { priority: selectedPriority ?? undefined } : {}),
                 ...scheduleUpdate,
             });
         }
@@ -471,6 +479,7 @@ export function InboxProcessor({
                 status: 'next',
                 contexts: selectedContexts,
                 tags: selectedTags,
+                ...(prioritiesEnabled ? { priority: selectedPriority ?? undefined } : {}),
                 projectId: projectId || undefined,
                 areaId: projectId ? undefined : (selectedAreaId || undefined),
                 ...(scheduleEnabled && scheduleDate
@@ -512,6 +521,7 @@ export function InboxProcessor({
             status: 'next',
             contexts: selectedContexts,
             tags: selectedTags,
+            ...(prioritiesEnabled ? { priority: selectedPriority ?? undefined } : {}),
             projectId: project.id,
             ...(scheduleEnabled && scheduleDate
                 ? { startTime: scheduleTime ? `${scheduleDate}T${scheduleTime}` : scheduleDate }
@@ -550,6 +560,8 @@ export function InboxProcessor({
         quickExecutionChoice,
         quickTwoMinuteChoice,
         convertToProject,
+        prioritiesEnabled,
+        selectedPriority,
         selectedProjectId,
     ]);
 
@@ -600,6 +612,9 @@ export function InboxProcessor({
                     onSendDelegateRequest={handleSendDelegateRequest}
                     selectedContexts={selectedContexts}
                     selectedTags={selectedTags}
+                    prioritiesEnabled={prioritiesEnabled}
+                    selectedPriority={selectedPriority}
+                    setSelectedPriority={setSelectedPriority}
                     onContextsInputChange={(value) => setSelectedContexts(parseTokenListInput(value, '@'))}
                     onTagsInputChange={(value) => setSelectedTags(parseTokenListInput(value, '#'))}
                     toggleContext={toggleContext}
@@ -657,6 +672,9 @@ export function InboxProcessor({
                     handleConfirmWaiting={handleConfirmWaiting}
                     selectedContexts={selectedContexts}
                     selectedTags={selectedTags}
+                    prioritiesEnabled={prioritiesEnabled}
+                    selectedPriority={selectedPriority}
+                    setSelectedPriority={setSelectedPriority}
                     allContexts={allContexts}
                     customContext={customContext}
                     setCustomContext={setCustomContext}

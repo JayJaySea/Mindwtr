@@ -178,8 +178,11 @@ describe('InboxProcessor', () => {
         expect(getByText('taskEdit.startDateLabel')).toBeInTheDocument();
     });
 
-    it('processes a task from quick mode with schedule, contexts, and tags', async () => {
+    it('processes a task from quick mode with schedule, contexts, tags, and priority', async () => {
         const { getByRole, getByLabelText, updateTask } = renderInboxProcessor({
+            features: {
+                priorities: true,
+            },
             gtd: {
                 inboxProcessing: {
                     scheduleEnabled: true,
@@ -202,6 +205,7 @@ describe('InboxProcessor', () => {
         fireEvent.change(getByLabelText('taskEdit.tagsLabel'), {
             target: { value: '#deep, #writing' },
         });
+        fireEvent.click(getByRole('button', { name: 'priority.high' }));
         fireEvent.change(getByLabelText('taskEdit.startDateLabel'), {
             target: { value: '2026-03-23' },
         });
@@ -217,7 +221,36 @@ describe('InboxProcessor', () => {
                     status: 'next',
                     contexts: ['@home', '@desk'],
                     tags: ['#deep', '#writing'],
+                    priority: 'high',
                     startTime: '2026-03-23',
+                }),
+            );
+        });
+    });
+
+    it('processes a task from guided mode with priority in the context step', async () => {
+        const { getByRole, getByText, updateTask } = renderInboxProcessor({
+            features: {
+                priorities: true,
+            },
+        });
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        fireEvent.click(getByText('process.refineNext'));
+        fireEvent.click(getByText('process.yesActionable'));
+        fireEvent.click(getByText('process.moreThanOneStepNo'));
+        fireEvent.click(getByText('process.takesLonger'));
+        fireEvent.click(getByText('process.doIt'));
+        fireEvent.click(getByRole('button', { name: 'priority.urgent' }));
+        fireEvent.click(getByRole('button', { name: /process\.next/ }));
+        fireEvent.click(getByRole('button', { name: /process\.noProject/ }));
+
+        await waitFor(() => {
+            expect(updateTask).toHaveBeenCalledWith(
+                'task-1',
+                expect.objectContaining({
+                    status: 'next',
+                    priority: 'urgent',
                 }),
             );
         });
