@@ -3,6 +3,12 @@ import { ExternalCalendarService } from './external-calendar-service';
 import { isTauriRuntime } from './runtime';
 import { fetchSystemCalendarEvents } from './system-calendar';
 
+export const summarizeExternalCalendarWarnings = (warnings: string[]): string | null => {
+    if (warnings.length === 0) return null;
+    if (warnings.length === 1) return warnings[0];
+    return `${warnings[0]} (+${warnings.length - 1} more)`;
+};
+
 async function fetchTextWithTimeout(url: string, timeoutMs: number): Promise<string> {
     if (isTauriRuntime()) {
         const mod: any = await import('@tauri-apps/plugin-http');

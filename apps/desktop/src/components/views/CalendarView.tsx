@@ -9,15 +9,10 @@ import { usePerformanceMonitor } from '../../hooks/usePerformanceMonitor';
 import { checkBudget } from '../../config/performanceBudgets';
 import { TaskItem } from '../TaskItem';
 import { resolveAreaFilter, taskMatchesAreaFilter } from '../../lib/area-filter';
-import { fetchExternalCalendarEvents } from '../../lib/external-calendar-events';
+import { fetchExternalCalendarEvents, summarizeExternalCalendarWarnings } from '../../lib/external-calendar-events';
 import { getCalendarMonthNames, getCalendarWeekdayHeaders, resolveCalendarLocale } from './calendar-locale';
 
 const dayKey = (date: Date) => format(date, 'yyyy-MM-dd');
-const summarizeExternalCalendarWarnings = (warnings: string[]): string | null => {
-    if (warnings.length === 0) return null;
-    if (warnings.length === 1) return warnings[0];
-    return `${warnings[0]} (+${warnings.length - 1} more)`;
-};
 
 export function CalendarView() {
     const perf = usePerformanceMonitor('CalendarView');

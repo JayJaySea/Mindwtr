@@ -13,6 +13,7 @@ vi.mock('@mindwtr/core', async () => {
         getDerivedState: () => ({
             projectMap: new Map(),
         }),
+        setError: vi.fn(),
         settings: {
             diagnostics: {
                 loggingEnabled: false,
@@ -43,6 +44,11 @@ vi.mock('@mindwtr/core', async () => {
 
 vi.mock('../../lib/external-calendar-events', () => ({
     fetchExternalCalendarEvents: vi.fn(async () => ({ calendars: [], events: [], warnings: [] })),
+    summarizeExternalCalendarWarnings: (warnings: string[]) => {
+        if (warnings.length === 0) return null;
+        if (warnings.length === 1) return warnings[0];
+        return `${warnings[0]} (+${warnings.length - 1} more)`;
+    },
 }));
 
 describe('CalendarView', () => {

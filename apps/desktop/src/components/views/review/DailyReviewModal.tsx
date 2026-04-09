@@ -18,7 +18,7 @@ import { cn } from '../../../lib/utils';
 import { useLanguage } from '../../../contexts/language-context';
 import { InboxProcessor } from '../InboxProcessor';
 import { TaskItem } from '../../TaskItem';
-import { fetchExternalCalendarEvents } from '../../../lib/external-calendar-events';
+import { fetchExternalCalendarEvents, summarizeExternalCalendarWarnings } from '../../../lib/external-calendar-events';
 
 type DailyReviewStep = 'today' | 'focus' | 'inbox' | 'waiting' | 'completed';
 
@@ -191,7 +191,7 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
                 const { events, warnings } = await fetchExternalCalendarEvents(todayStart, tomorrowEnd);
                 if (cancelled) return;
                 setExternalCalendarEvents(events);
-                setExternalCalendarError(warnings[0] ?? null);
+                setExternalCalendarError(summarizeExternalCalendarWarnings(warnings));
             } catch (error) {
                 if (cancelled) return;
                 setExternalCalendarError(error instanceof Error ? error.message : String(error));

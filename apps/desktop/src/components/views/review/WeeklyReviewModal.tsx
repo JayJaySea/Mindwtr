@@ -22,7 +22,7 @@ import { PromptModal } from '../../PromptModal';
 import { cn } from '../../../lib/utils';
 import { useLanguage } from '../../../contexts/language-context';
 import { buildAIConfig, isAIKeyRequired, loadAIKey } from '../../../lib/ai-config';
-import { fetchExternalCalendarEvents } from '../../../lib/external-calendar-events';
+import { fetchExternalCalendarEvents, summarizeExternalCalendarWarnings } from '../../../lib/external-calendar-events';
 
 type ReviewStep = 'inbox' | 'ai' | 'calendar' | 'waiting' | 'contexts' | 'projects' | 'someday' | 'completed';
 type CalendarReviewEntry = {
@@ -212,7 +212,7 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
                 const { events, warnings } = await fetchExternalCalendarEvents(rangeStart, rangeEnd);
                 if (cancelled) return;
                 setExternalCalendarEvents(events);
-                setExternalCalendarError(warnings[0] ?? null);
+                setExternalCalendarError(summarizeExternalCalendarWarnings(warnings));
             } catch (error) {
                 if (cancelled) return;
                 setExternalCalendarError(error instanceof Error ? error.message : String(error));

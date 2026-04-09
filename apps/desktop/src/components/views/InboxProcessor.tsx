@@ -51,6 +51,32 @@ const parseTokenListInput = (value: string, prefix: '@' | '#'): string[] => Arra
 const mergeSuggestedTokens = (...groups: string[][]): string[] =>
     Array.from(new Set(groups.flat()));
 
+const normalizeTimeInput = (value: string): string | null => {
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    const compact = trimmed.replace(/\s+/g, '');
+    let hours: number;
+    let minutes: number;
+    if (/^\d{1,2}:\d{2}$/.test(compact)) {
+        const [h, m] = compact.split(':');
+        hours = Number(h);
+        minutes = Number(m);
+    } else if (/^\d{3,4}$/.test(compact)) {
+        if (compact.length === 3) {
+            hours = Number(compact.slice(0, 1));
+            minutes = Number(compact.slice(1));
+        } else {
+            hours = Number(compact.slice(0, 2));
+            minutes = Number(compact.slice(2));
+        }
+    } else {
+        return null;
+    }
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+};
+
 export function InboxProcessor({
     t,
     isInbox,
@@ -248,6 +274,9 @@ export function InboxProcessor({
         hydrateProcessingTask(inboxTasks[0]);
         setIsProcessing(true);
     }, [tasks, hydrateProcessingTask, setIsProcessing, matchesAreaFilter]);
+    const closeProcessing = useCallback(() => {
+        setIsProcessing(false);
+    }, [setIsProcessing]);
 
     const processNext = useCallback(() => {
         const currentTaskId = processingTask?.id;
@@ -332,7 +361,9 @@ export function InboxProcessor({
         goToStep(twoMinuteFirst ? 'decide' : 'twomin');
     }, [goToStep, twoMinuteEnabled, twoMinuteFirst]);
 
-    const handleActionable = () => goToStep('projectcheck');
+    const handleActionable = useCallback(() => {
+        goToStep('projectcheck');
+    }, [goToStep]);
 
     const handleProjectCheckNo = useCallback(() => {
         continueFromProjectCheck();
@@ -346,22 +377,24 @@ export function InboxProcessor({
         goToStep('project');
     }, [goToStep, processingTask?.title, processingTitle]);
 
-    const handleTwoMinDone = () => {
+    const handleTwoMinDone = useCallback(() => {
         if (processingTask) {
             applyProcessingEdits({ status: 'done' });
         }
         processNext();
-    };
+    }, [applyProcessingEdits, processNext, processingTask]);
 
-    const handleTwoMinNo = () => goToStep(twoMinuteFirst ? 'actionable' : 'decide');
+    const handleTwoMinNo = useCallback(() => {
+        goToStep(twoMinuteFirst ? 'actionable' : 'decide');
+    }, [goToStep, twoMinuteFirst]);
 
-    const handleDelegate = () => {
+    const handleDelegate = useCallback(() => {
         setDelegateWho('');
         setDelegateFollowUp('');
         goToStep('delegate');
-    };
+    }, [goToStep]);
 
-    const handleConfirmWaiting = () => {
+    const handleConfirmWaiting = useCallback(() => {
         if (processingTask) {
             const who = delegateWho.trim();
             const followUpIso = delegateFollowUp
@@ -382,13 +415,26 @@ export function InboxProcessor({
         setDelegateWho('');
         setDelegateFollowUp('');
         processNext();
-    };
+    }, [
+        applyProcessingEdits,
+        delegateFollowUp,
+        delegateWho,
+        prioritiesEnabled,
+        processNext,
+        processingTask,
+        scheduleDate,
+        scheduleEnabled,
+        scheduleTime,
+        selectedEnergyLevel,
+        selectedAssignedTo,
+        selectedPriority,
+    ]);
 
-    const handleDelegateBack = () => {
+    const handleDelegateBack = useCallback(() => {
         goBack();
-    };
+    }, [goBack]);
 
-    const handleSendDelegateRequest = () => {
+    const handleSendDelegateRequest = useCallback(() => {
         if (!processingTask) return;
         const title = processingTitle.trim() || processingTask.title;
         const baseDescription = processingDescription.trim() || processingTask.description || '';
@@ -406,15 +452,15 @@ export function InboxProcessor({
         const subject = `Delegation: ${title}`;
         const mailto = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
         window.open(mailto);
-    };
+    }, [delegateWho, processingDescription, processingTask, processingTitle]);
 
-    const toggleTag = (tag: string) => {
+    const toggleTag = useCallback((tag: string) => {
         setSelectedTags((prev) =>
             prev.includes(tag) ? prev.filter((item) => item !== tag) : [...prev, tag]
         );
-    };
+    }, []);
 
-    const toggleContext = (ctx: string) => {
+    const toggleContext = useCallback((ctx: string) => {
         if (ctx.startsWith('#')) {
             toggleTag(ctx);
             return;
@@ -422,9 +468,9 @@ export function InboxProcessor({
         setSelectedContexts((prev) =>
             prev.includes(ctx) ? prev.filter((item) => item !== ctx) : [...prev, ctx]
         );
-    };
+    }, [toggleTag]);
 
-    const addCustomContext = () => {
+    const addCustomContext = useCallback(() => {
         const trimmed = customContext.trim();
         if (!trimmed) return;
         const raw = trimmed.replace(/^@/, '');
@@ -433,9 +479,9 @@ export function InboxProcessor({
             setSelectedContexts((prev) => [...prev, ctx]);
         }
         setCustomContext('');
-    };
+    }, [customContext, selectedContexts]);
 
-    const addCustomTag = () => {
+    const addCustomTag = useCallback(() => {
         const trimmed = customTag.trim();
         if (!trimmed) return;
         const tag = `#${trimmed.replace(/^#+/, '').trim()}`;
@@ -443,35 +489,9 @@ export function InboxProcessor({
             setSelectedTags((prev) => [...prev, tag]);
         }
         setCustomTag('');
-    };
+    }, [customTag, selectedTags]);
 
-    const normalizeTimeInput = (value: string): string | null => {
-        const trimmed = value.trim();
-        if (!trimmed) return '';
-        const compact = trimmed.replace(/\s+/g, '');
-        let hours: number;
-        let minutes: number;
-        if (/^\d{1,2}:\d{2}$/.test(compact)) {
-            const [h, m] = compact.split(':');
-            hours = Number(h);
-            minutes = Number(m);
-        } else if (/^\d{3,4}$/.test(compact)) {
-            if (compact.length === 3) {
-                hours = Number(compact.slice(0, 1));
-                minutes = Number(compact.slice(1));
-            } else {
-                hours = Number(compact.slice(0, 2));
-                minutes = Number(compact.slice(2));
-            }
-        } else {
-            return null;
-        }
-        if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
-        if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
-        return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-    };
-
-    const handleScheduleTimeCommit = () => {
+    const handleScheduleTimeCommit = useCallback(() => {
         const normalized = normalizeTimeInput(scheduleTimeDraft);
         if (normalized === null) {
             setScheduleTimeDraft(scheduleTime);
@@ -479,25 +499,17 @@ export function InboxProcessor({
         }
         setScheduleTimeDraft(normalized);
         setScheduleTime(normalized);
-    };
+    }, [scheduleTime, scheduleTimeDraft]);
 
-    const handleScheduleDateChange = (value: string) => {
+    const handleScheduleDateChange = useCallback((value: string) => {
         setScheduleDate(value);
         if (!value) {
             setScheduleTime('');
             setScheduleTimeDraft('');
         }
-    };
+    }, []);
 
-    const handleConfirmContexts = () => {
-        if (projectFirst) {
-            handleSetProject(selectedProjectId);
-            return;
-        }
-        goToStep('project');
-    };
-
-    const handleSetProject = (projectId: string | null) => {
+    const handleSetProject = useCallback((projectId: string | null) => {
         if (processingTask) {
             applyProcessingEdits({
                 status: 'next',
@@ -514,9 +526,31 @@ export function InboxProcessor({
             });
         }
         processNext();
-    };
+    }, [
+        applyProcessingEdits,
+        prioritiesEnabled,
+        processNext,
+        processingTask,
+        scheduleDate,
+        scheduleEnabled,
+        scheduleTime,
+        selectedAreaId,
+        selectedAssignedTo,
+        selectedContexts,
+        selectedEnergyLevel,
+        selectedPriority,
+        selectedTags,
+    ]);
 
-    const handleDefer = () => {
+    const handleConfirmContexts = useCallback(() => {
+        if (projectFirst) {
+            handleSetProject(selectedProjectId);
+            return;
+        }
+        goToStep('project');
+    }, [goToStep, handleSetProject, projectFirst, selectedProjectId]);
+
+    const handleDefer = useCallback(() => {
         if (contextStepEnabled) {
             setSelectedContexts(processingTask?.contexts ?? []);
             setSelectedTags(processingTask?.tags ?? []);
@@ -528,9 +562,17 @@ export function InboxProcessor({
             return;
         }
         goToStep('project');
-    };
+    }, [
+        contextStepEnabled,
+        goToStep,
+        handleSetProject,
+        processingTask?.contexts,
+        processingTask?.tags,
+        projectFirst,
+        selectedProjectId,
+    ]);
 
-    const handleConvertToProject = async () => {
+    const handleConvertToProject = useCallback(async () => {
         if (!processingTask) return;
         const projectTitle = projectTitleDraft.trim() || processingTitle.trim();
         const nextAction = nextActionDraft.trim();
@@ -561,7 +603,37 @@ export function InboxProcessor({
             reportError('Failed to create project from inbox processing', error);
             showToast(t('projects.createFailed') || 'Failed to create project', 'error');
         }
-    };
+    }, [
+        addProject,
+        applyProcessingEdits,
+        nextActionDraft,
+        prioritiesEnabled,
+        processingTask,
+        processingTitle,
+        processNext,
+        projectTitleDraft,
+        projects,
+        scheduleDate,
+        scheduleEnabled,
+        scheduleTime,
+        selectedAssignedTo,
+        selectedContexts,
+        selectedEnergyLevel,
+        selectedPriority,
+        selectedTags,
+        showToast,
+        t,
+    ]);
+
+    const handleRefineNext = useCallback(() => {
+        goToStep(getInitialGuidedStep());
+    }, [getInitialGuidedStep, goToStep]);
+    const handleContextsInputChange = useCallback((value: string) => {
+        setSelectedContexts(parseTokenListInput(value, '@'));
+    }, []);
+    const handleTagsInputChange = useCallback((value: string) => {
+        setSelectedTags(parseTokenListInput(value, '#'));
+    }, []);
 
     const handleQuickSubmit = useCallback(async () => {
         handleScheduleTimeCommit();
@@ -624,7 +696,7 @@ export function InboxProcessor({
                     processingMode={processingMode}
                     onModeChange={setProcessingMode}
                     onSkip={handleSkip}
-                    onClose={() => setIsProcessing(false)}
+                    onClose={closeProcessing}
                     showReferenceOption={referenceEnabled}
                     actionabilityChoice={quickActionability}
                     setActionabilityChoice={setQuickActionability}
@@ -654,8 +726,8 @@ export function InboxProcessor({
                     prioritiesEnabled={prioritiesEnabled}
                     selectedPriority={selectedPriority}
                     setSelectedPriority={setSelectedPriority}
-                    onContextsInputChange={(value) => setSelectedContexts(parseTokenListInput(value, '@'))}
-                    onTagsInputChange={(value) => setSelectedTags(parseTokenListInput(value, '#'))}
+                    onContextsInputChange={handleContextsInputChange}
+                    onTagsInputChange={handleTagsInputChange}
                     toggleContext={toggleContext}
                     toggleTag={toggleTag}
                     suggestedContexts={suggestedContexts}
@@ -690,7 +762,7 @@ export function InboxProcessor({
                     setIsProcessing={setIsProcessing}
                     canGoBack={stepHistory.length > 0}
                     onBack={goBack}
-                    handleRefineNext={() => goToStep(getInitialGuidedStep())}
+                    handleRefineNext={handleRefineNext}
                     handleSkip={handleSkip}
                     handleNotActionable={handleNotActionable}
                     handleActionable={handleActionable}
