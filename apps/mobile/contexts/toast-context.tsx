@@ -3,6 +3,7 @@ import { Animated, Easing, Pressable, StyleSheet, Text, View } from 'react-nativ
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { logError } from '@/lib/app-log';
 
 export type ToastTone = 'info' | 'success' | 'warning' | 'error';
 
@@ -12,7 +13,7 @@ export type ToastOptions = {
     tone?: ToastTone;
     durationMs?: number;
     actionLabel?: string;
-    onAction?: () => void;
+    onAction?: () => void | Promise<void>;
 };
 
 type ToastState = ToastOptions & {
@@ -158,12 +159,20 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                             {toast.actionLabel ? (
                                 <Pressable
                                     accessibilityRole="button"
-                                    hitSlop={8}
-                                    onPress={() => {
+                                    hitSlop={12}
+                                    onPress={async () => {
                                         try {
-                                            toast.onAction?.();
-                                        } finally {
+                                            await toast.onAction?.();
                                             dismissToast();
+                                        } catch (error) {
+                                            void logError(error, { scope: 'toast', extra: { message: 'Toast action failed' } });
+                                            showToast({
+                                                title: 'Action failed',
+                                                message: error instanceof Error && error.message.trim()
+                                                    ? error.message
+                                                    : 'Please try again.',
+                                                tone: 'error',
+                                            });
                                         }
                                     }}
                                     style={styles.actionButton}

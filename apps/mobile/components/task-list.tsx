@@ -14,6 +14,7 @@ import {
   type AIProviderId,
   type TaskSortBy,
   DEFAULT_PROJECT_COLOR,
+  getTranslationsSync,
   shallow,
 } from '@mindwtr/core';
 
@@ -73,7 +74,7 @@ function TaskListComponent({
   contentPaddingBottom,
 }: TaskListProps) {
   const { isDark } = useTheme();
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
   const { showToast } = useToast();
   const {
     tasks,
@@ -130,6 +131,9 @@ function TaskListComponent({
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copilotAbortRef = useRef<AbortController | null>(null);
   const copilotRequestIdRef = useRef(0);
+  const restoreActionLabel = getTranslationsSync(language)['trash.restoreToInbox']
+    || getTranslationsSync('en')['trash.restoreToInbox']
+    || 'Restore';
 
   // Dynamic colors based on theme
   const themeColors = useThemeColors();
@@ -207,6 +211,7 @@ function TaskListComponent({
     batchDeleteTasks,
     batchMoveTasks,
     batchUpdateTasks,
+    restoreActionLabel,
     restoreTask,
     t,
     tasksById,

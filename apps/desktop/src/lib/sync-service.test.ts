@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AppData, Attachment } from '@mindwtr/core';
 import { DropboxUnauthorizedError } from './dropbox-sync';
-import { getFileSyncDir, hashString, normalizeSyncBackend } from './sync-service-utils';
+import { fallbackHashString, getFileSyncDir, hashString, normalizeSyncBackend } from './sync-service-utils';
 
 const markLocalWriteMock = vi.hoisted(() => vi.fn());
 
@@ -48,6 +48,11 @@ describe('sync-service test utils', () => {
     it('hashes sync payloads with sha256 output', async () => {
         const hash = await hashString('mindwtr');
         expect(hash).toBe('feb7a7b01b1c68e586e77288a4b2598d146ee3696ec7dbfac0074196b8d68c33');
+    });
+
+    it('formats fallback hashes as unsigned hex', () => {
+        expect(fallbackHashString('mindwtr')).toMatch(/^[0-9a-f]+$/);
+        expect(fallbackHashString('mindwtr')).not.toContain('-');
     });
 
     it('marks attachments unrecoverable when validation failures hit retry cap', () => {
@@ -236,6 +241,44 @@ describe('SyncService testability hooks', () => {
 
         (SyncService as any).finalizeSyncWriteIgnoreWindow();
 
+        expect((SyncService as any).fileWriteIgnoreActive).toBe(false);
+        expect((SyncService as any).ignoreFileEventsUntil).toBe(11_000);
+        getMonotonicNowSpy.mockRestore();
+    });
+
+    it('finalizes the sync file ignore window when external keep-local writes fail', async () => {
+        const getMonotonicNowSpy = vi.spyOn(SyncService as any, 'getMonotonicNow');
+        getMonotonicNowSpy.mockReturnValue(9_000);
+        const invoke = vi.fn(async (command: string) => {
+            if (command === 'get_sync_backend') return 'file';
+            if (command === 'save_data') return undefined;
+            if (command === 'write_sync_file') {
+                throw new Error('disk full');
+            }
+            throw new Error(`unexpected command: ${command}`);
+        });
+        __syncServiceTestUtils.setDependenciesForTests({
+            flushPendingSave: vi.fn(async () => undefined),
+            invoke: invoke as unknown as <T>(command: string, args?: Record<string, unknown>) => Promise<T>,
+            isTauriRuntime: () => true,
+        });
+        await __syncServiceTestUtils.persistLocalDataForTests({
+            tasks: [],
+            projects: [],
+            sections: [],
+            areas: [],
+            settings: {},
+        });
+        (SyncService as any).didMigrate = true;
+        (SyncService as any).pendingExternalSyncChange = {
+            path: '/tmp/mindwtr-sync.json',
+            localHash: 'local-hash',
+            incomingHash: 'incoming-hash',
+        };
+
+        const result = await SyncService.resolveExternalSyncChange('keep-local');
+
+        expect(result).toEqual({ success: false, error: 'disk full' });
         expect((SyncService as any).fileWriteIgnoreActive).toBe(false);
         expect((SyncService as any).ignoreFileEventsUntil).toBe(11_000);
         getMonotonicNowSpy.mockRestore();

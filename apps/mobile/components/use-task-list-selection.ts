@@ -9,6 +9,7 @@ type UseTaskListSelectionParams = {
   batchDeleteTasks: (ids: string[]) => Promise<void | StoreActionResult>;
   batchMoveTasks: (ids: string[], status: TaskStatus) => Promise<void | StoreActionResult>;
   batchUpdateTasks: (updates: { id: string; updates: Partial<Task> }[]) => Promise<void | StoreActionResult>;
+  restoreActionLabel: string;
   restoreTask: (id: string) => Promise<void | StoreActionResult>;
   t: (key: string) => string;
   tasksById: Record<string, Task>;
@@ -18,6 +19,7 @@ export function useTaskListSelection({
   batchDeleteTasks,
   batchMoveTasks,
   batchUpdateTasks,
+  restoreActionLabel,
   restoreTask,
   t,
   tasksById,
@@ -98,7 +100,7 @@ export function useTaskListSelection({
                 title: t('common.done'),
                 message: `${deletedIds.length} ${t('common.tasks')}`,
                 tone: 'success',
-                actionLabel: t('trash.restoreToInbox') === 'trash.restoreToInbox' ? 'Restore' : t('trash.restoreToInbox'),
+                actionLabel: restoreActionLabel,
                 onAction: () => {
                   deletedIds.forEach((id) => {
                     void restoreTask(id);
@@ -110,7 +112,7 @@ export function useTaskListSelection({
         },
       ]
     );
-  }, [batchDeleteTasks, bulkActionLoading, exitSelectionMode, hasSelection, restoreTask, runBulkAction, selectedIdsArray, showToast, t]);
+  }, [batchDeleteTasks, bulkActionLoading, exitSelectionMode, hasSelection, restoreActionLabel, restoreTask, runBulkAction, selectedIdsArray, showToast, t]);
 
   const handleBatchAddTag = useCallback(async () => {
     const input = tagInput.trim();

@@ -44,7 +44,7 @@ import { verifyPolyfills } from '../utils/verify-polyfills';
 import { logError, logWarn, setupGlobalErrorLogging } from '../lib/app-log';
 import { useMobileAreaFilter } from '../hooks/use-mobile-area-filter';
 import { useThemeColors } from '../hooks/use-theme-colors';
-import { parseShortcutCaptureUrl, type ShortcutCapturePayload } from '../lib/capture-deeplink';
+import { isShortcutCaptureUrl, parseShortcutCaptureUrl, type ShortcutCapturePayload } from '../lib/capture-deeplink';
 
 type AutoSyncCadence = {
   minIntervalMs: number;
@@ -444,7 +444,11 @@ function RootLayoutContent() {
       } as never);
     } else {
       void logError(new Error('Share intent payload missing text'), { scope: 'share-intent' });
-      router.replace('/capture-modal' as never);
+      Alert.alert(
+        'Share unavailable',
+        'Mindwtr could not read text or a URL from the shared item.',
+        [{ text: 'Close' }]
+      );
     }
     resetShareIntent();
   }, [hasShareIntent, resetShareIntent, router, shareIntent?.text, shareIntent?.webUrl]);
@@ -454,7 +458,20 @@ function RootLayoutContent() {
     if (!incomingUrl) return;
     if (lastHandledCaptureUrl.current === incomingUrl) return;
     const payload = parseShortcutCaptureUrl(incomingUrl);
-    if (!payload) return;
+    if (!payload) {
+      if (!isShortcutCaptureUrl(incomingUrl)) return;
+      lastHandledCaptureUrl.current = incomingUrl;
+      void logWarn('Invalid shortcut capture URL', {
+        scope: 'shortcuts',
+        extra: { url: incomingUrl },
+      });
+      Alert.alert(
+        'Capture shortcut unavailable',
+        'Mindwtr could not read a task title from that shortcut link.',
+        [{ text: 'Close' }]
+      );
+      return;
+    }
 
     lastHandledCaptureUrl.current = incomingUrl;
     void captureFromShortcut(payload).catch((error) => {
@@ -472,14 +489,19 @@ function RootLayoutContent() {
       const nextInactiveOrBackground = nextAppState === 'inactive' || nextAppState === 'background';
       if (wasInactiveOrBackground && nextAppState === 'active') {
         // Coming back to foreground - sync to get latest data
-        void refreshSyncCadence()
-          .then((cadence) => {
-            const now = Date.now();
-            if (now - lastAutoSyncAt.current > cadence.foregroundMinIntervalMs) {
-              requestSync(0);
-            }
-          })
-          .catch(logAppError);
+        if (backgroundSyncPending.current) {
+          backgroundSyncPending.current = false;
+          requestSync(0);
+        } else {
+          void refreshSyncCadence()
+            .then((cadence) => {
+              const now = Date.now();
+              if (now - lastAutoSyncAt.current > cadence.foregroundMinIntervalMs) {
+                requestSync(0);
+              }
+            })
+            .catch(logAppError);
+        }
         updateMobileWidgetFromStore().catch(logAppError);
         if (widgetRefreshTimer.current) {
           clearTimeout(widgetRefreshTimer.current);
@@ -507,14 +529,12 @@ function RootLayoutContent() {
           clearTimeout(syncDebounceTimer.current);
           syncDebounceTimer.current = null;
         }
+        if (syncThrottleTimer.current) {
+          clearTimeout(syncThrottleTimer.current);
+          syncThrottleTimer.current = null;
+        }
         abortMobileSync();
         requestSync(0);
-      }
-      if (wasInactiveOrBackground && nextAppState === 'active') {
-        if (backgroundSyncPending.current) {
-          backgroundSyncPending.current = false;
-          requestSync(0);
-        }
       }
       appState.current = nextAppState;
     };

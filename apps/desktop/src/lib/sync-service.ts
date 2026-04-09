@@ -737,8 +737,13 @@ export class SyncService {
                 const localData = await injectExternalCalendars(await readLocalDataForSync());
                 const sanitized = sanitizeAppDataForRemote(localData);
                 await SyncService.markSyncWrite(sanitized);
-                await tauriInvoke('write_sync_file', { data: sanitized });
-                return await SyncService.performSync();
+                try {
+                    await tauriInvoke('write_sync_file', { data: sanitized });
+                    return await SyncService.performSync();
+                } catch (error) {
+                    SyncService.finalizeSyncWriteIgnoreWindow();
+                    throw error;
+                }
             }
 
             await syncServiceDependencies.flushPendingSave();
