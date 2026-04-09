@@ -159,7 +159,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                             {toast.actionLabel ? (
                                 <Pressable
                                     accessibilityRole="button"
-                                    hitSlop={12}
                                     onPress={async () => {
                                         try {
                                             await toast.onAction?.();
@@ -242,8 +241,12 @@ const styles = StyleSheet.create({
     },
     actionButton: {
         marginLeft: 12,
-        paddingVertical: 6,
-        paddingLeft: 8,
+        minWidth: 44,
+        minHeight: 44,
+        paddingHorizontal: 10,
+        paddingVertical: 10,
+        alignItems: 'center',
+        justifyContent: 'center',
     },
     actionLabel: {
         fontSize: 13,
