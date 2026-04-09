@@ -209,6 +209,7 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
     resetProcessingState();
     onClose();
   };
+  const isDelegateConfirmationDisabled = executionChoice === 'delegate' && delegateWho.trim().length === 0;
 
   useEffect(() => {
     if (!visible) {
@@ -383,9 +384,12 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
   const handleConfirmWaitingMobile = () => {
     if (currentTask) {
       const who = delegateWho.trim();
+      if (!who) {
+        return;
+      }
       const updates: Partial<Task> = {
         status: 'waiting',
-        assignedTo: who || undefined,
+        assignedTo: who,
       };
       if (delegateFollowUpDate) {
         updates.reviewAt = delegateFollowUpDate.toISOString();
@@ -1226,7 +1230,12 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
             </ScrollView>
             <View style={[styles.bottomActionBar, { borderTopColor: tc.border, paddingBottom: Math.max(insets.bottom, 10) }]}>
               <TouchableOpacity
-                style={[styles.bottomNextButton, { backgroundColor: tc.tint }]}
+                style={[
+                  styles.bottomNextButton,
+                  { backgroundColor: tc.tint },
+                  isDelegateConfirmationDisabled && { opacity: 0.5 },
+                ]}
+                disabled={isDelegateConfirmationDisabled}
                 onPress={handleNextTask}
               >
                 <Text style={styles.bottomNextButtonText}>

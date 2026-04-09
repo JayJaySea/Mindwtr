@@ -269,4 +269,44 @@ describe('InboxProcessingModal', () => {
     );
     expect(onClose).toHaveBeenCalled();
   });
+
+  it('does not allow delegation without an assignee name', () => {
+    mockSettings.features = undefined;
+    mockSettings.gtd.inboxProcessing = {};
+    updateTask.mockClear();
+    const onClose = vi.fn();
+    let tree: ReturnType<typeof create>;
+
+    act(() => {
+      tree = create(<InboxProcessingModal visible onClose={onClose} />);
+    });
+
+    const root = tree!.root;
+    const delegateLabel = findNodeWithText(root, 'inbox.delegate');
+    const delegateButton = delegateLabel.parent;
+
+    if (!delegateButton) {
+      throw new Error('Delegate button not found');
+    }
+
+    act(() => {
+      delegateButton.props.onPress();
+    });
+
+    const nextTaskLabel = findNodeWithText(root, 'Next task →');
+    const nextTaskButton = nextTaskLabel.parent;
+
+    if (!nextTaskButton) {
+      throw new Error('Next task button not found');
+    }
+
+    expect(nextTaskButton.props.disabled).toBe(true);
+
+    act(() => {
+      nextTaskButton.props.onPress();
+    });
+
+    expect(updateTask).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });
