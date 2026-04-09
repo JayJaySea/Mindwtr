@@ -97,9 +97,8 @@ describe('CalendarView', () => {
             await Promise.resolve();
         });
 
-        fireEvent.click(screen.getByText('3'));
-
         await act(async () => {
+            fireEvent.click(screen.getByText('3').closest('.group') as HTMLElement);
             await Promise.resolve();
         });
 
