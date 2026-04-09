@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { ArrowRight, BookOpen, CheckCircle, ChevronLeft, Clock, Trash2, User, X } from 'lucide-react';
 import { DEFAULT_PROJECT_COLOR, type Area, type Project, type Task, type TaskPriority } from '@mindwtr/core';
 
@@ -95,7 +96,7 @@ type InboxProcessingWizardProps = {
 const PRIORITY_OPTIONS: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 const ENERGY_LEVEL_OPTIONS: Array<NonNullable<Task['energyLevel']>> = ['low', 'medium', 'high'];
 
-export function InboxProcessingWizard({
+export const InboxProcessingWizard = memo(function InboxProcessingWizard({
     t,
     isProcessing,
     processingTask,
@@ -916,4 +917,6 @@ export function InboxProcessingWizard({
             </div>
         </div>
     );
-}
+});
+
+InboxProcessingWizard.displayName = 'InboxProcessingWizard';

@@ -42,14 +42,14 @@ vi.mock('@mindwtr/core', async () => {
 });
 
 vi.mock('../../lib/external-calendar-events', () => ({
-    fetchExternalCalendarEvents: vi.fn(async () => ({ calendars: [], events: [] })),
+    fetchExternalCalendarEvents: vi.fn(async () => ({ calendars: [], events: [], warnings: [] })),
 }));
 
 describe('CalendarView', () => {
     beforeEach(() => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date('2026-04-03T14:48:00.000Z'));
-        vi.mocked(fetchExternalCalendarEvents).mockResolvedValue({ calendars: [], events: [] });
+        vi.mocked(fetchExternalCalendarEvents).mockResolvedValue({ calendars: [], events: [], warnings: [] });
     });
 
     afterEach(() => {
@@ -84,6 +84,7 @@ describe('CalendarView', () => {
                 end: '2026-04-03T00:30:00',
                 allDay: false,
             }],
+            warnings: [],
         });
 
         render(
@@ -103,5 +104,26 @@ describe('CalendarView', () => {
         });
 
         expect(screen.getByText(/Launch window/)).toBeInTheDocument();
+    });
+
+    it('surfaces partial external calendar failures without dropping loaded events', async () => {
+        vi.mocked(fetchExternalCalendarEvents).mockResolvedValue({
+            calendars: [],
+            events: [],
+            warnings: ['Failed to load "Work": HTTP 504'],
+        });
+
+        render(
+            <LanguageProvider>
+                <CalendarView />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            vi.runAllTimers();
+            await Promise.resolve();
+        });
+
+        expect(screen.getByText(/Failed to load "Work": HTTP 504/)).toBeInTheDocument();
     });
 });

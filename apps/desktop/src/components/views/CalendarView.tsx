@@ -13,6 +13,11 @@ import { fetchExternalCalendarEvents } from '../../lib/external-calendar-events'
 import { getCalendarMonthNames, getCalendarWeekdayHeaders, resolveCalendarLocale } from './calendar-locale';
 
 const dayKey = (date: Date) => format(date, 'yyyy-MM-dd');
+const summarizeExternalCalendarWarnings = (warnings: string[]): string | null => {
+    if (warnings.length === 0) return null;
+    if (warnings.length === 1) return warnings[0];
+    return `${warnings[0]} (+${warnings.length - 1} more)`;
+};
 
 export function CalendarView() {
     const perf = usePerformanceMonitor('CalendarView');
@@ -90,38 +95,37 @@ export function CalendarView() {
         return true;
     };
 
-    const deadlinesByDay = useMemo(() => {
-        const map = new Map<string, Task[]>();
+    const calendarTaskData = useMemo(() => {
+        const visibleTasks: Task[] = [];
+        const deadlinesByDay = new Map<string, Task[]>();
+        const scheduledByDay = new Map<string, Task[]>();
         for (const task of tasks) {
             if (!isCalendarTaskVisible(task)) continue;
-            if (!task.dueDate) continue;
-            const dueDate = safeParseDueDate(task.dueDate);
-            if (!dueDate) continue;
-            const key = dayKey(dueDate);
-            const existing = map.get(key);
-            if (existing) existing.push(task);
-            else map.set(key, [task]);
+            visibleTasks.push(task);
+            if (task.dueDate) {
+                const dueDate = safeParseDueDate(task.dueDate);
+                if (dueDate) {
+                    const dueKey = dayKey(dueDate);
+                    const existingDue = deadlinesByDay.get(dueKey);
+                    if (existingDue) existingDue.push(task);
+                    else deadlinesByDay.set(dueKey, [task]);
+                }
+            }
+            if (task.startTime) {
+                const startTime = safeParseDate(task.startTime);
+                if (startTime) {
+                    const startKey = dayKey(startTime);
+                    const existingStart = scheduledByDay.get(startKey);
+                    if (existingStart) existingStart.push(task);
+                    else scheduledByDay.set(startKey, [task]);
+                }
+            }
         }
-        return map;
+        return { visibleTasks, deadlinesByDay, scheduledByDay };
     }, [tasks, projectMap, resolvedAreaFilter, areaById, normalizedViewFilterQuery]);
 
-    const scheduledByDay = useMemo(() => {
-        const map = new Map<string, Task[]>();
-        for (const task of tasks) {
-            if (!isCalendarTaskVisible(task)) continue;
-            if (!task.startTime) continue;
-            const startTime = safeParseDate(task.startTime);
-            if (!startTime) continue;
-            const key = dayKey(startTime);
-            const existing = map.get(key);
-            if (existing) existing.push(task);
-            else map.set(key, [task]);
-        }
-        return map;
-    }, [tasks, projectMap, resolvedAreaFilter, areaById, normalizedViewFilterQuery]);
-
-    const getDeadlinesForDay = (date: Date) => deadlinesByDay.get(dayKey(date)) ?? [];
-    const getScheduledForDay = (date: Date) => scheduledByDay.get(dayKey(date)) ?? [];
+    const getDeadlinesForDay = (date: Date) => calendarTaskData.deadlinesByDay.get(dayKey(date)) ?? [];
+    const getScheduledForDay = (date: Date) => calendarTaskData.scheduledByDay.get(dayKey(date)) ?? [];
     const [openTaskId, setOpenTaskId] = useState<string | null>(null);
     const openTask = openTaskId ? tasks.find((task) => task.id === openTaskId) ?? null : null;
     const openProject = openTask?.projectId ? projectMap.get(openTask.projectId) : undefined;
@@ -134,7 +138,7 @@ export function CalendarView() {
     }, [updateTask]);
 
     const externalEventsByDay = useMemo(() => {
-        const map = new Map<string, ExternalCalendarEvent[]>();
+        const nextMap = new Map<string, ExternalCalendarEvent[]>();
         for (const event of externalEvents) {
             const start = safeParseDate(event.start);
             const end = safeParseDate(event.end);
@@ -146,13 +150,13 @@ export function CalendarView() {
 
             while (cursor.getTime() <= lastDay.getTime()) {
                 const key = dayKey(cursor);
-                const existing = map.get(key);
+                const existing = nextMap.get(key);
                 if (existing) existing.push(event);
-                else map.set(key, [event]);
+                else nextMap.set(key, [event]);
                 cursor.setDate(cursor.getDate() + 1);
             }
         }
-        return map;
+        return nextMap;
     }, [externalEvents]);
 
     const getExternalEventsForDay = useCallback(
@@ -287,10 +291,11 @@ export function CalendarView() {
             try {
                 const rangeStart = startOfMonth(currentMonth);
                 const rangeEnd = endOfMonth(currentMonth);
-                const { calendars, events } = await fetchExternalCalendarEvents(rangeStart, rangeEnd);
+                const { calendars, events, warnings } = await fetchExternalCalendarEvents(rangeStart, rangeEnd);
                 if (cancelled) return;
                 setExternalCalendars(calendars);
                 setExternalEvents(events);
+                setExternalError(summarizeExternalCalendarWarnings(warnings));
             } catch (error) {
                 if (cancelled) return;
                 reportError('Failed to load external calendars', error);
@@ -315,14 +320,13 @@ export function CalendarView() {
         const query = scheduleQuery.trim().toLowerCase();
         if (!query) return [];
 
-        return tasks
+        return calendarTaskData.visibleTasks
             .filter((task) => {
-                if (!isCalendarTaskVisible(task)) return false;
                 if (task.status !== 'next') return false;
                 return task.title.toLowerCase().includes(query);
             })
             .slice(0, 12);
-    }, [tasks, scheduleQuery, selectedDate, projectMap, normalizedViewFilterQuery]);
+    }, [calendarTaskData.visibleTasks, scheduleQuery, selectedDate]);
 
     useEffect(() => {
         if (!selectedDate) return;
@@ -500,6 +504,12 @@ export function CalendarView() {
                 />
             </div>
 
+            {externalError && (
+                <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
+                    {externalError}
+                </div>
+            )}
+
             <div ref={calendarBodyRef} className="space-y-6">
                 <div className="grid grid-cols-7 gap-px bg-border rounded-lg overflow-hidden shadow-sm">
                     {weekdayHeaders.map((day) => (
@@ -657,9 +667,6 @@ export function CalendarView() {
                             <div className="space-y-1">
                                 {isExternalLoading && (
                                     <div className="text-sm text-muted-foreground">Loading…</div>
-                                )}
-                                {externalError && (
-                                    <div className="text-sm text-red-400">{externalError}</div>
                                 )}
                                 {selectedExternalEvents.map((event) => {
                                     const start = safeParseDate(event.start);

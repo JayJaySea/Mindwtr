@@ -35,6 +35,7 @@ export async function fetchExternalCalendarEvents(
 ): Promise<{
     calendars: ExternalCalendarSubscription[];
     events: ExternalCalendarEvent[];
+    warnings: string[];
 }> {
     const calendars = await ExternalCalendarService.getCalendars();
     const enabled = calendars.filter((calendar) => calendar.enabled);
@@ -50,8 +51,13 @@ export async function fetchExternalCalendarEvents(
     ]);
 
     const events: ExternalCalendarEvent[] = [...systemResults.events];
-    for (const result of icsResults) {
+    const warnings: string[] = [];
+    for (const [index, result] of icsResults.entries()) {
         if (result.status !== 'fulfilled') {
+            const calendar = enabled[index];
+            const label = (calendar?.name || calendar?.url || 'Unnamed calendar').trim();
+            const detail = result.reason instanceof Error ? result.reason.message : String(result.reason ?? 'Unknown error');
+            warnings.push(`Failed to load "${label}": ${detail}`);
             continue;
         }
         events.push(...result.value);
@@ -70,5 +76,5 @@ export async function fetchExternalCalendarEvents(
         return a.start.localeCompare(b.start);
     });
 
-    return { calendars: mergedCalendars, events };
+    return { calendars: mergedCalendars, events, warnings };
 }

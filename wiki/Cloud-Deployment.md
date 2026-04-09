@@ -99,7 +99,7 @@ services:
   mindwtr-cloud:
     image: oven/bun:1.3
     working_dir: /app
-    command: ["bun", "run", "src/server.ts", "--host", "0.0.0.0", "--port", "8787"]
+    command: ["bun", "run", "--filter", "mindwtr-cloud", "start", "--", "--host", "0.0.0.0", "--port", "8787"]
     environment:
       MINDWTR_CLOUD_DATA_DIR: /data
       MINDWTR_CLOUD_AUTH_TOKENS: ${MINDWTR_CLOUD_AUTH_TOKENS}

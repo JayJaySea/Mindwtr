@@ -188,9 +188,10 @@ export function DailyReviewGuideModal({ onClose }: DailyReviewGuideModalProps) {
                 const tomorrowEnd = new Date(todayStart);
                 tomorrowEnd.setDate(tomorrowEnd.getDate() + 2);
                 tomorrowEnd.setMilliseconds(-1);
-                const { events } = await fetchExternalCalendarEvents(todayStart, tomorrowEnd);
+                const { events, warnings } = await fetchExternalCalendarEvents(todayStart, tomorrowEnd);
                 if (cancelled) return;
                 setExternalCalendarEvents(events);
+                setExternalCalendarError(warnings[0] ?? null);
             } catch (error) {
                 if (cancelled) return;
                 setExternalCalendarError(error instanceof Error ? error.message : String(error));

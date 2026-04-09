@@ -209,9 +209,10 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
                 const rangeEnd = new Date(rangeStart);
                 rangeEnd.setDate(rangeEnd.getDate() + 7);
                 rangeEnd.setMilliseconds(-1);
-                const { events } = await fetchExternalCalendarEvents(rangeStart, rangeEnd);
+                const { events, warnings } = await fetchExternalCalendarEvents(rangeStart, rangeEnd);
                 if (cancelled) return;
                 setExternalCalendarEvents(events);
+                setExternalCalendarError(warnings[0] ?? null);
             } catch (error) {
                 if (cancelled) return;
                 setExternalCalendarError(error instanceof Error ? error.message : String(error));

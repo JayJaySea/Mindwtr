@@ -77,6 +77,7 @@ export function Layout({ children, currentView, onViewChange }: LayoutProps) {
     ), []);
     const lastSyncAt = settings?.lastSyncAt;
     const lastSyncStatus = settings?.lastSyncStatus;
+    const lastSyncError = settings?.lastSyncError?.trim();
 
     // Compute sync freshness bucket on a 60-second timer instead of every render
     // to prevent idle re-render flicker from Date.now() changing each frame.
@@ -112,7 +113,9 @@ export function Layout({ children, currentView, onViewChange }: LayoutProps) {
     const fullSyncTimestamp = lastSyncAt ? safeFormatDate(lastSyncAt, 'PPpp', lastSyncAt) : t('settings.lastSyncNever');
     const syncTooltip = !isOnline
         ? (t('common.offline') || 'Offline')
-        : `${tOrFallback('settings.lastSync', 'Last sync')}: ${fullSyncTimestamp}`;
+        : lastSyncStatus === 'error' && lastSyncError
+            ? `${tOrFallback('settings.lastSyncError', 'Sync failed')}: ${lastSyncError}\n${tOrFallback('settings.lastSync', 'Last sync')}: ${fullSyncTimestamp}`
+            : `${tOrFallback('settings.lastSync', 'Last sync')}: ${fullSyncTimestamp}`;
     const formatCompactSyncTime = useCallback((iso: string) => {
         const date = new Date(iso);
         if (Number.isNaN(date.getTime())) return iso;
