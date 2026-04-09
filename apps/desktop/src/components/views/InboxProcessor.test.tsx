@@ -5,6 +5,7 @@ import type { AppData, Area, Project, Task } from '@mindwtr/core';
 
 import { InboxProcessor } from './InboxProcessor';
 import { reportError } from '../../lib/report-error';
+import { useUiStore } from '../../store/ui-store';
 
 vi.mock('../../lib/report-error', () => ({
     reportError: vi.fn(),
@@ -76,6 +77,29 @@ const renderInboxProcessor = (settings?: AppData['settings']): RenderResult => {
 };
 
 describe('InboxProcessor', () => {
+    it('shows an error toast when project conversion fails', async () => {
+        useUiStore.setState({ toasts: [] });
+        const { getByRole, getByText, addProject } = renderInboxProcessor();
+        addProject.mockRejectedValueOnce(new Error('disk full'));
+
+        fireEvent.click(getByRole('button', { name: /process\.btn/i }));
+        fireEvent.click(getByText('process.refineNext'));
+        fireEvent.click(getByText('process.yesActionable'));
+        fireEvent.click(getByText('process.moreThanOneStepYes'));
+        fireEvent.click(getByText('process.createProject'));
+
+        await waitFor(() => {
+            expect(useUiStore.getState().toasts).toEqual(
+                expect.arrayContaining([
+                    expect.objectContaining({
+                        message: 'projects.createFailed',
+                        tone: 'error',
+                    }),
+                ]),
+            );
+        });
+    });
+
     it('opens in quick mode when configured as the default inbox processing mode', () => {
         const { getByRole, getByText, queryByText } = renderInboxProcessor({
             gtd: {
