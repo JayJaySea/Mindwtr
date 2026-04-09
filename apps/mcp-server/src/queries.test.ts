@@ -271,4 +271,31 @@ describe('mcp queries', () => {
             assignedTo: 'Alex',
         });
     });
+
+    test('maps area, section, text direction, and location fields from task rows', () => {
+        const now = '2026-02-01T00:00:00.000Z';
+        const { db } = createMockDb([
+            {
+                id: 't1',
+                title: 'Task',
+                status: 'inbox',
+                textDirection: 'rtl',
+                location: 'Office',
+                projectId: 'p1',
+                sectionId: 's1',
+                areaId: 'a1',
+                createdAt: now,
+                updatedAt: now,
+                isFocusedToday: 0,
+            },
+        ]);
+
+        const [task] = listTasks(db, { includeDeleted: false });
+
+        expect(task.textDirection).toBe('rtl');
+        expect(task.location).toBe('Office');
+        expect(task.projectId).toBe('p1');
+        expect(task.sectionId).toBe('s1');
+        expect(task.areaId).toBe('a1');
+    });
 });
