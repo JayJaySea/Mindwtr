@@ -12,6 +12,7 @@ import {
     reserveNextProjectOrder,
     updateVisibleTasks,
 } from './store-helpers';
+import { logWarn } from './logger';
 import { generateUUID as uuidv4 } from './uuid';
 
 const stripAttachmentRemoteMetadata = (attachments: Task['attachments']): Task['attachments'] =>
@@ -378,7 +379,11 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
         const existingTask = currentState._allTasks.find((task) => task.id === id);
         if (!existingTask) {
             const message = 'Task not found';
-            console.warn(`[mindwtr] updateTask skipped: ${id} was not found`);
+            logWarn('updateTask skipped: task not found', {
+                scope: 'store',
+                category: 'validation',
+                context: { id },
+            });
             set({ error: message });
             return actionFail(message);
         }

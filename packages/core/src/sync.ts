@@ -339,6 +339,11 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
             if (right.deletedAt && !left.deletedAt) return right;
             return chooseDeterministicWinner(left, right);
         };
+        const preferLiveCandidate = (left: T, right: T): T => {
+            if (left.deletedAt && !right.deletedAt) return right;
+            if (right.deletedAt && !left.deletedAt) return left;
+            return chooseDeterministicWinner(left, right);
+        };
         const resolveDeleteVsLiveWinner = (localCandidate: T, incomingCandidate: T): T => {
             const localOpTime = resolveOperationTime(localCandidate);
             const incomingOpTime = resolveOperationTime(incomingCandidate);
@@ -347,7 +352,7 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
                 if (hasRevision && revDiff !== 0) {
                     return revDiff > 0 ? normalizedLocalItem : normalizedIncomingItem;
                 }
-                return preferDeletedCandidate(localCandidate, incomingCandidate);
+                return preferLiveCandidate(localCandidate, incomingCandidate);
             }
             if (operationDiff > 0) return incomingCandidate;
             if (operationDiff < 0) return localCandidate;

@@ -91,6 +91,11 @@ const enforcePendingSaveCap = () => {
             keptToVersion: keptLastVersion,
         },
     });
+    try {
+        useTaskStore.getState().setError(message);
+    } catch {
+        // Ignore if the store is not initialized yet.
+    }
     const callbacks = dropped
         .flatMap((item) => item.onErrorCallbacks)
         .filter((callback): callback is (msg: string) => void => typeof callback === 'function');

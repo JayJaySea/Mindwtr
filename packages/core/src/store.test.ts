@@ -1108,7 +1108,14 @@ describe('TaskStore', () => {
         updateProject('missing-project-id', { status: 'active' });
 
         expect(useTaskStore.getState().error).toBe('Project not found');
-        expect(warnSpy).toHaveBeenCalledWith('[mindwtr] updateProject skipped: missing-project-id was not found');
+        expect(warnSpy).toHaveBeenCalledWith(
+            'updateProject skipped: project not found',
+            expect.objectContaining({
+                scope: 'store',
+                category: 'validation',
+                context: { id: 'missing-project-id' },
+            })
+        );
         warnSpy.mockRestore();
     });
 

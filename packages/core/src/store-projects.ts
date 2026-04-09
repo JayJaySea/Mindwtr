@@ -9,6 +9,7 @@ import {
     selectVisibleTasks,
     toVisibleTask,
 } from './store-helpers';
+import { logWarn } from './logger';
 import { generateUUID as uuidv4 } from './uuid';
 import { clearDerivedCache } from './store-settings';
 
@@ -243,7 +244,11 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
 
         if (missingProject) {
             const message = 'Project not found';
-            console.warn(`[mindwtr] updateProject skipped: ${id} was not found`);
+            logWarn('updateProject skipped: project not found', {
+                scope: 'store',
+                category: 'validation',
+                context: { id },
+            });
             set({ error: message });
             return;
         }
@@ -328,7 +333,11 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
         });
         if (missingProject) {
             const message = 'Project not found';
-            console.warn(`[mindwtr] deleteProject skipped: ${id} was not found`);
+            logWarn('deleteProject skipped: project not found', {
+                scope: 'store',
+                category: 'validation',
+                context: { id },
+            });
             set({ error: message });
             return;
         }
