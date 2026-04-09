@@ -912,6 +912,25 @@ jobs:
             exit 0
           fi
 
+          if [ -n "${APP_VERSION:-}" ]; then
+            TARGET_VERSION_JSON_FILE="$RUNNER_TEMP/asc-target-version.json"
+            if api_get "$TARGET_VERSION_JSON_FILE" -G \
+              -H "Authorization: Bearer ${ASC_TOKEN}" \
+              --data-urlencode "filter[versionString]=${APP_VERSION}" \
+              --data-urlencode "filter[platform]=IOS" \
+              --data-urlencode "limit=1" \
+              "https://api.appstoreconnect.apple.com/v1/apps/${APPSTORE_APP_ID_RESOLVED}/appStoreVersions"; then
+              TARGET_VERSION_ID="$(jq -r '.data[0].id // empty' "$TARGET_VERSION_JSON_FILE")"
+              TARGET_VERSION_STATE="$(jq -r '.data[0].attributes.appStoreState // empty' "$TARGET_VERSION_JSON_FILE")"
+              if [ -n "${TARGET_VERSION_ID}" ]; then
+                echo "::notice::Found existing iOS App Store version ${APP_VERSION} in state ${TARGET_VERSION_STATE:-unknown}. Reusing the existing version record for upload."
+                echo "SKIP_APP_VERSION_UPDATE_FOR_UPLOAD=true" >> "$GITHUB_ENV"
+              fi
+            else
+              echo "::warning::Target-version lookup failed. Upload will continue and may attempt to create version ${APP_VERSION}."
+            fi
+          fi
+
           if [ "$REQUESTED_SUBMIT_FOR_REVIEW" = "true" ]; then
             echo "EFFECTIVE_SUBMIT_FOR_REVIEW=true" >> "$GITHUB_ENV"
             echo "No active App Store review submission found; review submission remains enabled."
@@ -928,6 +947,7 @@ jobs:
           IOS_ASC_ISSUER_ID: ${{ secrets.IOS_ASC_ISSUER_ID }}
           IOS_ASC_PRIVATE_KEY: ${{ secrets.IOS_ASC_PRIVATE_KEY }}
           SUBMIT_FOR_REVIEW: ${{ env.EFFECTIVE_SUBMIT_FOR_REVIEW || 'false' }}
+          SKIP_APP_VERSION_UPDATE: ${{ env.SKIP_APP_VERSION_UPDATE_FOR_UPLOAD || 'false' }}
           FASTLANE_SKIP_UPDATE_CHECK: "1"
           FASTLANE_HIDE_CHANGELOG: "1"
           FASTLANE_OPT_OUT_USAGE: "1"
@@ -959,7 +979,7 @@ jobs:
                 app_version: ENV.fetch("APP_VERSION"),
                 metadata_path: ENV.fetch("FASTLANE_METADATA_PATH"),
                 skip_screenshots: true,
-                skip_app_version_update: false,
+                skip_app_version_update: ENV.fetch("SKIP_APP_VERSION_UPDATE", "false") == "true",
                 force: true,
                 run_precheck_before_submit: false,
                 submit_for_review: ENV.fetch("SUBMIT_FOR_REVIEW", "false") == "true",
