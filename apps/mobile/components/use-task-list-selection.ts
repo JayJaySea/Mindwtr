@@ -3,6 +3,7 @@ import { Alert } from 'react-native';
 import type { StoreActionResult, Task, TaskStatus } from '@mindwtr/core';
 import { logError } from '../lib/app-log';
 import { getBulkActionFailureMessage } from './task-list-utils';
+import { useToast } from '../contexts/toast-context';
 
 type UseTaskListSelectionParams = {
   batchDeleteTasks: (ids: string[]) => Promise<void | StoreActionResult>;
@@ -21,6 +22,7 @@ export function useTaskListSelection({
   t,
   tasksById,
 }: UseTaskListSelectionParams) {
+  const { showToast } = useToast();
   const [selectionMode, setSelectionMode] = useState(false);
   const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set());
   const [tagModalVisible, setTagModalVisible] = useState(false);
@@ -69,9 +71,13 @@ export function useTaskListSelection({
     await runBulkAction(t('bulk.moveTo'), async () => {
       await batchMoveTasks(selectedIdsArray, newStatus);
       exitSelectionMode();
-      Alert.alert(t('common.done'), `${selectedIdsArray.length} ${t('common.tasks')}`);
+      showToast({
+        title: t('common.done'),
+        message: `${selectedIdsArray.length} ${t('common.tasks')}`,
+        tone: 'success',
+      });
     });
-  }, [batchMoveTasks, bulkActionLoading, exitSelectionMode, hasSelection, runBulkAction, selectedIdsArray, t]);
+  }, [batchMoveTasks, bulkActionLoading, exitSelectionMode, hasSelection, runBulkAction, selectedIdsArray, showToast, t]);
 
   const handleBatchDelete = useCallback(async () => {
     if (!hasSelection || bulkActionLoading) return;
@@ -88,30 +94,23 @@ export function useTaskListSelection({
             await runBulkAction(t('common.delete'), async () => {
               await batchDeleteTasks(deletedIds);
               exitSelectionMode();
-              Alert.alert(
-                t('common.done'),
-                `${deletedIds.length} ${t('common.tasks')}`,
-                [
-                  {
-                    text: t('trash.restoreToInbox') === 'trash.restoreToInbox' ? 'Restore' : t('trash.restoreToInbox'),
-                    onPress: () => {
-                      deletedIds.forEach((id) => {
-                        void restoreTask(id);
-                      });
-                    },
-                  },
-                  {
-                    text: t('common.cancel'),
-                    style: 'cancel',
-                  },
-                ]
-              );
+              showToast({
+                title: t('common.done'),
+                message: `${deletedIds.length} ${t('common.tasks')}`,
+                tone: 'success',
+                actionLabel: t('trash.restoreToInbox') === 'trash.restoreToInbox' ? 'Restore' : t('trash.restoreToInbox'),
+                onAction: () => {
+                  deletedIds.forEach((id) => {
+                    void restoreTask(id);
+                  });
+                },
+              });
             });
           },
         },
       ]
     );
-  }, [batchDeleteTasks, bulkActionLoading, exitSelectionMode, hasSelection, restoreTask, runBulkAction, selectedIdsArray, t]);
+  }, [batchDeleteTasks, bulkActionLoading, exitSelectionMode, hasSelection, restoreTask, runBulkAction, selectedIdsArray, showToast, t]);
 
   const handleBatchAddTag = useCallback(async () => {
     const input = tagInput.trim();
@@ -127,9 +126,13 @@ export function useTaskListSelection({
       setTagInput('');
       setTagModalVisible(false);
       exitSelectionMode();
-      Alert.alert(t('common.done'), `${selectedIdsArray.length} ${t('common.tasks')}`);
+      showToast({
+        title: t('common.done'),
+        message: `${selectedIdsArray.length} ${t('common.tasks')}`,
+        tone: 'success',
+      });
     });
-  }, [batchUpdateTasks, bulkActionLoading, exitSelectionMode, hasSelection, runBulkAction, selectedIdsArray, t, tagInput, tasksById]);
+  }, [batchUpdateTasks, bulkActionLoading, exitSelectionMode, hasSelection, runBulkAction, selectedIdsArray, showToast, t, tagInput, tasksById]);
 
   return {
     bulkActionLabel,

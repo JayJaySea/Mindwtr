@@ -16,6 +16,7 @@ import {
 
 import { useMobileSyncBadge } from '@/hooks/use-mobile-sync-badge';
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useToast } from '@/contexts/toast-context';
 import { pickAndParseSyncFolder } from '@/lib/storage-file';
 import { getCloudKitAccountStatus, isCloudKitAvailable } from '@/lib/cloudkit-sync';
 import {
@@ -75,6 +76,7 @@ import { styles } from './settings.styles';
 
 export function SyncSettingsScreen() {
     const tc = useThemeColors();
+    const { showToast } = useToast();
     const { localize, t } = useSettingsLocalization();
     const scrollContentStyle = useSettingsScrollContent();
     const {
@@ -438,13 +440,15 @@ export function SyncSettingsScreen() {
         try {
             const { snapshotName } = await restoreDataFromBackup(validation.data);
             await refreshRecoverySnapshots();
-            Alert.alert(
-                localize('Restore complete', '恢复完成'),
-                localize(
+            showToast({
+                title: localize('Restore complete', '恢复完成'),
+                message: localize(
                     `Backup restored successfully. Recovery snapshot saved as ${snapshotName}.`,
                     `备份恢复成功。恢复快照已保存为 ${snapshotName}。`
-                )
-            );
+                ),
+                tone: 'success',
+                durationMs: 5000,
+            });
         } catch (error) {
             logSettingsError(error);
             Alert.alert(localize('Restore failed', '恢复失败'), String(error));
@@ -508,7 +512,12 @@ export function SyncSettingsScreen() {
                 localize(`Recovery snapshot saved as ${snapshotName}.`, `恢复快照已保存为 ${snapshotName}。`),
                 ...(result.warnings.length > 0 ? ['', ...result.warnings] : []),
             ].filter(Boolean);
-            Alert.alert(localize('Import complete', '导入完成'), details.join('\n'));
+            showToast({
+                title: localize('Import complete', '导入完成'),
+                message: details.join('\n'),
+                tone: 'success',
+                durationMs: 5600,
+            });
         } catch (error) {
             logSettingsError(error);
             Alert.alert(localize('Import failed', '导入失败'), String(error));
@@ -566,7 +575,11 @@ export function SyncSettingsScreen() {
                         try {
                             await restoreLocalDataSnapshot(snapshotName);
                             await refreshRecoverySnapshots();
-                            Alert.alert(localize('Restore complete', '恢复完成'), localize('Recovery snapshot restored.', '恢复快照已恢复。'));
+                            showToast({
+                                title: localize('Restore complete', '恢复完成'),
+                                message: localize('Recovery snapshot restored.', '恢复快照已恢复。'),
+                                tone: 'success',
+                            });
                         } catch (error) {
                             logSettingsError(error);
                             Alert.alert(localize('Restore failed', '恢复失败'), String(error));
@@ -598,13 +611,21 @@ export function SyncSettingsScreen() {
     const handleShareLog = async () => {
         const path = await ensureLogFilePath();
         if (!path) {
-            Alert.alert(t('settings.debugLogging'), t('settings.logMissing'));
+            showToast({
+                title: t('settings.debugLogging'),
+                message: t('settings.logMissing'),
+                tone: 'warning',
+            });
             return;
         }
         const Sharing = await import('expo-sharing');
         const canShare = await Sharing.isAvailableAsync();
         if (!canShare) {
-            Alert.alert(t('settings.debugLogging'), t('settings.shareUnavailable'));
+            showToast({
+                title: t('settings.debugLogging'),
+                message: t('settings.shareUnavailable'),
+                tone: 'warning',
+            });
             return;
         }
         await Sharing.shareAsync(path, { mimeType: 'text/plain' });
@@ -612,7 +633,11 @@ export function SyncSettingsScreen() {
 
     const handleClearLog = async () => {
         await clearLog();
-        Alert.alert(t('settings.debugLogging'), t('settings.logCleared'));
+        showToast({
+            title: t('settings.debugLogging'),
+            message: t('settings.logCleared'),
+            tone: 'success',
+        });
     };
 
     const handleSetSyncPath = async () => {
@@ -632,7 +657,11 @@ export function SyncSettingsScreen() {
                     await AsyncStorage.setItem(SYNC_BACKEND_KEY, 'file');
                     setSyncBackend('file');
                     resetSyncStatusForBackendSwitch();
-                    Alert.alert(localize('Success', '成功'), localize('Sync folder set successfully', '同步文件夹已设置'));
+                    showToast({
+                        title: localize('Success', '成功'),
+                        message: localize('Sync folder set successfully', '同步文件夹已设置'),
+                        tone: 'success',
+                    });
                 }
             }
         } catch (error) {
@@ -707,7 +736,11 @@ export function SyncSettingsScreen() {
             setSyncBackend('cloud');
             setDropboxConnected(true);
             resetSyncStatusForBackendSwitch();
-            Alert.alert(localize('Success', '成功'), localize('Connected to Dropbox.', '已连接 Dropbox。'));
+            showToast({
+                title: localize('Success', '成功'),
+                message: localize('Connected to Dropbox.', '已连接 Dropbox。'),
+                tone: 'success',
+            });
         } catch (error) {
             logSettingsError(error);
             const message = formatError(error);
@@ -734,7 +767,11 @@ export function SyncSettingsScreen() {
             await disconnectDropbox(dropboxAppKey);
             setDropboxConnected(false);
             resetSyncStatusForBackendSwitch();
-            Alert.alert(localize('Disconnected', '已断开'), localize('Dropbox connection removed.', '已移除 Dropbox 连接。'));
+            showToast({
+                title: localize('Disconnected', '已断开'),
+                message: localize('Dropbox connection removed.', '已移除 Dropbox 连接。'),
+                tone: 'success',
+            });
         } catch (error) {
             logSettingsError(error);
             Alert.alert(localize('Disconnect failed', '断开失败'), formatError(error));
@@ -756,7 +793,11 @@ export function SyncSettingsScreen() {
         try {
             await runDropboxConnectionTest();
             setDropboxConnected(true);
-            Alert.alert(localize('Connection OK', '连接成功'), localize('Dropbox account is reachable.', 'Dropbox 账号可访问。'));
+            showToast({
+                title: localize('Connection OK', '连接成功'),
+                message: localize('Dropbox account is reachable.', 'Dropbox 账号可访问。'),
+                tone: 'success',
+            });
         } catch (error) {
             logSettingsWarn('Dropbox connection test failed', error);
             if (isDropboxUnauthorizedSettingsError(error)) {
@@ -852,14 +893,20 @@ export function SyncSettingsScreen() {
             resetSyncStatusForBackendSwitch();
             const result = await performMobileSync(syncBackend === 'file' ? syncPath || undefined : undefined);
             if (result.skipped === 'offline' || isLikelyOfflineSyncError(result.error)) {
-                Alert.alert(localize('Offline', '离线'), localize('No internet connection. Sync skipped.', '当前无网络连接，已跳过同步。'));
+                showToast({
+                    title: localize('Offline', '离线'),
+                    message: localize('No internet connection. Sync skipped.', '当前无网络连接，已跳过同步。'),
+                    tone: 'warning',
+                });
                 return;
             }
             if (result.skipped === 'requeued') {
-                Alert.alert(
-                    localize('Sync queued', '已重新排队'),
-                    localize('Local changes arrived during sync. A retry was queued automatically.', '同步期间检测到本地更改，已自动重新排队重试。')
-                );
+                showToast({
+                    title: localize('Sync queued', '已重新排队'),
+                    message: localize('Local changes arrived during sync. A retry was queued automatically.', '同步期间检测到本地更改，已自动重新排队重试。'),
+                    tone: 'info',
+                    durationMs: 4200,
+                });
                 return;
             }
             if (result.success) {
@@ -884,15 +931,17 @@ export function SyncSettingsScreen() {
                         )
                         : null,
                 ].filter(Boolean);
-                Alert.alert(
-                    localize('Success', '成功'),
-                    [
+                showToast({
+                    title: localize('Success', '成功'),
+                    message: [
                         conflictCount > 0 && !shouldSuppressDuplicateConflictNotice
                             ? localize(`Sync completed with ${conflictCount} conflicts (resolved automatically).`, `同步完成，发现 ${conflictCount} 个冲突（已自动处理）。`)
                             : localize('Sync completed!', '同步完成！'),
                         ...warningDetails,
-                    ].join('\n\n')
-                );
+                    ].join('\n\n'),
+                    tone: conflictCount > 0 || warningDetails.length > 0 ? 'warning' : 'success',
+                    durationMs: warningDetails.length > 0 || conflictCount > 0 ? 5200 : 3600,
+                });
             } else {
                 throw new Error(result.error || 'Unknown error');
             }
@@ -928,7 +977,11 @@ export function SyncSettingsScreen() {
                     password: webdavPassword,
                     timeoutMs: 10_000,
                 });
-                Alert.alert(localize('Connection OK', '连接成功'), localize('WebDAV endpoint is reachable.', 'WebDAV 端点可访问。'));
+                showToast({
+                    title: localize('Connection OK', '连接成功'),
+                    message: localize('WebDAV endpoint is reachable.', 'WebDAV 端点可访问。'),
+                    tone: 'success',
+                });
                 return;
             }
 
@@ -939,7 +992,11 @@ export function SyncSettingsScreen() {
                 }
                 await runDropboxConnectionTest();
                 setDropboxConnected(true);
-                Alert.alert(localize('Connection OK', '连接成功'), localize('Dropbox account is reachable.', 'Dropbox 账号可访问。'));
+                showToast({
+                    title: localize('Connection OK', '连接成功'),
+                    message: localize('Dropbox account is reachable.', 'Dropbox 账号可访问。'),
+                    tone: 'success',
+                });
                 return;
             }
 
@@ -951,7 +1008,11 @@ export function SyncSettingsScreen() {
                 token: cloudToken,
                 timeoutMs: 10_000,
             });
-            Alert.alert(localize('Connection OK', '连接成功'), localize('Self-hosted endpoint is reachable.', '自托管端点可访问。'));
+            showToast({
+                title: localize('Connection OK', '连接成功'),
+                message: localize('Self-hosted endpoint is reachable.', '自托管端点可访问。'),
+                tone: 'success',
+            });
         } catch (error) {
             logSettingsWarn('Sync connection test failed', error);
             if (cloudProvider === 'dropbox' && isDropboxUnauthorizedSettingsError(error)) {
@@ -1189,7 +1250,11 @@ export function SyncSettingsScreen() {
                                         [WEBDAV_PASSWORD_KEY, webdavPassword],
                                     ]).then(() => {
                                         resetSyncStatusForBackendSwitch();
-                                        Alert.alert(localize('Success', '成功'), t('settings.webdavSave'));
+                                        showToast({
+                                            title: localize('Success', '成功'),
+                                            message: t('settings.webdavSave'),
+                                            tone: 'success',
+                                        });
                                     }).catch(logSettingsError);
                                 }}
                                 disabled={webdavUrlError || !webdavUrl.trim()}
@@ -1383,7 +1448,11 @@ export function SyncSettingsScreen() {
                                             [CLOUD_TOKEN_KEY, cloudToken],
                                         ]).then(() => {
                                             resetSyncStatusForBackendSwitch();
-                                            Alert.alert(localize('Success', '成功'), t('settings.cloudSave'));
+                                            showToast({
+                                                title: localize('Success', '成功'),
+                                                message: t('settings.cloudSave'),
+                                                tone: 'success',
+                                            });
                                         }).catch(logSettingsError);
                                     }}
                                     disabled={cloudUrlError || !cloudUrl.trim()}

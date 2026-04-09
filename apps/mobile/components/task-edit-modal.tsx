@@ -23,6 +23,7 @@ import {
 } from '@mindwtr/core';
 import { useLanguage } from '../contexts/language-context';
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useToast } from '@/contexts/toast-context';
 import { buildAIConfig, isAIKeyRequired, loadAIKey } from '../lib/ai-config';
 import type { AIResponseAction } from './ai-response-modal';
 import { styles } from './task-edit/task-edit-modal.styles';
@@ -86,6 +87,7 @@ function TaskEditModalInner({
     onContextNavigate,
     onTagNavigate,
 }: TaskEditModalProps) {
+    const { showToast } = useToast();
     const {
         tasks,
         projects,
@@ -350,7 +352,12 @@ function TaskEditModalInner({
         const rawTitle = String(titleDraftRef.current ?? '');
         const { title: parsedTitle, props: parsedProps, projectTitle, invalidDateCommands } = parseQuickAdd(rawTitle, projects, new Date(), areas);
         if (invalidDateCommands && invalidDateCommands.length > 0) {
-            Alert.alert(t('common.notice'), `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`);
+            showToast({
+                title: t('common.notice'),
+                message: `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`,
+                tone: 'warning',
+                durationMs: 4200,
+            });
             return;
         }
         const existingProjectId = editedTask.projectId ?? task?.projectId;

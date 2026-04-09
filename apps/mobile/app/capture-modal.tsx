@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { createAIProvider, getUsedTaskTokens, parseQuickAdd, type Task, type TimeEstimate, type AIProviderId, useTaskStore } from '@mindwtr/core';
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useToast } from '@/contexts/toast-context';
 import { useLanguage } from '../contexts/language-context';
 import { buildCopilotConfig, isAIKeyRequired, loadAIKey } from '../lib/ai-config';
 import { logError } from '../lib/app-log';
@@ -12,6 +13,7 @@ export default function CaptureScreen() {
   const router = useRouter();
   const { addTask, projects, tasks, settings, areas } = useTaskStore();
   const tc = useThemeColors();
+  const { showToast } = useToast();
   const { t } = useLanguage();
   const initialText = typeof params.text === 'string' ? decodeURIComponent(params.text) : '';
   const [value, setValue] = useState(initialText);
@@ -144,7 +146,12 @@ export default function CaptureScreen() {
     if (!value.trim()) return;
     const { title, props, invalidDateCommands } = parseQuickAdd(value, projects, new Date(), areas);
     if (invalidDateCommands && invalidDateCommands.length > 0) {
-      Alert.alert(t('common.notice'), `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`);
+      showToast({
+        title: t('common.notice'),
+        message: `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`,
+        tone: 'warning',
+        durationMs: 4200,
+      });
       return;
     }
     const finalTitle = title || value;

@@ -61,6 +61,13 @@ vi.mock('@/hooks/use-theme-colors', () => ({
   }),
 }));
 
+vi.mock('@/contexts/toast-context', () => ({
+  useToast: () => ({
+    showToast: vi.fn(),
+    dismissToast: vi.fn(),
+  }),
+}));
+
 vi.mock('@/lib/ai-config', () => ({
   buildCopilotConfig: vi.fn(),
   isAIKeyRequired: vi.fn(() => false),

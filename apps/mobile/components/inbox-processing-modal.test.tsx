@@ -45,6 +45,13 @@ vi.mock('../contexts/theme-context', () => ({
   useTheme: () => ({ isDark: false }),
 }));
 
+vi.mock('../contexts/toast-context', () => ({
+  useToast: () => ({
+    showToast: vi.fn(),
+    dismissToast: vi.fn(),
+  }),
+}));
+
 vi.mock('@/hooks/use-theme-colors', () => ({
   useThemeColors: () => ({
     bg: '#fff',

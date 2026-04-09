@@ -22,6 +22,7 @@ import { useProjectFiltering, type ProjectSectionItem } from '@/hooks/use-projec
 import { TaskList } from '../../components/task-list';
 import { useMobileAreaFilter } from '@/hooks/use-mobile-area-filter';
 import { useLanguage } from '../../contexts/language-context';
+import { useToast } from '../../contexts/toast-context';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { MarkdownText } from '../../components/markdown-text';
 import { ListSectionHeader, defaultListContentStyle } from '@/components/list-layout';
@@ -34,6 +35,7 @@ import { openContextsScreen, openProjectScreen } from '@/lib/task-meta-navigatio
 export default function ProjectsScreen() {
   const { projects, tasks, addProject, updateProject, deleteProject, toggleProjectFocus, addArea, updateArea, deleteArea, reorderAreas, updateTask, setHighlightTask } = useTaskStore();
   const { t } = useLanguage();
+  const { showToast } = useToast();
   const tc = useThemeColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
@@ -428,7 +430,11 @@ export default function ProjectsScreen() {
             }
             if (manageIndex === 2) {
               if (sortedAreas.length === 0) {
-                Alert.alert(t('common.notice') || 'Notice', t('projects.noArea'));
+                showToast({
+                  title: t('common.notice') || 'Notice',
+                  message: t('projects.noArea'),
+                  tone: 'warning',
+                });
                 return;
               }
               ActionSheetIOS.showActionSheetWithOptions(
@@ -456,7 +462,11 @@ export default function ProjectsScreen() {
             }
             const deletableAreas = sortedAreas.filter((area) => (areaUsage.get(area.id) || 0) === 0);
             if (deletableAreas.length === 0) {
-              Alert.alert(t('common.notice') || 'Notice', t('projects.areaInUse') || 'Area has projects.');
+              showToast({
+                title: t('common.notice') || 'Notice',
+                message: t('projects.areaInUse') || 'Area has projects.',
+                tone: 'warning',
+              });
               return;
             }
             ActionSheetIOS.showActionSheetWithOptions(
@@ -1434,7 +1444,11 @@ export default function ProjectsScreen() {
                               disabled={inUse}
                               onPress={() => {
                                 if (inUse) {
-                                  Alert.alert(t('common.notice') || 'Notice', t('projects.areaInUse') || 'Area has projects.');
+                                  showToast({
+                                    title: t('common.notice') || 'Notice',
+                                    message: t('projects.areaInUse') || 'Area has projects.',
+                                    tone: 'warning',
+                                  });
                                   return;
                                 }
                                 deleteArea(area.id);

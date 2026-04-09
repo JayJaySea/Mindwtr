@@ -30,6 +30,7 @@ import { useMobileAreaFilter } from '@/hooks/use-mobile-area-filter';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { taskMatchesAreaFilter } from '@/lib/area-filter';
 import { openProjectScreen } from '@/lib/task-meta-navigation';
+import { useToast } from '@/contexts/toast-context';
 import { TaskEditModal } from '../task-edit-modal';
 import { TokenPickerModal } from '../token-picker-modal';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -64,6 +65,7 @@ export function ContextsView() {
   const [bulkTokenPicker, setBulkTokenPicker] = useState<BulkTokenPickerState>(null);
 
   const tc = useThemeColors();
+  const { showToast } = useToast();
   const { areaById, resolvedAreaFilter } = useMobileAreaFilter();
   const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const requestedTokens = useMemo(() => {
@@ -193,7 +195,11 @@ export function ContextsView() {
     await runBulkAction(t('bulk.moveTo'), async () => {
       await batchMoveTasks(selectedIdsArray, newStatus);
       exitSelectionMode();
-      Alert.alert(t('common.done'), `${selectedIdsArray.length} ${t('common.tasks')}`);
+      showToast({
+        title: t('common.done'),
+        message: `${selectedIdsArray.length} ${t('common.tasks')}`,
+        tone: 'success',
+      });
     });
   };
 
@@ -211,7 +217,11 @@ export function ContextsView() {
             void runBulkAction(t('common.delete'), async () => {
               await batchDeleteTasks(selectedIdsArray);
               exitSelectionMode();
-              Alert.alert(t('common.done'), `${selectedIdsArray.length} ${t('common.tasks')}`);
+              showToast({
+                title: t('common.done'),
+                message: `${selectedIdsArray.length} ${t('common.tasks')}`,
+                tone: 'success',
+              });
             });
           },
         },
@@ -251,7 +261,11 @@ export function ContextsView() {
       if (updates.length === 0) return;
       await batchUpdateTasks(updates);
       exitSelectionMode();
-      Alert.alert(t('common.done'), `${selectedIdsArray.length} ${t('common.tasks')}`);
+      showToast({
+        title: t('common.done'),
+        message: `${selectedIdsArray.length} ${t('common.tasks')}`,
+        tone: 'success',
+      });
     });
   };
 

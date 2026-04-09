@@ -14,6 +14,7 @@ import {
 } from '@mindwtr/core';
 import { loadAIKey } from '../lib/ai-config';
 import { persistAttachmentLocally } from '../lib/attachment-sync';
+import { useToast } from '../contexts/toast-context';
 import {
   ensureWhisperModelPathForConfig,
   preloadWhisperContext,
@@ -67,6 +68,7 @@ export function useQuickCaptureAudio({
   updateSpeechSettings,
   visible,
 }: UseQuickCaptureAudioParams) {
+  const { showToast } = useToast();
   const [recording, setRecording] = useState<RecordingState | null>(null);
   const [recordingBusy, setRecordingBusy] = useState(false);
   const [recordingReady, setRecordingReady] = useState(false);
@@ -361,7 +363,12 @@ export function useQuickCaptureAudio({
         if (attachment) attachments.push(attachment);
         const { title, props, invalidDateCommands } = await buildTaskProps(displayTitle, { attachments });
         if (invalidDateCommands && invalidDateCommands.length > 0) {
-          Alert.alert(t('common.notice'), `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`);
+          showToast({
+            title: t('common.notice'),
+            message: `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`,
+            tone: 'warning',
+            durationMs: 4200,
+          });
           return;
         }
         if (!title.trim()) return;
@@ -504,7 +511,12 @@ export function useQuickCaptureAudio({
       if (attachment) attachments.push(attachment);
       const { title, props, invalidDateCommands } = await buildTaskProps(displayTitle, { attachments });
       if (invalidDateCommands && invalidDateCommands.length > 0) {
-        Alert.alert(t('common.notice'), `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`);
+        showToast({
+          title: t('common.notice'),
+          message: `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`,
+          tone: 'warning',
+          durationMs: 4200,
+        });
         return;
       }
       if (!title.trim()) return;
@@ -562,6 +574,7 @@ export function useQuickCaptureAudio({
     resolveWhisperModel,
     safeDeleteFile,
     settings,
+    showToast,
     stripFileScheme,
     t,
   ]);

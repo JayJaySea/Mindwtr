@@ -31,6 +31,7 @@ import {
 import { useLanguage } from '../contexts/language-context';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { useMobileAreaFilter } from '@/hooks/use-mobile-area-filter';
+import { useToast } from '@/contexts/toast-context';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { logError, logWarn } from '../lib/app-log';
 import {
@@ -67,6 +68,7 @@ export function QuickCaptureSheet({
   const { addTask, addProject, updateSettings, projects, settings, tasks, areas } = useTaskStore();
   const { t } = useLanguage();
   const tc = useThemeColors();
+  const { showToast } = useToast();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const inputRef = useRef<TextInput>(null);
@@ -317,7 +319,12 @@ export function QuickCaptureSheet({
     if (!value.trim()) return;
     const { title, props, invalidDateCommands } = await buildTaskProps(value.trim());
     if (invalidDateCommands && invalidDateCommands.length > 0) {
-      Alert.alert(t('common.notice'), `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`);
+      showToast({
+        title: t('common.notice'),
+        message: `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`,
+        tone: 'warning',
+        durationMs: 4200,
+      });
       return;
     }
     if (!title.trim()) return;
@@ -331,7 +338,7 @@ export function QuickCaptureSheet({
     }
 
     finalizeClose();
-  }, [addAnother, addTask, buildTaskProps, finalizeClose, t, value]);
+  }, [addAnother, addTask, buildTaskProps, finalizeClose, showToast, t, value]);
 
   const selectedProject = projectId ? projects.find((project) => project.id === projectId) : null;
   const dueLabel = dueDate ? safeFormatDate(dueDate, 'P') : t('taskEdit.dueDateLabel');

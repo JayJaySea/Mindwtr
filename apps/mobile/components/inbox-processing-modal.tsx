@@ -8,6 +8,7 @@ import { DEFAULT_PROJECT_COLOR, collectTaskTokenUsage, useTaskStore, createAIPro
 import { AIResponseModal, type AIResponseAction } from './ai-response-modal';
 import { useLanguage } from '../contexts/language-context';
 import { useTheme } from '../contexts/theme-context';
+import { useToast } from '../contexts/toast-context';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { buildAIConfig, isAIKeyRequired, loadAIKey } from '../lib/ai-config';
 import { logWarn } from '../lib/app-log';
@@ -24,6 +25,7 @@ const PRIORITY_OPTIONS: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalProps) {
   const { tasks, projects, areas, settings, updateTask, deleteTask, addProject } = useTaskStore();
   const { t, language } = useLanguage();
+  const { showToast } = useToast();
   const { isDark } = useTheme();
   const tc = useThemeColors();
   const insets = useSafeAreaInsets();
@@ -419,7 +421,11 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
     const body = bodyParts.join('\n');
     const subject = `Delegation: ${title}`;
     await Share.share({ message: body, title: subject }).catch(() => {
-      Alert.alert(t('common.notice'), t('process.delegateSendError'));
+      showToast({
+        title: t('common.notice'),
+        message: t('process.delegateSendError'),
+        tone: 'warning',
+      });
     });
   };
 

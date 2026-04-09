@@ -26,6 +26,7 @@ import { useLanguage } from '../contexts/language-context';
 
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { useMobileAreaFilter } from '@/hooks/use-mobile-area-filter';
+import { useToast } from '@/contexts/toast-context';
 import { taskMatchesAreaFilter } from '@/lib/area-filter';
 import { openContextsScreen, openProjectScreen } from '@/lib/task-meta-navigation';
 import { buildCopilotConfig, isAIKeyRequired, loadAIKey } from '../lib/ai-config';
@@ -73,6 +74,7 @@ function TaskListComponent({
 }: TaskListProps) {
   const { isDark } = useTheme();
   const { t } = useLanguage();
+  const { showToast } = useToast();
   const {
     tasks,
     projects,
@@ -559,7 +561,12 @@ function TaskListComponent({
 
     const { title: parsedTitle, props, projectTitle, invalidDateCommands } = parseQuickAdd(newTaskTitle, projects, new Date(), areas);
     if (invalidDateCommands && invalidDateCommands.length > 0) {
-      Alert.alert(t('common.notice'), `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`);
+      showToast({
+        title: t('common.notice'),
+        message: `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`,
+        tone: 'warning',
+        durationMs: 4200,
+      });
       return;
     }
     const finalTitle = parsedTitle || newTaskTitle;

@@ -5,6 +5,7 @@ import * as Application from 'expo-application';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { useToast } from '@/contexts/toast-context';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { getPlayStoreUpdateInfoAsync } from '@/lib/play-store-updates';
 import { compareVersions, logSettingsError, logSettingsWarn } from '@/lib/settings-utils';
@@ -26,6 +27,7 @@ export function AboutSettingsScreen({
     onUpdateBadgeChange: (next: boolean) => void;
 }) {
     const tc = useThemeColors();
+    const { showToast } = useToast();
     const { localize, t } = useSettingsLocalization();
     const scrollContentStyle = useSettingsScrollContent();
     const extraConfig = Constants.expoConfig?.extra as MobileExtraConfig | undefined;
@@ -209,13 +211,15 @@ export function AboutSettingsScreen({
 
     const handleCheckUpdates = async () => {
         if (isFossBuild) {
-            Alert.alert(
-                localize('Updates are managed by your distribution source', '更新由发行渠道管理'),
-                localize(
+            showToast({
+                title: localize('Updates are managed by your distribution source', '更新由发行渠道管理'),
+                message: localize(
                     'In-app update checks are disabled in this FOSS build. Please update from your repository or package source.',
                     '此 FOSS 版本已禁用应用内更新检查。请通过你的软件源或包管理渠道更新。'
-                )
-            );
+                ),
+                tone: 'info',
+                durationMs: 4800,
+            });
             return;
         }
 
@@ -252,7 +256,11 @@ export function AboutSettingsScreen({
                             'Google Play check was unavailable, but your version matches the latest GitHub release.',
                             'Google Play 检查暂时不可用，但当前版本与 GitHub 最新发布一致。'
                         );
-                    Alert.alert(localize('Up to Date', '已是最新'), upToDateMessage);
+                    showToast({
+                        title: localize('Up to Date', '已是最新'),
+                        message: upToDateMessage,
+                        tone: 'success',
+                    });
                     await persistUpdateBadge(false);
                 }
                 return;
@@ -280,10 +288,11 @@ export function AboutSettingsScreen({
                     );
                     await persistUpdateBadge(true, latestVersion);
                 } else {
-                    Alert.alert(
-                        localize('Up to Date', '已是最新'),
-                        localize('You are using the latest App Store version!', '您正在使用 App Store 最新版本！')
-                    );
+                    showToast({
+                        title: localize('Up to Date', '已是最新'),
+                        message: localize('You are using the latest App Store version!', '您正在使用 App Store 最新版本！'),
+                        tone: 'success',
+                    });
                     await persistUpdateBadge(false);
                 }
                 return;
@@ -306,12 +315,20 @@ export function AboutSettingsScreen({
                 );
                 await persistUpdateBadge(true, latestVersion);
             } else {
-                Alert.alert(localize('Up to Date', '已是最新'), localize('You are using the latest version!', '您正在使用最新版本！'));
+                showToast({
+                    title: localize('Up to Date', '已是最新'),
+                    message: localize('You are using the latest version!', '您正在使用最新版本！'),
+                    tone: 'success',
+                });
                 await persistUpdateBadge(false);
             }
         } catch (error) {
             logSettingsError('Update check failed:', error);
-            Alert.alert(localize('Error', '错误'), localize('Failed to check for updates', '检查更新失败'));
+            showToast({
+                title: localize('Error', '错误'),
+                message: localize('Failed to check for updates', '检查更新失败'),
+                tone: 'warning',
+            });
         } finally {
             setIsCheckingUpdate(false);
         }

@@ -12,6 +12,7 @@ import { Alert, AppState, AppStateStatus, Platform, SafeAreaView, StatusBar, Tex
 import { ShareIntentProvider, useShareIntentContext } from 'expo-share-intent';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { QuickCaptureProvider, type QuickCaptureOptions } from '../contexts/quick-capture-context';
+import { ToastProvider } from '../contexts/toast-context';
 
 import { ThemeProvider, useTheme } from '../contexts/theme-context';
 import { LanguageProvider, useLanguage } from '../contexts/language-context';
@@ -736,60 +737,62 @@ function RootLayoutContent() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: tc.bg }}>
-      <QuickCaptureProvider
-        value={{
-          openQuickCapture: (options?: QuickCaptureOptions) => {
-            const params = new URLSearchParams();
-            if (options?.initialValue) {
-              params.set('initialValue', options.initialValue);
-            }
-            const initialProps = buildQuickCaptureInitialProps(options?.initialProps);
-            if (initialProps) {
-              params.set('initialProps', encodeURIComponent(JSON.stringify(initialProps)));
-            }
-            const query = params.toString();
-            router.push((query ? `/capture-modal?${query}` : '/capture-modal') as never);
-          },
-        }}
-      >
-        <NavigationThemeProvider value={isDark ? DarkTheme : DefaultTheme}>
-          <Stack>
-            <Stack.Screen name="index" options={{ headerShown: false, animation: 'none' }} />
-            <Stack.Screen name="(drawer)" options={{ headerShown: false, animation: 'none' }} />
-            <Stack.Screen
-              name="daily-review"
-              options={{
-                headerShown: false,
-              }}
+      <ToastProvider>
+        <QuickCaptureProvider
+          value={{
+            openQuickCapture: (options?: QuickCaptureOptions) => {
+              const params = new URLSearchParams();
+              if (options?.initialValue) {
+                params.set('initialValue', options.initialValue);
+              }
+              const initialProps = buildQuickCaptureInitialProps(options?.initialProps);
+              if (initialProps) {
+                params.set('initialProps', encodeURIComponent(JSON.stringify(initialProps)));
+              }
+              const query = params.toString();
+              router.push((query ? `/capture-modal?${query}` : '/capture-modal') as never);
+            },
+          }}
+        >
+          <NavigationThemeProvider value={isDark ? DarkTheme : DefaultTheme}>
+            <Stack>
+              <Stack.Screen name="index" options={{ headerShown: false, animation: 'none' }} />
+              <Stack.Screen name="(drawer)" options={{ headerShown: false, animation: 'none' }} />
+              <Stack.Screen
+                name="daily-review"
+                options={{
+                  headerShown: false,
+                }}
+              />
+              <Stack.Screen
+                name="global-search"
+                options={{
+                  headerShown: false,
+                  presentation: 'modal',
+                  animation: 'slide_from_bottom'
+                }}
+              />
+              <Stack.Screen
+                name="capture-modal"
+                options={{
+                  headerShown: false,
+                  presentation: 'modal',
+                  animation: 'slide_from_bottom'
+                }}
+              />
+              <Stack.Screen
+                name="check-focus"
+                options={{
+                  headerShown: false,
+                }}
+              />
+            </Stack>
+            <StatusBar
+              barStyle={isDark ? 'light-content' : 'dark-content'}
             />
-            <Stack.Screen
-              name="global-search"
-              options={{
-                headerShown: false,
-                presentation: 'modal',
-                animation: 'slide_from_bottom'
-              }}
-            />
-            <Stack.Screen
-              name="capture-modal"
-              options={{
-                headerShown: false,
-                presentation: 'modal',
-                animation: 'slide_from_bottom'
-              }}
-            />
-            <Stack.Screen
-              name="check-focus"
-              options={{
-                headerShown: false,
-              }}
-            />
-          </Stack>
-          <StatusBar
-            barStyle={isDark ? 'light-content' : 'dark-content'}
-          />
-        </NavigationThemeProvider>
-      </QuickCaptureProvider>
+          </NavigationThemeProvider>
+        </QuickCaptureProvider>
+      </ToastProvider>
     </GestureHandlerRootView>
   );
 }

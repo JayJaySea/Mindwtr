@@ -80,6 +80,13 @@ vi.mock('expo-haptics', () => ({
   notificationAsync: hapticsMocks.notificationAsync,
 }));
 
+vi.mock('../contexts/toast-context', () => ({
+  useToast: () => ({
+    showToast: vi.fn(),
+    dismissToast: vi.fn(),
+  }),
+}));
+
 vi.mock('lucide-react-native', () => ({
   ArrowRight: (props: any) => React.createElement('ArrowRight', props),
   Check: (props: any) => React.createElement('Check', props),
