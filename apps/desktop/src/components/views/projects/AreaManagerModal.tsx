@@ -1,6 +1,6 @@
 import { DndContext, type DragEndEvent, closestCenter } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
-import type { Area } from '@mindwtr/core';
+import type { Area, StoreActionResult } from '@mindwtr/core';
 import type { ChangeEventHandler, MouseEventHandler } from 'react';
 import { SortableAreaRow } from './SortableRows';
 import { AreaColorPicker } from './AreaColorPicker';
@@ -10,7 +10,7 @@ type AreaManagerModalProps = {
     areaSensors: ReturnType<typeof import('@dnd-kit/core').useSensors>;
     onDragEnd: (event: DragEndEvent) => void;
     onDeleteArea: (areaId: string) => void;
-    onUpdateArea: (areaId: string, updates: Partial<Area>) => Promise<void> | void;
+    onUpdateArea: (areaId: string, updates: Partial<Area>) => Promise<StoreActionResult> | void;
     newAreaColor: string;
     onChangeNewAreaColor: (color: string) => void;
     newAreaName: string;

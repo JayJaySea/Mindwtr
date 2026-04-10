@@ -381,6 +381,11 @@ export function SettingsView() {
     const translated = translate(key);
     return translated === key ? "Select Obsidian vault" : translated;
   }, [translate]);
+  const cancelLabel = useMemo(() => {
+    const key = "common.cancel";
+    const translated = translate(key);
+    return translated === key ? "Cancel" : translated;
+  }, [translate]);
 
   // Heavy settings hooks are only needed when their page is active.
   const [isCleaningAttachments, setIsCleaningAttachments] = useState(false);
@@ -406,9 +411,9 @@ export function SettingsView() {
         title,
         description: message,
         confirmLabel: "Continue",
-        cancelLabel: t.cancel ?? "Cancel",
+        cancelLabel,
       }),
-    [requestConfirmation, t.cancel],
+    [cancelLabel, requestConfirmation],
   );
 
   useLayoutEffect(() => {

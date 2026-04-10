@@ -4,7 +4,7 @@ import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { AlertTriangle, ChevronDown, ChevronRight, CornerDownRight, Folder, Plus, Star } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { SortableProjectRow } from './SortableRows';
-import type { Area, Project, Task } from '@mindwtr/core';
+import type { Area, Project, StoreActionResult, Task } from '@mindwtr/core';
 import { reportError } from '../../../lib/report-error';
 import {
     computeProjectAreaDragResult,
@@ -64,7 +64,7 @@ interface ProjectsSidebarProps {
     tasksByProject: TasksByProject;
     projects: Project[];
     toggleProjectFocus: (projectId: string) => void;
-    updateProject: (projectId: string, updates: Partial<Project>) => Promise<void> | void;
+    updateProject: (projectId: string, updates: Partial<Project>) => Promise<StoreActionResult> | void;
     reorderProjects: (projectIds: string[], areaId?: string) => void;
     onDuplicateProject: (projectId: string) => void;
 }
