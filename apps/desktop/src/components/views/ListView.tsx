@@ -1,4 +1,4 @@
-import React, { memo, useState, useMemo, useDeferredValue, useEffect, useRef, useCallback } from 'react';
+import React, { memo, useState, useMemo, useDeferredValue, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { AlertTriangle, Folder } from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { shallow, useTaskStore, TaskPriority, TimeEstimate, DEFAULT_AREA_COLOR, sortTasksBy, parseQuickAdd, matchesHierarchicalToken, safeParseDate, isTaskInActiveProject, getWaitingPerson } from '@mindwtr/core';
@@ -158,9 +158,11 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
     const [selectedWaitingPerson, setSelectedWaitingPerson] = useState('');
     const [searchQuery, setSearchQuery] = useState('');
     const lastFilterKeyRef = useRef<string>('');
+    const pendingSelectionScrollRef = useRef(false);
     const addInputRef = useRef<HTMLInputElement>(null);
     const viewFilterInputRef = useRef<HTMLInputElement>(null);
     const listScrollRef = useRef<HTMLDivElement>(null);
+    const [selectionScrollVersion, setSelectionScrollVersion] = useState(0);
     const prioritiesEnabled = settings?.features?.priorities !== false;
     const timeEstimatesEnabled = settings?.features?.timeEstimates !== false;
     const undoNotificationsEnabled = settings?.undoNotificationsEnabled !== false;
@@ -188,6 +190,11 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
     const exitSelectionMode = useCallback(() => {
         setSelectionMode(false);
         setMultiSelectedIds(new Set());
+    }, []);
+
+    const requestSelectionScroll = useCallback(() => {
+        pendingSelectionScrollRef.current = true;
+        setSelectionScrollVersion((current) => current + 1);
     }, []);
 
     const [isProcessing, setIsProcessing] = useState(false);
@@ -543,6 +550,7 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         ].join('::');
         if (lastFilterKeyRef.current !== filterKey) {
             lastFilterKeyRef.current = filterKey;
+            requestSelectionScroll();
             setSelectedIndex(0);
             exitSelectionMode();
             return;
@@ -554,18 +562,8 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
             return;
         }
         if (selectedIndex >= filteredTasks.length) {
+            requestSelectionScroll();
             setSelectedIndex(filteredTasks.length - 1);
-            return;
-        }
-        const task = filteredTasks[selectedIndex];
-        if (!task) return;
-        const el = document.querySelector(`[data-task-id="${task.id}"]`) as HTMLElement | null;
-        if (el && typeof (el as any).scrollIntoView === 'function') {
-            el.scrollIntoView({ block: 'nearest' });
-            return;
-        }
-        if (shouldVirtualize && listScrollRef.current) {
-            rowVirtualizer.scrollToIndex(selectedIndex, { align: 'auto' });
         }
     }, [
         statusFilter,
@@ -579,9 +577,23 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         exitSelectionMode,
         filteredTasks,
         selectedIndex,
-        shouldVirtualize,
-        rowVirtualizer,
+        requestSelectionScroll,
     ]);
+
+    useLayoutEffect(() => {
+        if (!pendingSelectionScrollRef.current) return;
+        pendingSelectionScrollRef.current = false;
+        const task = filteredTasks[selectedIndex];
+        if (!task) return;
+        if (shouldVirtualize && listScrollRef.current) {
+            rowVirtualizer.scrollToIndex(selectedIndex, { align: 'auto' });
+            return;
+        }
+        const el = document.querySelector(`[data-task-id="${task.id}"]`) as HTMLElement | null;
+        if (el && typeof (el as any).scrollIntoView === 'function') {
+            el.scrollIntoView({ block: 'nearest' });
+        }
+    }, [filteredTasks, selectedIndex, selectionScrollVersion, shouldVirtualize, rowVirtualizer]);
 
     useEffect(() => {
         if (!highlightTaskId) return;
@@ -601,22 +613,26 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
 
     const selectNext = useCallback(() => {
         if (filteredTasks.length === 0) return;
+        requestSelectionScroll();
         setSelectedIndex((i) => Math.min(i + 1, filteredTasks.length - 1));
-    }, [filteredTasks.length]);
+    }, [filteredTasks.length, requestSelectionScroll]);
 
     const selectPrev = useCallback(() => {
+        requestSelectionScroll();
         setSelectedIndex((i) => Math.max(i - 1, 0));
-    }, []);
+    }, [requestSelectionScroll]);
 
     const selectFirst = useCallback(() => {
+        requestSelectionScroll();
         setSelectedIndex(0);
-    }, []);
+    }, [requestSelectionScroll]);
 
     const selectLast = useCallback(() => {
         if (filteredTasks.length > 0) {
+            requestSelectionScroll();
             setSelectedIndex(filteredTasks.length - 1);
         }
-    }, [filteredTasks.length]);
+    }, [filteredTasks.length, requestSelectionScroll]);
 
     const editSelected = useCallback(() => {
         const task = filteredTasks[selectedIndex];
