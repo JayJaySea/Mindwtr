@@ -399,8 +399,18 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
             set({ error: preparedUpdates.error });
             return actionFail(preparedUpdates.error);
         }
+        const isPromotingTaskFocus = preparedUpdates.updates.isFocusedToday === true && existingTask.isFocusedToday !== true;
+        if (isPromotingTaskFocus) {
+            const focusedCount = currentState._allTasks.filter(
+                (task) => task.isFocusedToday === true && !task.deletedAt
+            ).length;
+            if (focusedCount >= MAX_FOCUS_TASKS) {
+                const message = `Maximum of ${MAX_FOCUS_TASKS} focused tasks allowed`;
+                set({ error: message });
+                return actionFail(message);
+            }
+        }
         let snapshot: AppData | null = null;
-        let focusLimitReached = false;
         set((state) => {
             const oldTask = state._allTasks.find((t) => t.id === id);
             if (!oldTask) {
@@ -417,17 +427,6 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
                 { ...preparedUpdates.updates, ...nextRevision },
                 now
             );
-
-            const isPromotingTaskFocus = updatedTask.isFocusedToday === true && oldTask.isFocusedToday !== true;
-            if (isPromotingTaskFocus) {
-                const focusedCount = state._allTasks.filter(
-                    (task) => task.isFocusedToday === true && !task.deletedAt
-                ).length;
-                if (focusedCount >= MAX_FOCUS_TASKS) {
-                    focusLimitReached = true;
-                    return state;
-                }
-            }
 
             const updatedAllTasksBase = state._allTasks.map((task) =>
                 task.id === id ? updatedTask : task
@@ -454,10 +453,6 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
 
         if (snapshot) {
             debouncedSave(snapshot, (msg) => set({ error: msg }));
-        }
-        if (focusLimitReached) {
-            const message = `Maximum of ${MAX_FOCUS_TASKS} focused tasks allowed`;
-            return actionFail(message);
         }
         return actionOk();
     },
@@ -887,6 +882,14 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
 
     batchDeleteTasks: async (ids: string[]) => {
         if (ids.length === 0) return actionOk();
+        const state = get();
+        const existingTaskIds = new Set(state._allTasks.map((task) => task.id));
+        const missingIds = ids.filter((id, index) => !existingTaskIds.has(id) && ids.indexOf(id) === index);
+        if (missingIds.length > 0) {
+            const message = `Tasks not found: ${missingIds.join(', ')}`;
+            set({ error: message });
+            return actionFail(message);
+        }
         const changeAt = Date.now();
         const now = new Date().toISOString();
         const idSet = new Set(ids);

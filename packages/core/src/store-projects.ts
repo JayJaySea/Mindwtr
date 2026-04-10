@@ -250,12 +250,13 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
                 context: { id },
             });
             set({ error: message });
-            return;
+            return actionFail(message);
         }
 
         if (snapshot) {
             debouncedSave(snapshot, (msg) => set({ error: msg }));
         }
+        return actionOk();
     },
 
     /**
@@ -339,11 +340,12 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
                 context: { id },
             });
             set({ error: message });
-            return;
+            return actionFail(message);
         }
         if (snapshot) {
             debouncedSave(snapshot, (msg) => set({ error: msg }));
         }
+        return actionOk();
     },
 
     restoreProject: async (id: string) => {
@@ -679,13 +681,21 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
         const changeAt = Date.now();
         const now = new Date().toISOString();
         let snapshot: AppData | null = null;
+        let missingSection = false;
+        let invalidTitle = false;
         set((state) => {
             const allSections = state._allSections;
             const section = allSections.find((item) => item.id === id);
-            if (!section) return state;
+            if (!section) {
+                missingSection = true;
+                return state;
+            }
             const deviceState = ensureDeviceId(state.settings);
             const nextTitle = updates.title !== undefined ? updates.title.trim() : section.title;
-            if (!nextTitle) return state;
+            if (!nextTitle) {
+                invalidTitle = true;
+                return state;
+            }
             const { projectId: _ignored, ...restUpdates } = updates;
             const newAllSections = allSections.map((item) =>
                 item.id === id
@@ -711,19 +721,39 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
                 ...(deviceState.updated ? { settings: deviceState.settings } : {}),
             };
         });
+        if (missingSection) {
+            const message = 'Section not found';
+            logWarn('updateSection skipped: section not found', {
+                scope: 'store',
+                category: 'validation',
+                context: { id },
+            });
+            set({ error: message });
+            return actionFail(message);
+        }
+        if (invalidTitle) {
+            const message = 'Section title is required';
+            set({ error: message });
+            return actionFail(message);
+        }
         if (snapshot) {
             debouncedSave(snapshot, (msg) => set({ error: msg }));
         }
+        return actionOk();
     },
 
     deleteSection: async (id: string) => {
         const changeAt = Date.now();
         const now = new Date().toISOString();
         let snapshot: AppData | null = null;
+        let missingSection = false;
         set((state) => {
             const allSections = state._allSections;
             const section = allSections.find((item) => item.id === id);
-            if (!section) return state;
+            if (!section) {
+                missingSection = true;
+                return state;
+            }
             const deviceState = ensureDeviceId(state.settings);
             const newAllSections = allSections.map((item) =>
                 item.id === id
@@ -762,9 +792,20 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
                 ...(deviceState.updated ? { settings: deviceState.settings } : {}),
             };
         });
+        if (missingSection) {
+            const message = 'Section not found';
+            logWarn('deleteSection skipped: section not found', {
+                scope: 'store',
+                category: 'validation',
+                context: { id },
+            });
+            set({ error: message });
+            return actionFail(message);
+        }
         if (snapshot) {
             debouncedSave(snapshot, (msg) => set({ error: msg }));
         }
+        return actionOk();
     },
 
     addArea: async (name: string, initialProps?: Partial<Area>) => {
@@ -822,12 +863,11 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
         });
         if (existingAreaId) {
             if (shouldRestoreDeletedArea || (initialProps && Object.keys(initialProps).length > 0)) {
-                try {
-                    await get().updateArea(existingAreaId, {
-                        ...(initialProps ?? {}),
-                        ...(shouldRestoreDeletedArea ? { deletedAt: undefined, name: trimmedName } : {}),
-                    });
-                } catch {
+                const result = await get().updateArea(existingAreaId, {
+                    ...(initialProps ?? {}),
+                    ...(shouldRestoreDeletedArea ? { deletedAt: undefined, name: trimmedName } : {}),
+                });
+                if (!result.success) {
                     set({ error: shouldRestoreDeletedArea ? 'Failed to restore area' : 'Failed to update area' });
                     return null;
                 }
@@ -847,14 +887,22 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
 
     updateArea: async (id: string, updates: Partial<Area>) => {
         let snapshot: AppData | null = null;
+        let missingArea = false;
+        let invalidName = false;
         set((state) => {
             const allAreas = state._allAreas;
             const area = allAreas.find(a => a.id === id);
-            if (!area) return state;
+            if (!area) {
+                missingArea = true;
+                return state;
+            }
             const deviceState = ensureDeviceId(state.settings);
-            if (updates.name) {
+            if (updates.name !== undefined) {
                 const trimmedName = updates.name.trim();
-                if (!trimmedName) return state;
+                if (!trimmedName) {
+                    invalidName = true;
+                    return state;
+                }
                 const normalized = trimmedName.toLowerCase();
                 const existing = allAreas.find((a) => a.id !== id && !a.deletedAt && a?.name?.trim().toLowerCase() === normalized);
                 if (existing) {
@@ -901,7 +949,7 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
             const changeAt = Date.now();
             const now = new Date().toISOString();
             const nextOrder = Number.isFinite(updates.order) ? (updates.order as number) : area.order;
-            const nextName = updates.name ? updates.name.trim() : area.name;
+            const nextName = updates.name !== undefined ? updates.name.trim() : area.name;
             let projectsChanged = false;
             let newAllProjects = state._allProjects;
             if (typeof updates.color === 'string') {
@@ -950,19 +998,39 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
                 ...(deviceState.updated ? { settings: deviceState.settings } : {}),
             };
         });
+        if (missingArea) {
+            const message = 'Area not found';
+            logWarn('updateArea skipped: area not found', {
+                scope: 'store',
+                category: 'validation',
+                context: { id },
+            });
+            set({ error: message });
+            return actionFail(message);
+        }
+        if (invalidName) {
+            const message = 'Area name is required';
+            set({ error: message });
+            return actionFail(message);
+        }
         if (snapshot) {
             debouncedSave(snapshot, (msg) => set({ error: msg }));
         }
+        return actionOk();
     },
 
     deleteArea: async (id: string) => {
         const changeAt = Date.now();
         const now = new Date().toISOString();
         let snapshot: AppData | null = null;
+        let missingArea = false;
         set((state) => {
             const allAreas = state._allAreas;
             const area = allAreas.find((item) => item.id === id);
-            if (!area || area.deletedAt) return state;
+            if (!area || area.deletedAt) {
+                missingArea = true;
+                return state;
+            }
             const deviceState = ensureDeviceId(state.settings);
             const newAllAreas = allAreas
                 .map((item) =>
@@ -1019,9 +1087,20 @@ export const createProjectActions = ({ set, get, debouncedSave }: ProjectActionC
                 ...(deviceState.updated ? { settings: deviceState.settings } : {}),
             };
         });
+        if (missingArea) {
+            const message = 'Area not found';
+            logWarn('deleteArea skipped: area not found', {
+                scope: 'store',
+                category: 'validation',
+                context: { id },
+            });
+            set({ error: message });
+            return actionFail(message);
+        }
         if (snapshot) {
             debouncedSave(snapshot, (msg) => set({ error: msg }));
         }
+        return actionOk();
     },
 
     restoreArea: async (id: string) => {
