@@ -18,6 +18,11 @@ const waitForExpectation = async (assertion: () => void, maxAttempts = 200): Pro
     throw lastError ?? new Error('Timed out waiting for expectation');
 };
 
+const parseLoggedContext = (value: unknown): Record<string, unknown> => {
+    expect(typeof value).toBe('string');
+    return JSON.parse(String(value)) as Record<string, unknown>;
+};
+
 describe('TaskStore', () => {
     let mockStorage: StorageAdapter;
 
@@ -884,16 +889,21 @@ describe('TaskStore', () => {
 
         expect(useTaskStore.getState().error).toContain('Save queue overflow');
         expect(useTaskStore.getState().error).toContain('versions');
-        expect(warnSpy).toHaveBeenCalledWith(
-            'Save queue overflow',
+        const overflowCall = warnSpy.mock.calls.find(([message]) => message === 'Save queue overflow');
+        expect(overflowCall).toBeTruthy();
+        const [, overflowMeta] = overflowCall ?? [];
+        expect(overflowMeta).toEqual(
             expect.objectContaining({
                 scope: 'store',
                 category: 'storage',
-                context: expect.objectContaining({
-                    droppedCount: expect.any(Number),
-                    droppedFromVersion: expect.any(Number),
-                    droppedToVersion: expect.any(Number),
-                }),
+                context: expect.any(String),
+            })
+        );
+        expect(parseLoggedContext(overflowMeta?.context)).toEqual(
+            expect.objectContaining({
+                droppedCount: expect.any(Number),
+                droppedFromVersion: expect.any(Number),
+                droppedToVersion: expect.any(Number),
             })
         );
 
@@ -1108,14 +1118,19 @@ describe('TaskStore', () => {
         updateProject('missing-project-id', { status: 'active' });
 
         expect(useTaskStore.getState().error).toBe('Project not found');
-        expect(warnSpy).toHaveBeenCalledWith(
-            'updateProject skipped: project not found',
+        const missingProjectCall = warnSpy.mock.calls.find(
+            ([message]) => message === 'updateProject skipped: project not found'
+        );
+        expect(missingProjectCall).toBeTruthy();
+        const [, missingProjectMeta] = missingProjectCall ?? [];
+        expect(missingProjectMeta).toEqual(
             expect.objectContaining({
                 scope: 'store',
                 category: 'validation',
-                context: { id: 'missing-project-id' },
+                context: expect.any(String),
             })
         );
+        expect(parseLoggedContext(missingProjectMeta?.context)).toEqual({ id: 'missing-project-id' });
         warnSpy.mockRestore();
     });
 

@@ -34,7 +34,9 @@ const logStorageInitIfNeeded = () => {
             });
         }
         localStorage.setItem(STORAGE_SCHEMA_VERSION_KEY, schemaVersion);
-    } catch {
+    } catch (error) {
+        // Local schema-version bookkeeping is best-effort only.
+        void error;
     }
     void logInfo('Storage init complete', {
         scope: 'storage',
