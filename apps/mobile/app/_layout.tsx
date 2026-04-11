@@ -980,7 +980,8 @@ function RootLayoutContentInner() {
     );
   }
 
-  if (!isShellReady) {
+  // Avoid mounting task screens against the empty default store before local hydration finishes.
+  if (!isFirstPaintReady) {
     return null;
   }
 
