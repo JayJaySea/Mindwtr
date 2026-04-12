@@ -14,7 +14,7 @@ type MarkdownFormatToolbarProps = {
     t: (key: string) => string;
     className?: string;
     canUndo: boolean;
-    onUndo: () => MarkdownSelection | void;
+    onUndo: () => MarkdownSelection | undefined;
     onApplyAction: (actionId: MarkdownToolbarActionId, selection: MarkdownSelection) => MarkdownToolbarResult | void;
 };
 
@@ -74,7 +74,7 @@ export function MarkdownFormatToolbar({
 
     const handleUndo = useCallback(() => {
         if (!canUndo) return;
-        restoreSelection(onUndo());
+        restoreSelection(onUndo() ?? undefined);
     }, [canUndo, onUndo, restoreSelection]);
 
     const handleApplyAction = useCallback((actionId: MarkdownToolbarActionId) => {

@@ -12,6 +12,7 @@ import {
     View,
     type TextInputSelectionChangeEventData,
     type NativeSyntheticEvent,
+    type TextStyle,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -44,7 +45,7 @@ type ExpandedMarkdownEditorProps = {
     selection: MarkdownSelection;
     onSelectionChange: (selection: MarkdownSelection) => void;
     canUndo: boolean;
-    onUndo: () => MarkdownSelection | void;
+    onUndo: () => MarkdownSelection | undefined;
     onApplyAction?: (actionId: MarkdownToolbarActionId, selection: MarkdownSelection) => MarkdownToolbarResult | void;
 };
 
@@ -83,7 +84,7 @@ export function ExpandedMarkdownEditor({
     const [mode, setMode] = React.useState<'edit' | 'preview'>(initialMode);
     const [isInputFocused, setIsInputFocused] = React.useState(false);
     const resolvedHeaderTitle = (headerTitle || '').trim() || title;
-    const directionStyle = direction
+    const directionStyle: TextStyle | undefined = direction
         ? {
             writingDirection: direction,
             textAlign: direction === 'rtl' ? 'right' : 'left',

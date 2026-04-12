@@ -20,7 +20,7 @@ type ExpandedMarkdownEditorProps = {
     initialMode?: 'edit' | 'preview';
     direction?: 'ltr' | 'rtl';
     canUndo: boolean;
-    onUndo: () => MarkdownSelection | void;
+    onUndo: () => MarkdownSelection | undefined;
     onApplyAction: (actionId: MarkdownToolbarActionId, selection: MarkdownSelection) => MarkdownToolbarResult | void;
     onSelectionChange: (selection: MarkdownSelection) => void;
     onEditorKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void;

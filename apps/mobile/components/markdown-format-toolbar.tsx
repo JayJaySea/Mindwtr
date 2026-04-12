@@ -28,7 +28,7 @@ type MarkdownFormatToolbarProps = {
     tc: ThemeColors;
     visible: boolean;
     canUndo: boolean;
-    onUndo: () => MarkdownSelection | void;
+    onUndo: () => MarkdownSelection | undefined;
     onApplyAction: (actionId: MarkdownToolbarActionId, selection: MarkdownSelection) => MarkdownToolbarResult | void;
     onInteractionStart?: () => void;
 };
@@ -135,7 +135,7 @@ export function MarkdownFormatToolbar({
 
     const handleUndo = React.useCallback(() => {
         if (!canUndo) return;
-        restoreSelection(onUndo());
+        restoreSelection(onUndo() ?? undefined);
     }, [canUndo, onUndo, restoreSelection]);
 
     const handleApplyAction = React.useCallback((actionId: MarkdownToolbarActionId) => {
