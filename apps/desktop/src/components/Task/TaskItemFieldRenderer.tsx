@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Maximize2 } from 'lucide-react';
 import {
     buildRRuleString,
     hasTimeComponent,
@@ -20,6 +21,7 @@ import {
 import { cn } from '../../lib/utils';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { ExpandedMarkdownEditor } from '../ExpandedMarkdownEditor';
 import { WeekdaySelector } from './TaskForm/WeekdaySelector';
 import { AttachmentsField } from './TaskForm/AttachmentsField';
 import { ChecklistField } from './TaskForm/ChecklistField';
@@ -122,6 +124,7 @@ export function TaskItemFieldRenderer({
     } = data;
 
     const [reviewTimeDraft, setReviewTimeDraft] = useState('');
+    const [descriptionExpanded, setDescriptionExpanded] = useState(false);
     useEffect(() => {
         const parsed = editReviewAt ? safeParseDate(editReviewAt) : null;
         const hasTime = hasTimeComponent(editReviewAt);
@@ -162,13 +165,23 @@ export function TaskItemFieldRenderer({
                 <div className="flex flex-col gap-2">
                     <div className="flex items-center justify-between">
                         <label className="text-xs text-muted-foreground font-medium">{t('taskEdit.descriptionLabel')}</label>
-                        <button
-                            type="button"
-                            onClick={toggleDescriptionPreview}
-                            className="text-xs px-2 py-1 rounded bg-muted/50 hover:bg-muted transition-colors text-muted-foreground"
-                        >
-                            {showDescriptionPreview ? t('markdown.edit') : t('markdown.preview')}
-                        </button>
+                        <div className="flex items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={toggleDescriptionPreview}
+                                className="text-xs px-2 py-1 rounded bg-muted/50 hover:bg-muted transition-colors text-muted-foreground"
+                            >
+                                {showDescriptionPreview ? t('markdown.edit') : t('markdown.preview')}
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setDescriptionExpanded(true)}
+                                className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                                aria-label={t('markdown.expand')}
+                            >
+                                <Maximize2 className="h-4 w-4" />
+                            </button>
+                        </div>
                     </div>
                     {showDescriptionPreview ? (
                         <div className={cn("text-xs bg-muted/30 border border-border rounded px-2 py-2", isRtl && "text-right")} dir={resolvedDirection}>
@@ -246,6 +259,17 @@ export function TaskItemFieldRenderer({
                             dir={resolvedDirection}
                         />
                     )}
+                    <ExpandedMarkdownEditor
+                        isOpen={descriptionExpanded}
+                        onClose={() => setDescriptionExpanded(false)}
+                        value={editDescription}
+                        onChange={setEditDescription}
+                        title={t('taskEdit.descriptionLabel')}
+                        placeholder={t('taskEdit.descriptionPlaceholder')}
+                        t={t}
+                        initialMode="edit"
+                        direction={resolvedDirection}
+                    />
                 </div>
             );
         case 'attachments':

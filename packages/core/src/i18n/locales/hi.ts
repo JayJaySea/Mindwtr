@@ -158,6 +158,8 @@ export const hiOverrides: Record<string, string> = {
         'taskEdit.detailsEmpty': 'सभी विवरण फ़ील्ड छुपे हुए हैं. उन्हें सेटिंग्स > GTD > टास्क एडिटर लेआउट में दिखाएं।',
         'markdown.preview': 'पूर्व दर्शन',
         'markdown.edit': 'संपादन करना',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': 'संलग्नक',
         'attachments.addFile': 'फ़ाइल जोड़ें',
         'attachments.addPhoto': 'तस्वीर जोड़ो',

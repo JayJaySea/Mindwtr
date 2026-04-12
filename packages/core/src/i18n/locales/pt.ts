@@ -158,6 +158,8 @@ export const ptOverrides: Record<string, string> = {
         'taskEdit.detailsEmpty': 'Todos os campos de detalhes estão ocultos. Mostre-os em Configurações > GTD > Layout do editor de tarefas.',
         'markdown.preview': 'Visualização',
         'markdown.edit': 'Editar',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': 'Anexos',
         'attachments.addFile': 'Adicionar arquivo',
         'attachments.addPhoto': 'Adicionar foto',

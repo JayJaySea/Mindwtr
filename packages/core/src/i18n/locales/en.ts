@@ -192,6 +192,8 @@ export const en: Record<string, string> = {
         'taskEdit.detailsEmpty': 'All detail fields are hidden. Show them in Settings > GTD > Task editor layout.',
         'markdown.preview': 'Preview',
         'markdown.edit': 'Edit',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': 'Attachments',
         'attachments.addFile': 'Add file',
         'attachments.addPhoto': 'Add photo',

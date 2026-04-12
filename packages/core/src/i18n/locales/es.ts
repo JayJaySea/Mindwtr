@@ -158,6 +158,8 @@ export const esOverrides: Record<string, string> = {
         'taskEdit.detailsEmpty': 'All detail fields are hidden. Show them in Settings > GTD > Task editor layout.',
         'markdown.preview': 'Previsualizar',
         'markdown.edit': 'Editar',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': 'Adjuntos',
         'attachments.addFile': 'Añadir archivo',
         'attachments.addPhoto': 'Añadir foto',

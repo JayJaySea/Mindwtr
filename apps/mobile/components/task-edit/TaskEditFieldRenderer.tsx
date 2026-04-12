@@ -1,6 +1,7 @@
 import React from 'react';
 import { Keyboard, Platform, Pressable, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
+import { Ionicons } from '@expo/vector-icons';
 import {
     type Attachment,
     type Area,
@@ -26,6 +27,7 @@ import {
 } from '@mindwtr/core';
 import type { ThemeColors } from '@/hooks/use-theme-colors';
 
+import { FullscreenMarkdownEditor } from '../fullscreen-markdown-editor';
 import { MarkdownText } from '../markdown-text';
 import { buildRecurrenceValue } from './recurrence-utils';
 import type { SetEditedTask } from './use-task-edit-state';
@@ -199,6 +201,7 @@ export function TaskEditFieldRenderer(input: TaskEditFieldRendererProps) {
     const inputStyle = { backgroundColor: tc.inputBg, borderColor: tc.border, color: tc.text };
     const combinedText = `${titleDraft ?? ''}\n${descriptionDraft ?? ''}`.trim();
     const resolvedDirection = resolveAutoTextDirection(combinedText, language);
+    const [descriptionFullscreen, setDescriptionFullscreen] = React.useState(false);
     const textDirectionStyle = {
         writingDirection: resolvedDirection,
         textAlign: resolvedDirection === 'rtl' ? 'right' : 'left',
@@ -242,6 +245,17 @@ export function TaskEditFieldRenderer(input: TaskEditFieldRendererProps) {
     const openDatePicker = (mode: NonNullable<typeof showDatePicker>) => {
         Keyboard.dismiss();
         setShowDatePicker(mode);
+    };
+    const handleDescriptionChange = (text: string) => {
+        setDescriptionDraft(text);
+        descriptionDraftRef.current = text;
+        resetCopilotDraft();
+        if (descriptionDebounceRef.current) {
+            clearTimeout(descriptionDebounceRef.current);
+        }
+        descriptionDebounceRef.current = setTimeout(() => {
+            setEditedTask(prev => ({ ...prev, description: text }));
+        }, 250);
     };
     const getDatePickerValue = (mode: NonNullable<typeof showDatePicker>) => {
         if (mode === 'start') return getSafePickerDateValue(editedTask.startTime);
@@ -861,11 +875,21 @@ export function TaskEditFieldRenderer(input: TaskEditFieldRendererProps) {
                     <View style={styles.formGroup}>
                         <View style={styles.inlineHeader}>
                             <Text style={[styles.label, { color: tc.secondaryText }]}>{t('taskEdit.descriptionLabel')}</Text>
-                            <TouchableOpacity onPress={() => setShowDescriptionPreview((v) => !v)}>
-                                <Text style={[styles.inlineAction, { color: tc.tint }]}>
-                                    {showDescriptionPreview ? t('markdown.edit') : t('markdown.preview')}
-                                </Text>
-                            </TouchableOpacity>
+                            <View style={styles.inlineActions}>
+                                <TouchableOpacity onPress={() => setShowDescriptionPreview((v) => !v)}>
+                                    <Text style={[styles.inlineAction, { color: tc.tint }]}>
+                                        {showDescriptionPreview ? t('markdown.edit') : t('markdown.preview')}
+                                    </Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    onPress={() => setDescriptionFullscreen(true)}
+                                    accessibilityRole="button"
+                                    accessibilityLabel={t('markdown.expand')}
+                                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                                >
+                                    <Ionicons name="expand-outline" size={20} color={tc.tint} />
+                                </TouchableOpacity>
+                            </View>
                         </View>
                         {showDescriptionPreview ? (
                             <View style={[styles.markdownPreview, { backgroundColor: tc.filterBg, borderColor: tc.border }]}>
@@ -878,17 +902,7 @@ export function TaskEditFieldRenderer(input: TaskEditFieldRendererProps) {
                                 onFocus={(event) => {
                                     handleInputFocus(event.nativeEvent.target);
                                 }}
-                                onChangeText={(text) => {
-                                    setDescriptionDraft(text);
-                                    descriptionDraftRef.current = text;
-                                    resetCopilotDraft();
-                                    if (descriptionDebounceRef.current) {
-                                        clearTimeout(descriptionDebounceRef.current);
-                                    }
-                                    descriptionDebounceRef.current = setTimeout(() => {
-                                        setEditedTask(prev => ({ ...prev, description: text }));
-                                    }, 250);
-                                }}
+                                onChangeText={handleDescriptionChange}
                                 placeholder={t('taskEdit.descriptionPlaceholder')}
                                 multiline
                                 placeholderTextColor={tc.secondaryText}
@@ -896,6 +910,16 @@ export function TaskEditFieldRenderer(input: TaskEditFieldRendererProps) {
                                 accessibilityHint={t('taskEdit.descriptionPlaceholder')}
                             />
                         )}
+                        <FullscreenMarkdownEditor
+                            visible={descriptionFullscreen}
+                            onClose={() => setDescriptionFullscreen(false)}
+                            value={descriptionDraft}
+                            onChangeText={handleDescriptionChange}
+                            title={t('taskEdit.descriptionLabel')}
+                            placeholder={t('taskEdit.descriptionPlaceholder')}
+                            initialMode="edit"
+                            direction={resolvedDirection}
+                        />
                     </View>
                 );
             case 'attachments':

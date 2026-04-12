@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { View, Text, TextInput, TouchableOpacity, Modal, Alert, Pressable, ScrollView, SectionList, Dimensions, Platform, Keyboard, ActionSheetIOS } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { AREA_PRESET_COLORS, Area, Attachment, DEFAULT_PROJECT_COLOR, generateUUID, getAttachmentDisplayTitle, normalizeLinkAttachmentInput, Project, safeParseDate, Task, useTaskStore, validateAttachmentForUpload } from '@mindwtr/core';
+import { Ionicons } from '@expo/vector-icons';
+import { AREA_PRESET_COLORS, Area, Attachment, DEFAULT_PROJECT_COLOR, generateUUID, getAttachmentDisplayTitle, normalizeLinkAttachmentInput, Project, resolveAutoTextDirection, safeParseDate, Task, useTaskStore, validateAttachmentForUpload } from '@mindwtr/core';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as Linking from 'expo-linking';
@@ -19,6 +20,7 @@ import { ProjectImagePreviewModal, ProjectLinkModal, ProjectTagPickerModal } fro
 import { ProjectRow } from '@/components/projects-screen/ProjectRow';
 import { TaskEditModal } from '@/components/task-edit-modal';
 import { useProjectFiltering, type ProjectSectionItem } from '@/hooks/use-project-filtering';
+import { FullscreenMarkdownEditor } from '../../components/fullscreen-markdown-editor';
 import { TaskList } from '../../components/task-list';
 import { useMobileAreaFilter } from '@/hooks/use-mobile-area-filter';
 import { useLanguage } from '../../contexts/language-context';
@@ -34,7 +36,7 @@ import { openContextsScreen, openProjectScreen } from '@/lib/task-meta-navigatio
 
 export default function ProjectsScreen() {
   const { projects, tasks, addProject, updateProject, deleteProject, toggleProjectFocus, addArea, updateArea, deleteArea, reorderAreas, updateTask, setHighlightTask } = useTaskStore();
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
   const { showToast } = useToast();
   const tc = useThemeColors();
   const insets = useSafeAreaInsets();
@@ -49,6 +51,7 @@ export default function ProjectsScreen() {
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [notesExpanded, setNotesExpanded] = useState(false);
   const [showNotesPreview, setShowNotesPreview] = useState(false);
+  const [notesFullscreen, setNotesFullscreen] = useState(false);
   const [showProjectMeta, setShowProjectMeta] = useState(false);
   const [showDueDatePicker, setShowDueDatePicker] = useState(false);
   const [showReviewPicker, setShowReviewPicker] = useState(false);
@@ -64,6 +67,7 @@ export default function ProjectsScreen() {
   const [expandedAreaColorId, setExpandedAreaColorId] = useState<string | null>(null);
   const { projectId, taskId } = useLocalSearchParams<{ projectId?: string; taskId?: string }>();
   const lastOpenedTaskIdRef = useRef<string | null>(null);
+  const selectedProjectNotesRef = useRef('');
   const ALL_TAGS = '__all__';
   const NO_TAGS = '__none__';
   const ALL_AREAS = AREA_FILTER_ALL;
@@ -119,6 +123,7 @@ export default function ProjectsScreen() {
     setSelectedProject(project);
     setNotesExpanded(false);
     setShowNotesPreview(false);
+    setNotesFullscreen(false);
     setShowProjectMeta(false);
     setShowDueDatePicker(false);
     setShowReviewPicker(false);
@@ -145,6 +150,10 @@ export default function ProjectsScreen() {
     setHighlightTask(task.id);
     setEditingTask(task);
   }, [taskId, projectId, selectedProject, tasks, setHighlightTask]);
+
+  useEffect(() => {
+    selectedProjectNotesRef.current = selectedProject?.supportNotes || '';
+  }, [selectedProject]);
 
   const sortAreasByName = () => {
     const reordered = [...sortedAreas]
@@ -195,6 +204,24 @@ export default function ProjectsScreen() {
     );
   };
 
+  const selectedProjectNotes = selectedProject?.supportNotes || '';
+  const selectedProjectNotesDirection = selectedProject
+    ? resolveAutoTextDirection(`${selectedProject.title ?? ''}\n${selectedProjectNotes}`.trim(), language)
+    : 'ltr';
+  const selectedProjectNotesTextDirectionStyle = {
+    writingDirection: selectedProjectNotesDirection,
+    textAlign: selectedProjectNotesDirection === 'rtl' ? 'right' : 'left',
+  } as const;
+  const handleSelectedProjectNotesChange = (text: string) => {
+    if (!selectedProject) return;
+    selectedProjectNotesRef.current = text;
+    setSelectedProject({ ...selectedProject, supportNotes: text });
+  };
+  const commitSelectedProjectNotes = () => {
+    if (!selectedProject) return;
+    updateProject(selectedProject.id, { supportNotes: selectedProjectNotesRef.current });
+  };
+
 
   const handleAddProject = () => {
     if (newProjectTitle.trim()) {
@@ -236,6 +263,7 @@ export default function ProjectsScreen() {
     setSelectedProject(null);
     setNotesExpanded(false);
     setShowNotesPreview(false);
+    setNotesFullscreen(false);
     setShowProjectMeta(false);
     setShowReviewPicker(false);
     setShowStatusMenu(false);
@@ -1082,7 +1110,7 @@ export default function ProjectsScreen() {
                     <View style={[styles.notesContainer, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
                       <View style={styles.notesHeaderRow}>
                         <TouchableOpacity
-                          style={styles.notesHeader}
+                          style={[styles.notesHeader, { flex: 1 }]}
                           onPress={() => {
                             setNotesExpanded(!notesExpanded);
                             if (notesExpanded) setShowNotesPreview(false);
@@ -1093,30 +1121,44 @@ export default function ProjectsScreen() {
                           </Text>
                         </TouchableOpacity>
                         {notesExpanded && (
-                          <TouchableOpacity
-                            onPress={() => setShowNotesPreview((v) => !v)}
-                            style={[styles.smallButton, { borderColor: tc.border, backgroundColor: tc.cardBg }]}
-                          >
-                            <Text style={[styles.smallButtonText, { color: tc.tint }]}>
-                              {showNotesPreview ? t('markdown.edit') : t('markdown.preview')}
-                            </Text>
-                          </TouchableOpacity>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                            <TouchableOpacity
+                              onPress={() => setShowNotesPreview((v) => !v)}
+                              style={[styles.smallButton, { borderColor: tc.border, backgroundColor: tc.cardBg }]}
+                            >
+                              <Text style={[styles.smallButtonText, { color: tc.tint }]}>
+                                {showNotesPreview ? t('markdown.edit') : t('markdown.preview')}
+                              </Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              onPress={() => setNotesFullscreen(true)}
+                              accessibilityRole="button"
+                              accessibilityLabel={t('markdown.expand')}
+                              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                            >
+                              <Ionicons name="expand-outline" size={20} color={tc.tint} />
+                            </TouchableOpacity>
+                          </View>
                         )}
                       </View>
                       {notesExpanded && (
                         showNotesPreview ? (
                           <View style={[styles.markdownPreview, { borderColor: tc.border, backgroundColor: tc.filterBg }]}>
-                            <MarkdownText markdown={selectedProject.supportNotes || ''} tc={tc} />
+                            <MarkdownText markdown={selectedProjectNotes} tc={tc} direction={selectedProjectNotesDirection} />
                           </View>
                         ) : (
                           <TextInput
-                            style={[styles.notesInput, { color: tc.text, backgroundColor: tc.inputBg, borderColor: tc.border }]}
+                            style={[
+                              styles.notesInput,
+                              selectedProjectNotesTextDirectionStyle,
+                              { color: tc.text, backgroundColor: tc.inputBg, borderColor: tc.border },
+                            ]}
                             multiline
                             placeholder={t('projects.notesPlaceholder')}
                             placeholderTextColor={tc.secondaryText}
-                            value={selectedProject.supportNotes || ''}
-                            onChangeText={(text) => setSelectedProject({ ...selectedProject, supportNotes: text })}
-                            onEndEditing={() => updateProject(selectedProject.id, { supportNotes: selectedProject.supportNotes })}
+                            value={selectedProjectNotes}
+                            onChangeText={handleSelectedProjectNotesChange}
+                            onEndEditing={commitSelectedProjectNotes}
                           />
                         )
                       )}
@@ -1292,6 +1334,17 @@ export default function ProjectsScreen() {
                   showSort={false}
                 />
                 </ScrollView>
+                <FullscreenMarkdownEditor
+                  visible={notesFullscreen}
+                  onClose={() => setNotesFullscreen(false)}
+                  value={selectedProjectNotes}
+                  onChangeText={handleSelectedProjectNotesChange}
+                  onCommit={commitSelectedProjectNotes}
+                  title={t('project.notes')}
+                  placeholder={t('projects.notesPlaceholder')}
+                  initialMode="edit"
+                  direction={selectedProjectNotesDirection}
+                />
                 </>
                   ) : null}
                 </SafeAreaView>

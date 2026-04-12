@@ -80,7 +80,7 @@ export function ProjectsView() {
         () => Array.from(new Set([...allContexts, ...allTags])).sort(),
         [allContexts, allTags],
     );
-    const { t } = useLanguage();
+    const { t, language } = useLanguage();
     const selectedProjectId = useUiStore((state) => state.projectView.selectedProjectId);
     const setProjectView = useUiStore((state) => state.setProjectView);
     const showToast = useUiStore((state) => state.showToast);
@@ -972,6 +972,7 @@ export function ProjectsView() {
                                                 onRemoveAttachment={removeProjectAttachment}
                                                 onUpdateNotes={(value) => updateProject(selectedProject.id, { supportNotes: value })}
                                                 t={t}
+                                                language={language}
                                             />
                                         </>
                                     )}

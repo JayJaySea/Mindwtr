@@ -158,6 +158,8 @@ export const ruOverrides: Record<string, string> = {
         'taskEdit.detailsEmpty': 'Все поля подробностей скрыты. Отобразите их в Настройках > GTD > Макет редактора задач.',
         'markdown.preview': 'Предварительный просмотр',
         'markdown.edit': 'Редактировать',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': 'Вложения',
         'attachments.addFile': 'Добавить файл',
         'attachments.addPhoto': 'Добавить фото',

@@ -158,6 +158,8 @@ export const itOverrides: Record<string, string> = {
         'taskEdit.detailsEmpty': 'Tutti i campi dei dettagli sono nascosti. Mostrali in Impostazioni > GTD > Layout editor attività.',
         'markdown.preview': 'Anteprima',
         'markdown.edit': 'Modificare',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': 'Allegati',
         'attachments.addFile': 'Aggiungi file',
         'attachments.addPhoto': 'Aggiungi foto',

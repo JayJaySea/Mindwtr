@@ -158,6 +158,8 @@ export const koOverrides: Record<string, string> = {
         'taskEdit.detailsEmpty': '모든 세부 정보 필드가 숨겨집니다. 설정 > GTD > 작업 편집기 레이아웃에 표시하세요.',
         'markdown.preview': '시사',
         'markdown.edit': '편집하다',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': '첨부파일',
         'attachments.addFile': '파일 추가',
         'attachments.addPhoto': '사진 추가',

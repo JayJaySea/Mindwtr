@@ -158,6 +158,8 @@ export const frOverrides: Record<string, string> = {
         'taskEdit.detailsEmpty': 'Tous les champs de détails sont masqués. Affichez-les dans Paramètres > GTD > Disposition de l\'éditeur de tâches.',
         'markdown.preview': 'Aperçu',
         'markdown.edit': 'Modifier',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': 'Pièces jointes',
         'attachments.addFile': 'Ajouter un fichier',
         'attachments.addPhoto': 'Ajouter une photo',

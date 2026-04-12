@@ -162,6 +162,8 @@ export const zhHans: Record<string, string> = {
         'taskEdit.detailsEmpty': 'All detail fields are hidden. Show them in Settings > GTD > Task editor layout.',
         'markdown.preview': '预览',
         'markdown.edit': '编辑',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': '附件',
         'attachments.addFile': '添加文件',
         'attachments.addPhoto': '添加图片',

@@ -158,6 +158,8 @@ export const jaOverrides: Record<string, string> = {
         'taskEdit.detailsEmpty': '詳細フィールドはすべて非表示になります。 [設定] > GTD > [タスク エディターのレイアウト] に表示します。',
         'markdown.preview': 'プレビュー',
         'markdown.edit': '編集',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': '添付ファイル',
         'attachments.addFile': 'ファイルを追加',
         'attachments.addPhoto': '写真を追加',

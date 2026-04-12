@@ -177,6 +177,8 @@ export const deOverrides: Record<string, string> = {
         'taskEdit.detailsEmpty': 'Alle Details-Felder sind versteckt. Um sie anzuzeigen: Einstellungen > GTD > Layout des Aufgabeneditors.',
         'markdown.preview': 'Voransicht',
         'markdown.edit': 'Bearbeiten',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': 'Anhänge',
         'attachments.addFile': 'Datei hinzufügen',
         'attachments.addPhoto': 'Foto hinzufügen',

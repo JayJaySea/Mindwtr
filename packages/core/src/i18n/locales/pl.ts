@@ -158,6 +158,8 @@ export const plOverrides: Record<string, string> = {
         'taskEdit.detailsEmpty': 'Wszystkie pola szczegółów są ukryte. Pokaż je w Ustawieniach > GTD > Układ edytora zadań.',
         'markdown.preview': 'Podgląd',
         'markdown.edit': 'Edytuj',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': 'Załączniki',
         'attachments.addFile': 'Dodaj plik',
         'attachments.addPhoto': 'Dodaj zdjęcie',

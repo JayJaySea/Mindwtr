@@ -158,6 +158,8 @@ export const trOverrides: Record<string, string> = {
         'taskEdit.detailsEmpty': 'Tüm ayrıntı alanları gizlidir. Bunları Ayarlar > GTD > Görev düzenleyici düzeni bölümünde gösterin.',
         'markdown.preview': 'Önizleme',
         'markdown.edit': 'Düzenlemek',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': 'Ekler',
         'attachments.addFile': 'Dosya ekle',
         'attachments.addPhoto': 'Fotoğraf ekle',

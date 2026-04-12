@@ -77,6 +77,8 @@ export const nlOverrides: Record<string, string> = {
         'priority.urgent': 'Urgent',
         'taskEdit.editTask': 'Taak bewerken',
         'taskEdit.checklist': 'Checklist',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'task.aria.startTime': 'Begintijd',
         'process.modeGuided': 'Begeleid',
         'process.modeQuick': 'Snel',

@@ -158,6 +158,8 @@ export const arOverrides: Record<string, string> = {
         'taskEdit.detailsEmpty': 'جميع حقول التفاصيل مخفية. اعرضها في الإعدادات > GTD > تخطيط محرر المهام.',
         'markdown.preview': 'معاينة',
         'markdown.edit': 'يحرر',
+        'markdown.expand': 'Expand',
+        'markdown.collapse': 'Collapse',
         'attachments.title': 'المرفقات',
         'attachments.addFile': 'إضافة ملف',
         'attachments.addPhoto': 'أضف صورة',
