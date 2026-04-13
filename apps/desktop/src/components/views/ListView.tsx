@@ -966,8 +966,7 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
             case 'done':
                 return {
                     title: t('list.done') || 'Done',
-                    body: resolveText('list.noTasks', 'Completed tasks will show here.'),
-                    action: t('nav.addTask') || 'Add task',
+                    body: resolveText('done.emptyHint', 'Completed tasks land here — a running log of what you finished.'),
                 };
             default:
                 return {

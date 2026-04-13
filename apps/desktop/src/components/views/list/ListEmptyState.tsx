@@ -1,7 +1,7 @@
 type EmptyState = {
     title: string;
     body: string;
-    action: string;
+    action?: string;
 };
 
 type ListEmptyStateProps = {
@@ -19,14 +19,16 @@ export function ListEmptyState({ hasFilters, emptyState, onAddTask, t }: ListEmp
             ) : (
                 <>
                     <div className="text-base font-medium text-foreground">{emptyState.title}</div>
-                    <p className="text-sm text-muted-foreground">{emptyState.body}</p>
-                    <button
-                        type="button"
-                        onClick={onAddTask}
-                        className="text-xs px-3 py-1 rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-                    >
-                        {emptyState.action}
-                    </button>
+                    <p className="text-sm text-muted-foreground max-w-sm">{emptyState.body}</p>
+                    {emptyState.action && (
+                        <button
+                            type="button"
+                            onClick={onAddTask}
+                            className="text-xs px-3 py-1 rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                        >
+                            {emptyState.action}
+                        </button>
+                    )}
                 </>
             )}
         </div>

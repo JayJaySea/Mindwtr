@@ -530,7 +530,7 @@ export const en: Record<string, string> = {
         'review.deadline': 'Deadline',
         'review.contexts': 'Contexts',
         'review.markDone': 'Mark Done',
-        'review.noTasks': 'No tasks to review',
+        'review.noTasks': 'You\'re all caught up. Nothing to review right now.',
 
         // Processing
         'process.title': 'Process Item',
@@ -945,7 +945,7 @@ export const en: Record<string, string> = {
         'agenda.reviewDueProjects': 'Projects to review',
         'agenda.upcoming': 'Upcoming',
         'agenda.allClear': 'All Clear!',
-        'agenda.noTasks': 'No urgent tasks right now.',
+        'agenda.noTasks': 'Nothing on deck. Pick a next action to focus on.',
         'focus.schedule': 'Today',
         'focus.nextActions': 'Next Actions',
 
@@ -970,8 +970,8 @@ export const en: Record<string, string> = {
         'waiting.withDeadline': 'With Deadline',
         'waiting.moveToNext': 'Move to Next',
         'waiting.markDone': 'Mark Done',
-        'waiting.empty': 'No waiting tasks',
-        'waiting.emptyHint': 'Use "Waiting" status for tasks that depend on others or external events',
+        'waiting.empty': 'Nothing you\'re waiting on',
+        'waiting.emptyHint': 'Park tasks here when the next move is someone else\'s — you\'ll see them until they clear.',
 
         // Someday (Mobile)
         'someday.title': 'Someday/Maybe',
@@ -980,8 +980,9 @@ export const en: Record<string, string> = {
         'someday.inProjects': 'In Projects',
         'someday.moveToNext': 'Move to Next',
         'someday.archive': 'Archive',
-        'someday.empty': 'No someday/maybe items',
-        'someday.emptyHint': 'Use "Someday" status for ideas, goals, and projects you might want to do in the future',
+        'someday.empty': 'Nothing on your someday list',
+        'someday.emptyHint': 'Park ideas and goals you might pursue later — off your plate, not out of mind.',
+        'done.emptyHint': 'Completed tasks land here — a running log of what you finished.',
 
         // Search
         'search.title': 'Search',

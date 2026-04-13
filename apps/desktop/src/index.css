@@ -264,6 +264,18 @@
     @apply border-border;
   }
 
+  /*
+   * Default keyboard-only focus ring. Mouse clicks don't trigger :focus-visible,
+   * so this is invisible to pointer users but ensures every interactive element
+   * is discoverable via Tab. Components can override by styling :focus-visible
+   * locally — the !important is avoided so overrides stay easy.
+   */
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
   html {
     font-size: calc(16px * var(--mindwtr-text-scale));
     /* Ensure consistent sizing on WebKitGTK */
