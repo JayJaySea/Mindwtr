@@ -1,5 +1,6 @@
 import React from 'react';
 import { Image, ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import { CheckSquare, Square } from 'lucide-react-native';
 import { getAttachmentDisplayTitle } from '@mindwtr/core';
 import type {
   Attachment,
@@ -204,10 +205,15 @@ export function TaskEditViewTab({
                   );
                   applyChecklistUpdate(nextChecklist);
                 }}
+                accessibilityRole="checkbox"
+                accessibilityState={{ checked: item.isCompleted }}
+                accessibilityLabel={item.title}
               >
-                <Text style={[styles.viewChecklistMarker, { color: item.isCompleted ? tc.tint : tc.secondaryText }]}>
-                  {item.isCompleted ? '✓' : '○'}
-                </Text>
+                {item.isCompleted ? (
+                  <CheckSquare size={18} color={tc.tint} strokeWidth={2} />
+                ) : (
+                  <Square size={18} color={tc.secondaryText} strokeWidth={2} />
+                )}
                 <Text style={[styles.viewChecklistText, textDirectionStyle, { color: tc.text }]}>{item.title}</Text>
               </TouchableOpacity>
             ))}

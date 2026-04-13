@@ -3,6 +3,7 @@ import { View, Text, TouchableOpacity, Modal, ScrollView, TextInput, Platform, A
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { X } from 'lucide-react-native';
 
 import { addBreadcrumb, DEFAULT_PROJECT_COLOR, collectTaskTokenUsage, useTaskStore, createAIProvider, safeFormatDate, safeParseDate, resolveAutoTextDirection, type Task, type AIProviderId, type TaskPriority } from '@mindwtr/core';
 
@@ -611,8 +612,11 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
             <TouchableOpacity
               style={[styles.headerActionButton, styles.headerActionButtonLeft]}
               onPress={handleClose}
+              accessibilityRole="button"
+              accessibilityLabel={t('common.close')}
+              hitSlop={8}
             >
-              <Text style={[styles.headerClose, { color: tc.text }]}>✕</Text>
+              <X size={22} color={tc.text} strokeWidth={2} />
             </TouchableOpacity>
             <View style={styles.progressContainer}>
               <Text style={[styles.progressText, { color: tc.secondaryText }]}>
@@ -867,8 +871,11 @@ export function InboxProcessingModal({ visible, onClose }: InboxProcessingModalP
             <TouchableOpacity
               style={[styles.headerActionButton, styles.headerActionButtonLeft]}
               onPress={handleClose}
+              accessibilityRole="button"
+              accessibilityLabel={t('common.close')}
+              hitSlop={8}
             >
-              <Text style={[styles.headerClose, { color: tc.text }]}>✕</Text>
+              <X size={22} color={tc.text} strokeWidth={2} />
             </TouchableOpacity>
             <View style={styles.progressContainer}>
               <Text style={[styles.progressText, { color: tc.secondaryText }]}>

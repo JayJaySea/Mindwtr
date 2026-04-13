@@ -615,7 +615,7 @@ export function WeeklyReviewGuideModal({ onClose }: WeeklyReviewGuideModalProps)
                                                     )}
                                                     aria-pressed={aiSelectedIds.has(suggestion.id)}
                                                 >
-                                                    {aiSelectedIds.has(suggestion.id) ? '✓' : ''}
+                                                    {aiSelectedIds.has(suggestion.id) ? <Check className="h-3 w-3" strokeWidth={3} /> : null}
                                                 </button>
                                             ) : (
                                                 <span className="mt-1 h-4 w-4 rounded border border-border/50" />

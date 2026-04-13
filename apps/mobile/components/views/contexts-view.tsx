@@ -35,6 +35,7 @@ import { TaskEditModal } from '../task-edit-modal';
 import { TokenPickerModal } from '../token-picker-modal';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SwipeableTaskItem } from '../swipeable-task-item';
+import { Tag, CheckCircle2 } from 'lucide-react-native';
 
 type BulkTokenPickerState = {
   field: 'tags' | 'contexts';
@@ -566,7 +567,7 @@ export function ContextsView() {
               <View style={styles.emptyState}>
                 {allContexts.length === 0 ? (
                   <>
-                    <Text style={styles.emptyIcon}>🏷️</Text>
+                    <Tag size={48} color={tc.secondaryText} strokeWidth={1.5} style={styles.emptyIcon} />
                     <Text style={[styles.emptyTitle, { color: tc.text }]}>{t('contexts.noContexts').split('.')[0]}</Text>
                     <Text style={[styles.emptyText, { color: tc.secondaryText }]}>
                       {t('contexts.noContexts')}
@@ -574,7 +575,7 @@ export function ContextsView() {
                   </>
                 ) : (
                   <>
-                    <Text style={styles.emptyIcon}>✓</Text>
+                    <CheckCircle2 size={48} color={tc.secondaryText} strokeWidth={1.5} style={styles.emptyIcon} />
                     <Text style={[styles.emptyTitle, { color: tc.text }]}>{t('contexts.noTasks')}</Text>
                     <Text style={[styles.emptyText, { color: tc.secondaryText }]}>
                       {selectedContexts.length > 0
@@ -756,7 +757,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
   },
   emptyIcon: {
-    fontSize: 48,
     marginBottom: 16,
   },
   emptyTitle: {

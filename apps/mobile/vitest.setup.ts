@@ -137,3 +137,12 @@ vi.mock('@expo/vector-icons', () => {
     Zocial: Icon,
   };
 });
+
+vi.mock('lucide-react-native', () => {
+  return new Proxy(
+    {},
+    {
+      get: () => (props: any) => React.createElement('Icon', props, props.children),
+    },
+  );
+});
