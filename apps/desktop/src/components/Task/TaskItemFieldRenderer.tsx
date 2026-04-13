@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { Maximize2 } from 'lucide-react';
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { Maximize2, X } from 'lucide-react';
 import {
     applyMarkdownToolbarAction,
     buildRRuleString,
@@ -260,6 +260,57 @@ export function TaskItemFieldRenderer({
             descriptionTextareaRef.current?.setSelectionRange(next.selection.start, next.selection.end);
         });
     };
+    const clearText = t('common.clear') === 'common.clear' ? 'Clear' : t('common.clear');
+    const dateInputClassName = 'min-w-0 flex-1 text-xs bg-muted/50 border border-border rounded px-2 py-1 text-foreground';
+    const timeInputClassName = 'w-24 shrink-0 text-xs bg-muted/50 border border-border rounded px-2 py-1 text-foreground';
+    const renderClearButton = (label: string, onClear: () => void, isVisible: boolean) => {
+        if (!isVisible) {
+            return <span aria-hidden="true" className="h-7 w-7 shrink-0" />;
+        }
+
+        return (
+            <button
+                type="button"
+                onClick={onClear}
+                className="shrink-0 rounded p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                aria-label={`${clearText} ${label}`}
+            >
+                <X className="h-4 w-4" />
+            </button>
+        );
+    };
+    const renderDateField = ({
+        label,
+        dateAriaLabel,
+        dateValue,
+        onDateChange,
+        timeInput,
+        onClear,
+        hasValue,
+    }: {
+        label: string;
+        dateAriaLabel: string;
+        dateValue: string;
+        onDateChange: (value: string) => void;
+        timeInput: ReactNode;
+        onClear: () => void;
+        hasValue: boolean;
+    }) => (
+        <div className="flex flex-col gap-1">
+            <label className="text-xs text-muted-foreground font-medium">{label}</label>
+            <div className="flex w-full max-w-[min(22rem,100%)] items-center gap-2">
+                <input
+                    type="date"
+                    aria-label={dateAriaLabel}
+                    value={dateValue}
+                    onChange={(event) => onDateChange(event.target.value)}
+                    className={dateInputClassName}
+                />
+                {timeInput}
+                {renderClearButton(label, onClear, hasValue)}
+            </div>
+        </div>
+    );
 
     switch (fieldId) {
         case 'description':
@@ -444,27 +495,23 @@ export function TaskItemFieldRenderer({
                     const datePart = dateValue || safeFormatDate(new Date(), 'yyyy-MM-dd');
                     setEditStartTime(`${datePart}T${value}`);
                 };
-                return (
-                    <div className="flex flex-col gap-1">
-                        <label className="text-xs text-muted-foreground font-medium">{t('taskEdit.startDateLabel')}</label>
-                        <div className="flex items-center gap-2">
-                            <input
-                                type="date"
-                                aria-label={t('task.aria.startDate')}
-                                value={dateValue}
-                                onChange={(e) => handleDateChange(e.target.value)}
-                                className="text-xs bg-muted/50 border border-border rounded px-2 py-1 text-foreground"
-                            />
-                            <input
-                                type="time"
-                                aria-label={t('task.aria.startTime')}
-                                value={timeValue}
-                                onChange={(e) => handleTimeChange(e.target.value)}
-                                className="text-xs bg-muted/50 border border-border rounded px-2 py-1 text-foreground"
-                            />
-                        </div>
-                    </div>
-                );
+                return renderDateField({
+                    label: t('taskEdit.startDateLabel'),
+                    dateAriaLabel: t('task.aria.startDate'),
+                    dateValue,
+                    onDateChange: handleDateChange,
+                    timeInput: (
+                        <input
+                            type="time"
+                            aria-label={t('task.aria.startTime')}
+                            value={timeValue}
+                            onChange={(event) => handleTimeChange(event.target.value)}
+                            className={timeInputClassName}
+                        />
+                    ),
+                    onClear: () => setEditStartTime(''),
+                    hasValue: Boolean(editStartTime),
+                });
             }
         case 'dueDate':
             {
@@ -493,27 +540,23 @@ export function TaskItemFieldRenderer({
                     const datePart = dateValue || safeFormatDate(new Date(), 'yyyy-MM-dd');
                     setEditDueDate(`${datePart}T${value}`);
                 };
-                return (
-                    <div className="flex flex-col gap-1">
-                        <label className="text-xs text-muted-foreground font-medium">{t('taskEdit.dueDateLabel')}</label>
-                        <div className="flex items-center gap-2">
-                            <input
-                                type="date"
-                                aria-label={t('task.aria.dueDate')}
-                                value={dateValue}
-                                onChange={(e) => handleDateChange(e.target.value)}
-                                className="text-xs bg-muted/50 border border-border rounded px-2 py-1 text-foreground"
-                            />
-                            <input
-                                type="time"
-                                aria-label={t('task.aria.dueTime')}
-                                value={timeValue}
-                                onChange={(e) => handleTimeChange(e.target.value)}
-                                className="text-xs bg-muted/50 border border-border rounded px-2 py-1 text-foreground"
-                            />
-                        </div>
-                    </div>
-                );
+                return renderDateField({
+                    label: t('taskEdit.dueDateLabel'),
+                    dateAriaLabel: t('task.aria.dueDate'),
+                    dateValue,
+                    onDateChange: handleDateChange,
+                    timeInput: (
+                        <input
+                            type="time"
+                            aria-label={t('task.aria.dueTime')}
+                            value={timeValue}
+                            onChange={(event) => handleTimeChange(event.target.value)}
+                            className={timeInputClassName}
+                        />
+                    ),
+                    onClear: () => setEditDueDate(''),
+                    hasValue: Boolean(editDueDate),
+                });
             }
         case 'reviewAt':
             {
@@ -567,38 +610,34 @@ export function TaskItemFieldRenderer({
                     const datePart = dateValue || safeFormatDate(new Date(), 'yyyy-MM-dd');
                     setEditReviewAt(`${datePart}T${value}`);
                 };
-                return (
-                    <div className="flex flex-col gap-1">
-                        <label className="text-xs text-muted-foreground font-medium">{t('taskEdit.reviewDateLabel')}</label>
-                        <div className="flex items-center gap-2">
-                            <input
-                                type="date"
-                                aria-label={t('task.aria.reviewDate')}
-                                value={dateValue}
-                                onChange={(e) => handleDateChange(e.target.value)}
-                                className="text-xs bg-muted/50 border border-border rounded px-2 py-1 text-foreground"
-                            />
-                            <input
-                                type="text"
-                                aria-label={t('task.aria.reviewTime')}
-                                value={reviewTimeDraft}
-                                inputMode="numeric"
-                                placeholder="HH:MM"
-                                onChange={(e) => setReviewTimeDraft(e.target.value)}
-                                onBlur={() => {
-                                    const normalized = normalizeTimeInput(reviewTimeDraft);
-                                    if (normalized === null) {
-                                        setReviewTimeDraft(timeValue);
-                                        return;
-                                    }
-                                    setReviewTimeDraft(normalized);
-                                    handleTimeChange(normalized);
-                                }}
-                                className="text-xs bg-muted/50 border border-border rounded px-2 py-1 text-foreground"
-                            />
-                        </div>
-                    </div>
-                );
+                return renderDateField({
+                    label: t('taskEdit.reviewDateLabel'),
+                    dateAriaLabel: t('task.aria.reviewDate'),
+                    dateValue,
+                    onDateChange: handleDateChange,
+                    timeInput: (
+                        <input
+                            type="text"
+                            aria-label={t('task.aria.reviewTime')}
+                            value={reviewTimeDraft}
+                            inputMode="numeric"
+                            placeholder="HH:MM"
+                            onChange={(event) => setReviewTimeDraft(event.target.value)}
+                            onBlur={() => {
+                                const normalized = normalizeTimeInput(reviewTimeDraft);
+                                if (normalized === null) {
+                                    setReviewTimeDraft(timeValue);
+                                    return;
+                                }
+                                setReviewTimeDraft(normalized);
+                                handleTimeChange(normalized);
+                            }}
+                            className={timeInputClassName}
+                        />
+                    ),
+                    onClear: () => setEditReviewAt(''),
+                    hasValue: Boolean(editReviewAt),
+                });
             }
         case 'status':
             return (
