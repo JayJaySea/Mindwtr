@@ -5,6 +5,7 @@ import {
     isTaskInActiveProject,
     shallow,
     TaskStatus,
+    TaskEnergyLevel,
     getFrequentTaskTokens,
     getUsedTaskTokens,
     buildBulkTaskTokenUpdates,
@@ -203,6 +204,19 @@ export function ContextsView() {
         }
     };
 
+    const handleBatchAssignEnergyLevel = async (energyLevel: TaskEnergyLevel) => {
+        if (selectedIdsArray.length === 0) return;
+        try {
+            await batchUpdateTasks(selectedIdsArray.map((id) => ({
+                id,
+                updates: { energyLevel },
+            })));
+            exitSelectionMode();
+        } catch (error) {
+            reportError('Failed to batch assign energy level in contexts view', error);
+        }
+    };
+
     useEffect(() => {
         setMultiSelectedIds((prev) => {
             const visible = new Set(filteredTasks.map((task) => task.id));
@@ -398,6 +412,7 @@ export function ContextsView() {
                                     onMoveToStatus={handleBatchMove}
                                     onAssignArea={handleBatchAssignArea}
                                     areaOptions={bulkAreaOptions}
+                                    onAssignEnergyLevel={handleBatchAssignEnergyLevel}
                                     onAddTag={handleBatchPickTag}
                                     onRemoveTag={handleBatchRemoveTag}
                                     disableRemoveTag={removableTagOptions.length === 0}
