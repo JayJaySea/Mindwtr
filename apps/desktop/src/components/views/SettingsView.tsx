@@ -52,6 +52,7 @@ import {
   APP_STORE_LISTING_URL,
   checkForUpdates,
   compareVersions,
+  findPortableZipAsset,
   getFlatpakInstallChannel,
   HOMEBREW_CASK_URL,
   normalizeInstallSource,
@@ -981,10 +982,7 @@ export function SettingsView() {
 
     if (updateInfo.platform === "windows") {
       if (installSource === "portable") {
-        const asset = assets.find(
-          (candidate) =>
-            /portable/i.test(candidate.name) && /\.zip$/i.test(candidate.name),
-        );
+        const asset = findPortableZipAsset(assets);
         return asset?.url ? { label: ".zip (portable)", url: asset.url } : null;
       }
       const asset = findAsset([/\.msi$/i, /\.exe$/i]);

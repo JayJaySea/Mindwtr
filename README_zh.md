@@ -262,7 +262,7 @@ scoop install mindwtr
 
 **便携版 ZIP（无需管理员权限）：**
 
-- 从 [GitHub Releases](https://github.com/dongdongbh/Mindwtr/releases) 下载 `*_portable.zip` 资源。
+- 从 [GitHub Releases](https://github.com/dongdongbh/Mindwtr/releases) 下载 `mindwtr_<version>_windows_x64_portable.zip`。
 - 解压到可写目录，并将 `portable.txt` 与 `mindwtr.exe` 放在同一目录。
 - Mindwtr 会将数据保存在解压目录下的 `profile/` 中。
 

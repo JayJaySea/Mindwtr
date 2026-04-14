@@ -273,7 +273,7 @@ scoop install mindwtr
 
 **Portable ZIP (no admin required):**
 
-- Download the `*_portable.zip` asset from [GitHub Releases](https://github.com/dongdongbh/Mindwtr/releases).
+- Download `mindwtr_<version>_windows_x64_portable.zip` from [GitHub Releases](https://github.com/dongdongbh/Mindwtr/releases).
 - Extract it to a writable folder and keep `portable.txt` next to `mindwtr.exe`.
 - Mindwtr stores data under `profile/` in the extracted folder.
 
