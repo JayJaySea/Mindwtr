@@ -1,4 +1,7 @@
 # Dependencies
+claude-compose.yml
+claude-dockerfile
+result
 node_modules/
 .pnp
 .pnp.js
