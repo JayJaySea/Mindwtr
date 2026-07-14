@@ -171,6 +171,12 @@ pkgs.rustPlatform.buildRustPackage {
   doCheck = false;
 
   postInstall = ''
+    # The tauri deb bundler auto-generates usr/share/applications/Mindwtr.desktop
+    # and the cargo-tauri hook installs the whole bundle tree into $out. Together
+    # with the curated entry below, launchers would show Mindwtr twice — keep
+    # only the repo's own desktop file.
+    rm -f $out/share/applications/*.desktop
+
     install -Dm644 apps/desktop/src-tauri/linux/tech.dongdongbh.mindwtr.desktop \
       $out/share/applications/tech.dongdongbh.mindwtr.desktop
     install -Dm644 apps/desktop/src-tauri/linux/Mindwtr.metainfo.xml \
