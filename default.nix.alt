@@ -1,0 +1,221 @@
+# Mindwtr desktop (Tauri v2) with the global cleartext-HTTP warning banner removed.
+#
+# Builds upstream source and applies the banner patch at build time, so no fork
+# repository is needed. Unlike a pinned build, this tracks the LATEST release,
+# following the same principle as ./default.nix — so it is likewise IMPURE.
+#
+# How "latest" is achieved without any manually pinned hashes:
+#   * source     — the newest release tarball is discovered via the GitHub API
+#                  and fetched with `builtins.fetchTarball` (unpinned).
+#   * cargo deps — vendored from the fetched source's own Cargo.lock. The crate
+#                  hashes come from the lockfile itself; git deps resolve via
+#                  builtins.fetchGit. Nothing to re-pin on a version bump.
+#   * bun deps   — installed over the network inside a `__noChroot` derivation,
+#                  so there is no fixed-output hash to maintain.
+#
+# CONSEQUENCES — read before building:
+#   1. Impure eval. Build with plain `nix-build`; a flake / `--pure-eval`
+#      context rejects the unhashed `builtins.fetchTarball`.
+#   2. The bun step needs a RELAXED SANDBOX for `__noChroot` to grant network
+#      access. On NixOS set `nix.settings.sandbox = "relaxed";` (or pass
+#      `--option sandbox relaxed`). With a strict sandbox the bun install fails
+#      with network errors.
+#   3. Not reproducible: source, crates, and node deps all re-resolve to
+#      whatever "latest" currently is.
+#   4. THE PATCH IS VERSION-FRAGILE. It was written against apps/desktop/src/
+#      components/Layout.tsx around commit 300d2d3. If upstream reworks that
+#      file the `patch` step will FAIL LOUDLY (that is intentional — a silently
+#      skipped patch would ship the banner). When that happens, refresh the
+#      hunk below against the current source.
+#
+# For a reproducible pinned build instead, restore fetchFromGitHub + srcHash,
+# a `cargoHash`, and the fixed-output `nodeModulesHash` (see git history).
+
+{
+  pkgs ? import <nixpkgs> { },
+}:
+
+let
+  inherit (pkgs) lib;
+
+  pname = "mindwtr";
+
+  owner = "dongdongbh";
+  repo = "Mindwtr";
+
+  # Latest release metadata, fetched (unpinned) at eval time.
+  release = builtins.fromJSON (builtins.readFile (builtins.fetchurl
+    "https://api.github.com/repos/${owner}/${repo}/releases/latest"));
+
+  # Tag looks like "v1.1.0"; mark the build as patched so it is distinguishable.
+  version = "${lib.removePrefix "v" release.tag_name}-nocleartextbanner";
+
+  # Source tree of the latest release (impure, re-fetched each new release).
+  # fetchTarball strips GitHub's top-level dir, so `src` is the repo root.
+  src = builtins.fetchTarball release.tarball_url;
+
+  # Neuters refreshCleartextSyncWarning() so the amber banner never renders.
+  # setCleartextSyncWarning stays referenced, so tsc's noUnusedLocals passes.
+  disableCleartextBannerPatch = pkgs.writeText "disable-cleartext-banner.patch" ''
+    --- a/apps/desktop/src/components/Layout.tsx
+    +++ b/apps/desktop/src/components/Layout.tsx
+    @@ -453,32 +453,10 @@ export function Layout({ children, currentView, onViewChange, onOpenSyncSettings
+         }, []);
+
+         const refreshCleartextSyncWarning = useCallback(async () => {
+    -        try {
+    -            const backend = await SyncService.getSyncBackend();
+    -            if (backend === 'webdav') {
+    -                const config = await SyncService.getWebDavConfig({ silent: true });
+    -                if (config.url.trim().toLowerCase().startsWith('http://')) {
+    -                    setCleartextSyncWarning(tFallback(t,
+    -                        'settings.cleartextSyncWarningWebdav',
+    -                        'WebDAV sync is using HTTP. Only local or private-network endpoints are allowed; data is not encrypted.'
+    -                    ));
+    -                    return;
+    -                }
+    -            } else if (backend === 'cloud' && await SyncService.getCloudProvider() === 'selfhosted') {
+    -                const config = await SyncService.getCloudConfig({ silent: true });
+    -                if (config.url.trim().toLowerCase().startsWith('http://')) {
+    -                    setCleartextSyncWarning(tFallback(t,
+    -                        'settings.cleartextSyncWarningCloud',
+    -                        'Self-hosted sync is using HTTP. Only local or private-network endpoints are allowed; data is not encrypted.'
+    -                    ));
+    -                    return;
+    -                }
+    -            }
+    -            setCleartextSyncWarning(null);
+    -        } catch {
+    -            setCleartextSyncWarning(null);
+    -        }
+    -    }, [t]);
+    +        // Cleartext HTTP to private/local endpoints is an intentional, supported
+    +        // configuration in this build; suppress the global warning banner.
+    +        setCleartextSyncWarning(null);
+    +    }, []);
+
+         useEffect(() => {
+             void refreshCleartextSyncWarning();
+  '';
+
+  # Bun workspace dependencies, installed over the network. This is a normal
+  # (non-fixed-output) derivation that opts out of the sandbox via __noChroot,
+  # so it needs no pinned hash — at the cost of requiring a relaxed sandbox
+  # (see the header). Upstream pins bun in .bun-version; nixpkgs' bun is usually
+  # close enough for --frozen-lockfile.
+  nodeModules = pkgs.stdenv.mkDerivation {
+    pname = "${pname}-node-modules";
+    inherit version src;
+
+    nativeBuildInputs = [
+      pkgs.bun
+      pkgs.cacert
+    ];
+
+    dontConfigure = true;
+    dontFixup = true;
+
+    # Grant network access without a fixed-output hash (needs relaxed sandbox).
+    __noChroot = true;
+
+    buildPhase = ''
+      runHook preBuild
+      export HOME=$TMPDIR
+      export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+      bun install --frozen-lockfile --ignore-scripts --no-progress
+      runHook postBuild
+    '';
+
+    installPhase = ''
+      runHook preInstall
+      mkdir -p $out
+      # Copy every node_modules dir (root hoist + any nested workspace ones),
+      # preserving the relative workspace symlinks (e.g. @mindwtr/core).
+      for d in $(find . -type d -name node_modules -prune); do
+        mkdir -p "$out/$(dirname "$d")"
+        cp -a "$d" "$out/$d"
+      done
+      # Strip caches that would make the output nondeterministic.
+      find $out -type d -name .cache -prune -exec rm -rf {} +
+      runHook postInstall
+    '';
+  };
+in
+pkgs.rustPlatform.buildRustPackage {
+  inherit pname version src;
+
+  # Vendor crates from the fetched source's own lockfile — no manual cargoHash.
+  # Crate hashes come from Cargo.lock; git deps resolve via builtins.fetchGit
+  # (kept impure to match the "latest" principle above).
+  cargoLock = {
+    lockFile = "${src}/apps/desktop/src-tauri/Cargo.lock";
+    allowBuiltinFetchGit = true;
+  };
+
+  patches = [ disableCleartextBannerPatch ];
+
+  cargoRoot = "apps/desktop/src-tauri";
+  buildAndTestSubdir = "apps/desktop/src-tauri";
+
+  nativeBuildInputs = [
+    pkgs.cargo-tauri.hook
+    pkgs.bun
+    pkgs.pkg-config
+    pkgs.wrapGAppsHook3
+  ];
+
+  buildInputs = [
+    pkgs.glib
+    pkgs.gtk3
+    pkgs.libsoup_3
+    pkgs.openssl
+    pkgs.webkitgtk_4_1
+    pkgs.glib-networking # TLS for the webview / HTTPS endpoints
+    pkgs.libayatana-appindicator # tray icon
+  ];
+
+  # Restore the bun workspace before the tauri hook runs beforeBuildCommand
+  # ("bun run build:vite" inside apps/desktop). Writable copy: vite wants to
+  # create node_modules/.vite, and tsc/vite bins resolve from the root hoist.
+  preBuild = ''
+    for d in $(cd ${nodeModules} && find . -type d -name node_modules -prune); do
+      mkdir -p "$(dirname "$d")"
+      cp -a ${nodeModules}/"$d" "$d"
+    done
+    chmod -R u+w node_modules
+    export HOME=$TMPDIR
+  '';
+
+  # Rust tests need a display / are not the point of this build.
+  doCheck = false;
+
+  postInstall = ''
+    install -Dm644 apps/desktop/src-tauri/linux/tech.dongdongbh.mindwtr.desktop \
+      $out/share/applications/tech.dongdongbh.mindwtr.desktop
+    install -Dm644 apps/desktop/src-tauri/linux/Mindwtr.metainfo.xml \
+      $out/share/metainfo/tech.dongdongbh.mindwtr.metainfo.xml
+    install -Dm644 apps/desktop/src-tauri/icons/32x32.png \
+      $out/share/icons/hicolor/32x32/apps/tech.dongdongbh.mindwtr.png
+    install -Dm644 apps/desktop/src-tauri/icons/64x64.png \
+      $out/share/icons/hicolor/64x64/apps/tech.dongdongbh.mindwtr.png
+    install -Dm644 apps/desktop/src-tauri/icons/128x128.png \
+      $out/share/icons/hicolor/128x128/apps/tech.dongdongbh.mindwtr.png
+    install -Dm644 "apps/desktop/src-tauri/icons/128x128@2x.png" \
+      $out/share/icons/hicolor/256x256/apps/tech.dongdongbh.mindwtr.png
+  '';
+
+  # The appindicator library is dlopen()ed at runtime for the tray icon.
+  preFixup = ''
+    gappsWrapperArgs+=(
+      --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.libayatana-appindicator ]}
+    )
+  '';
+
+  meta = {
+    description = "Local-first GTD app (patched: no global cleartext-HTTP warning banner)";
+    homepage = "https://github.com/dongdongbh/Mindwtr";
+    license = lib.licenses.agpl3Only;
+    mainProgram = "mindwtr";
+    platforms = lib.platforms.linux;
+  };
+}

@@ -453,32 +453,10 @@ export function Layout({ children, currentView, onViewChange, onOpenSyncSettings
     }, []);
 
     const refreshCleartextSyncWarning = useCallback(async () => {
-        try {
-            const backend = await SyncService.getSyncBackend();
-            if (backend === 'webdav') {
-                const config = await SyncService.getWebDavConfig({ silent: true });
-                if (config.url.trim().toLowerCase().startsWith('http://')) {
-                    setCleartextSyncWarning(tFallback(t,
-                        'settings.cleartextSyncWarningWebdav',
-                        'WebDAV sync is using HTTP. Only local or private-network endpoints are allowed; data is not encrypted.'
-                    ));
-                    return;
-                }
-            } else if (backend === 'cloud' && await SyncService.getCloudProvider() === 'selfhosted') {
-                const config = await SyncService.getCloudConfig({ silent: true });
-                if (config.url.trim().toLowerCase().startsWith('http://')) {
-                    setCleartextSyncWarning(tFallback(t,
-                        'settings.cleartextSyncWarningCloud',
-                        'Self-hosted sync is using HTTP. Only local or private-network endpoints are allowed; data is not encrypted.'
-                    ));
-                    return;
-                }
-            }
-            setCleartextSyncWarning(null);
-        } catch {
-            setCleartextSyncWarning(null);
-        }
-    }, [t]);
+        // Cleartext HTTP to private/local endpoints is an intentional, supported
+        // configuration in this build; suppress the global warning banner.
+        setCleartextSyncWarning(null);
+    }, []);
 
     useEffect(() => {
         void refreshCleartextSyncWarning();
