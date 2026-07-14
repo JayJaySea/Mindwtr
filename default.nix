@@ -8,18 +8,40 @@
 # reproducibly inside the Nix sandbox without network access. The AUR package
 # (see ./aur/PKGBUILD) takes the same approach — install the prebuilt `.deb`.
 #
-# If upstream adds an x86_64 AppImage or arm64 build, extend `sources` below.
+# This expression tracks the LATEST release instead of a pinned version. That
+# makes it an IMPURE derivation: it queries the GitHub API and fetches the
+# `.deb` without a pinned hash at evaluation time, so it re-resolves whenever
+# upstream publishes a new release. Consequences:
+#   * Build with plain `nix-build` (impure eval is the default). A flake or any
+#     `--pure-eval` context will REJECT the unhashed `builtins.fetchurl` calls.
+#   * The result is not reproducible and is not cached against a fixed hash —
+#     the API is hit on every evaluation.
+# If you want a reproducible pin again, replace the `release`/`src` lets with a
+# `pkgs.fetchurl { url = ...; hash = ...; }` and a fixed `version`.
 
 let
-  inherit (pkgs) lib stdenv fetchurl autoPatchelfHook dpkg wrapGAppsHook3;
+  inherit (pkgs) lib stdenv autoPatchelfHook dpkg wrapGAppsHook3;
 
   pname = "mindwtr";
-  version = "0.8.3";
 
-  src = fetchurl {
-    url = "https://github.com/dongdongbh/Mindwtr/releases/download/v${version}/mindwtr_${version}_amd64.deb";
-    hash = "sha256-UK/ErvKpdBYjAJfY9s2Dfx3uHOIQQb8VDCqBAh43HIU=";
-  };
+  owner = "dongdongbh";
+  repo = "Mindwtr";
+
+  # Latest release metadata, fetched (unpinned) at eval time.
+  release = builtins.fromJSON (builtins.readFile (builtins.fetchurl
+    "https://api.github.com/repos/${owner}/${repo}/releases/latest"));
+
+  # Tag looks like "v1.1.0"; the package version drops the leading "v".
+  version = lib.removePrefix "v" release.tag_name;
+
+  # Pick the amd64 .deb asset out of the release's asset list.
+  asset = lib.findFirst
+    (a: lib.hasSuffix "_amd64.deb" a.name)
+    (throw "${repo} release ${release.tag_name} has no amd64 .deb asset")
+    release.assets;
+
+  # Unpinned fetch of the chosen asset (impure, re-fetched each new release).
+  src = builtins.fetchurl asset.browser_download_url;
 in
 stdenv.mkDerivation {
   inherit pname version src;
