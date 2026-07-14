@@ -1,15 +1,24 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, Alert, SectionList, Dimensions, Platform } from 'react-native';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { View, Text, TextInput, TouchableOpacity, FlatList, Dimensions, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { AREA_PRESET_COLORS, Attachment, DEFAULT_PROJECT_COLOR, generateUUID, normalizeLinkAttachmentInput, Project, resolveAutoTextDirection, Task, type MarkdownSelection, type MarkdownToolbarActionId, type MarkdownToolbarResult, applyMarkdownToolbarAction, continueMarkdownOnTextChange, useTaskStore, validateAttachmentForUpload } from '@mindwtr/core';
-import * as DocumentPicker from 'expo-document-picker';
-import * as Linking from 'expo-linking';
-import * as Sharing from 'expo-sharing';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { AREA_PRESET_COLORS, Attachment, DEFAULT_PROJECT_COLOR, Project, shallow, Task, type Section, type TaskSortBy, useTaskStore } from '@mindwtr/core';
+import { useLocalSearchParams, usePathname, useRouter } from 'expo-router';
+import { ChevronDown, ChevronRight, Plus } from 'lucide-react-native';
 
-import { projectsScreenStyles as styles } from '@/components/projects-screen/projects-screen.styles';
 import {
+  DEFAULT_PROJECT_LIST_VIEW_STATE,
+  PROJECT_LIST_VIEW_STATE_STORAGE_KEY,
+  type ProjectListViewState,
+  compactCollapsedAreas,
+  readProjectListViewState,
+  serializeProjectListViewState,
+} from '@/lib/view-state/project-list-view-state';
+import { projectsScreenStyles as styles } from '@/components/projects-screen/projects-screen.styles';
+import { persistLastRoute, setSessionRestoreOpenProject } from '@/lib/session-restore';
+import {
+  buildProjectQuickCaptureReturnTo,
   formatProjectDate,
   normalizeProjectTag,
   resolveAttachmentValidationMessage,
@@ -19,27 +28,90 @@ import { ProjectAreaModals } from '@/components/projects-screen/ProjectAreaModal
 import { ProjectDetailModal } from '@/components/projects-screen/ProjectDetailModal';
 import { ProjectImagePreviewModal, ProjectLinkModal, ProjectTagPickerModal } from '@/components/projects-screen/ProjectOverlayModals';
 import { ProjectRow } from '@/components/projects-screen/ProjectRow';
+import {
+  buildProjectListRows,
+  type ProjectListRow,
+} from '@/components/projects-screen/project-list-model';
+import { useProjectAttachments } from '@/components/projects-screen/use-project-attachments';
+import { useProjectNotesEditor } from '@/components/projects-screen/use-project-notes-editor';
 import { TaskEditModal } from '@/components/task-edit-modal';
-import { useProjectFiltering, type ProjectSectionItem } from '@/hooks/use-project-filtering';
+import type { TaskEditTab } from '@/components/task-edit/use-task-edit-state';
+import { useProjectFiltering } from '@/hooks/use-project-filtering';
 import { useMobileAreaFilter } from '@/hooks/use-mobile-area-filter';
+import { useQuickCapture } from '../../contexts/quick-capture-context';
 import { useLanguage } from '../../contexts/language-context';
 import { useToast } from '../../contexts/toast-context';
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
 import { ListSectionHeader, defaultListContentStyle } from '@/components/list-layout';
-import { ensureAttachmentAvailable } from '../../lib/attachment-sync';
 import { logError, logWarn } from '../../lib/app-log';
-import { AREA_FILTER_ALL, AREA_FILTER_NONE } from '@/lib/area-filter';
+import { AREA_FILTER_ALL, AREA_FILTER_NONE } from '@mindwtr/core';
 import { openContextsScreen, openProjectScreen } from '@/lib/task-meta-navigation';
+import { CompactText, CompactTextInput } from '@/components/compact-text';
 
-const selectionsEqual = (left: MarkdownSelection, right: MarkdownSelection) => (
-  left.start === right.start && left.end === right.end
-);
+type ProjectTaskSortBy = TaskSortBy;
+const EMPTY_PROJECT_TASKS: Task[] = [];
+function resolveTaskRouteTab(value?: string | string[]): TaskEditTab {
+  const routeValue = Array.isArray(value) ? value[0] : value;
+  return routeValue === 'task' ? 'task' : 'view';
+}
 
 export default function ProjectsScreen() {
-  const { projects, tasks, addProject, updateProject, deleteProject, toggleProjectFocus, addArea, updateArea, deleteArea, reorderAreas, updateTask, setHighlightTask } = useTaskStore();
+  const {
+    projects,
+    tasks,
+    sections,
+    addProject,
+    updateProject,
+    deleteProject,
+    restoreProject,
+    duplicateProject,
+    addSection,
+    updateSection,
+    deleteSection,
+    reorderSections,
+    toggleProjectFocus,
+    addArea,
+    updateArea,
+    deleteArea,
+    reorderAreas,
+    updateTask,
+    setHighlightTask,
+    settings,
+    getDerivedState,
+  } = useTaskStore((state) => ({
+    projects: state.projects,
+    tasks: state.tasks,
+    sections: state.sections,
+    addProject: state.addProject,
+    updateProject: state.updateProject,
+    deleteProject: state.deleteProject,
+    restoreProject: state.restoreProject,
+    duplicateProject: state.duplicateProject,
+    addSection: state.addSection,
+    updateSection: state.updateSection,
+    deleteSection: state.deleteSection,
+    reorderSections: state.reorderSections,
+    toggleProjectFocus: state.toggleProjectFocus,
+    addArea: state.addArea,
+    updateArea: state.updateArea,
+    deleteArea: state.deleteArea,
+    reorderAreas: state.reorderAreas,
+    updateTask: state.updateTask,
+    setHighlightTask: state.setHighlightTask,
+    settings: state.settings,
+    getDerivedState: state.getDerivedState,
+  }), shallow);
   const { t, language } = useLanguage();
   const { showToast } = useToast();
+  const { openQuickCapture } = useQuickCapture();
   const tc = useThemeColors();
+  const filledButton = useFilledButtonColors();
+  const {
+    focusedProjectCount,
+    projectTaskSummaryById,
+    tasksByProjectId,
+  } = getDerivedState();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const statusPalette: Record<Project['status'], { text: string; bg: string; border: string }> = {
@@ -49,56 +121,96 @@ export default function ProjectsScreen() {
     archived: { text: tc.secondaryText, bg: tc.filterBg, border: tc.border },
   };
   const [newProjectTitle, setNewProjectTitle] = useState('');
+  const [newProjectAreaId, setNewProjectAreaId] = useState('');
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [notesExpanded, setNotesExpanded] = useState(false);
-  const [showNotesPreview, setShowNotesPreview] = useState(false);
-  const [notesFullscreen, setNotesFullscreen] = useState(false);
+  const [projectTaskSortBy, setProjectTaskSortBy] = useState<ProjectTaskSortBy>('default');
   const [showProjectMeta, setShowProjectMeta] = useState(false);
   const [showDueDatePicker, setShowDueDatePicker] = useState(false);
   const [showReviewPicker, setShowReviewPicker] = useState(false);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
-  const [linkModalVisible, setLinkModalVisible] = useState(false);
-  const [imagePreviewAttachment, setImagePreviewAttachment] = useState<Attachment | null>(null);
-  const [linkInput, setLinkInput] = useState('');
   const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [taskModalDefaultTab, setTaskModalDefaultTab] = useState<TaskEditTab>('view');
+  const [taskModalOpenKey, setTaskModalOpenKey] = useState('manual');
   const [showAreaPicker, setShowAreaPicker] = useState(false);
   const [showAreaManager, setShowAreaManager] = useState(false);
   const [newAreaName, setNewAreaName] = useState('');
   const [newAreaColor, setNewAreaColor] = useState('#3b82f6');
   const [expandedAreaColorId, setExpandedAreaColorId] = useState<string | null>(null);
-  const { projectId, taskId, openToken } = useLocalSearchParams<{ projectId?: string; taskId?: string; openToken?: string }>();
+  const { projectId, taskId, openToken, taskTab } = useLocalSearchParams<{ projectId?: string; taskId?: string; openToken?: string; taskTab?: string }>();
   const lastOpenedTaskKeyRef = useRef<string | null>(null);
-  const selectedProjectNotesRef = useRef('');
+  const handledRouteProjectKeyRef = useRef<string | null>(null);
+  const pathname = usePathname();
+
+  // The open project lives in component state, not the route — mirror it into
+  // the session snapshot so an interrupted session reopens the project, not
+  // just the projects list (#842). Re-persist immediately: an OS kill can
+  // arrive without another navigation or background event.
+  useEffect(() => {
+    setSessionRestoreOpenProject(selectedProject?.id ?? null);
+    void persistLastRoute(pathname);
+  }, [pathname, selectedProject?.id]);
+  useEffect(() => () => {
+    setSessionRestoreOpenProject(null);
+  }, []);
   const ALL_TAGS = '__all__';
   const NO_TAGS = '__none__';
   const ALL_AREAS = AREA_FILTER_ALL;
   const NO_AREA = AREA_FILTER_NONE;
   const [selectedTagFilter, setSelectedTagFilter] = useState(ALL_TAGS);
   const [showTagPicker, setShowTagPicker] = useState(false);
+  const [collapsedAreas, setCollapsedAreas] = useState<Record<string, boolean>>({});
+  const [projectListViewStateHydrated, setProjectListViewStateHydrated] = useState(false);
+  const [showDeferredProjects, setShowDeferredProjects] = useState(false);
+  const [showArchivedProjects, setShowArchivedProjects] = useState(false);
+  const [showCompletedProjectTasks, setShowCompletedProjectTasks] = useState(false);
+  const projectListViewStateRef = useRef<ProjectListViewState>(DEFAULT_PROJECT_LIST_VIEW_STATE);
+  const projectListViewStateTouchedRef = useRef(false);
   const {
     areaById,
     resolvedAreaFilter: selectedAreaFilter,
     sortedAreas,
   } = useMobileAreaFilter();
 
+  useEffect(() => {
+    setNewProjectAreaId(
+      selectedAreaFilter !== ALL_AREAS && selectedAreaFilter !== NO_AREA ? selectedAreaFilter : ''
+    );
+  }, [selectedAreaFilter, ALL_AREAS, NO_AREA]);
+
   const logProjectError = useCallback((message: string, error?: unknown) => {
     if (!error) return;
     void logError(error, { scope: 'project', extra: { message } });
   }, []);
+  const applyProjectListViewState = useCallback((nextState: ProjectListViewState) => {
+    const compactState = {
+      ...nextState,
+      collapsedAreas: compactCollapsedAreas(nextState.collapsedAreas),
+    };
+    projectListViewStateRef.current = compactState;
+    setCollapsedAreas(compactState.collapsedAreas);
+    setShowArchivedProjects(compactState.showArchivedProjects);
+    setShowDeferredProjects(compactState.showDeferredProjects);
+  }, []);
+  const persistProjectListViewState = useCallback((nextState: ProjectListViewState) => {
+    const compactState = {
+      ...nextState,
+      collapsedAreas: compactCollapsedAreas(nextState.collapsedAreas),
+    };
+    projectListViewStateRef.current = compactState;
+    AsyncStorage.setItem(PROJECT_LIST_VIEW_STATE_STORAGE_KEY, serializeProjectListViewState(compactState))
+      .catch(() => undefined);
+  }, []);
+  const resolveText = useCallback((key: string, fallback: string) => {
+    const value = t(key);
+    return value && value !== key ? value : fallback;
+  }, [t]);
   const [showTagFilter, setShowTagFilter] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
-  const selectedProjectNotesInputRef = useRef<TextInput | null>(null);
-  const selectedProjectNotesUndoRef = useRef<Array<{ value: string; selection: MarkdownSelection }>>([]);
-  const [selectedProjectNotesUndoDepth, setSelectedProjectNotesUndoDepth] = useState(0);
-  const [isSelectedProjectNotesFocused, setIsSelectedProjectNotesFocused] = useState(false);
-  const [selectedProjectNotesSelection, setSelectedProjectNotesSelection] = useState({ start: 0, end: 0 });
-  const selectedProjectNotesSelectionRef = useRef<MarkdownSelection>({ start: 0, end: 0 });
-  const pendingSelectedProjectNotesSelectionRef = useRef<MarkdownSelection | null>(null);
   const windowHeight = Dimensions.get('window').height;
   const pickerCardMaxHeight = Math.min(windowHeight * 0.8, 560);
   const areaListMaxHeight = Math.min(windowHeight * 0.4, 280);
   const areaManagerListMaxHeight = Math.min(windowHeight * 0.45, 320);
-  const overlayModalPresentation = Platform.OS === 'ios' ? 'overFullScreen' : 'fullScreen';
+  const overlayModalPresentation = 'overFullScreen' as const;
 
   const colors = AREA_PRESET_COLORS;
   const colorDisplayByHex: Record<string, { nameKey: string; swatch: string }> = {
@@ -112,7 +224,9 @@ export default function ProjectsScreen() {
   const {
     areaUsage,
     focusedCount,
-    groupedProjects,
+    groupedActiveProjects,
+    groupedDeferredProjects,
+    groupedArchivedProjects,
     projectTagOptions,
     tagFilterOptions,
   } = useProjectFiltering({
@@ -124,52 +238,180 @@ export default function ProjectsScreen() {
     selectedAreaFilter,
     allTagsValue: ALL_TAGS,
     noTagsValue: NO_TAGS,
+    focusedProjectCount,
     t,
   });
+  const {
+    notesExpanded,
+    setNotesExpanded,
+    showNotesPreview,
+    setShowNotesPreview,
+    notesFullscreen,
+    setNotesFullscreen,
+    selectedProjectNotes,
+    selectedProjectNotesDirection,
+    selectedProjectNotesTextDirectionStyle,
+    selectedProjectNotesInputRef,
+    selectedProjectNotesUndoDepth,
+    isSelectedProjectNotesFocused,
+    setIsSelectedProjectNotesFocused,
+    selectedProjectNotesSelection,
+    commitSelectedProjectNotes,
+    handleSelectedProjectNotesApplyAction,
+    handleSelectedProjectNotesApplyAutocomplete,
+    handleSelectedProjectNotesChange,
+    handleSelectedProjectNotesSelectionChange,
+    handleSelectedProjectNotesUndo,
+    resetProjectNotesUi,
+  } = useProjectNotesEditor({
+    selectedProject,
+    setSelectedProject,
+    updateProject,
+    language,
+  });
+
+  useEffect(() => {
+    let active = true;
+    AsyncStorage.getItem(PROJECT_LIST_VIEW_STATE_STORAGE_KEY)
+      .then((raw) => {
+        if (!active) return;
+        if (!projectListViewStateTouchedRef.current) {
+          const persisted = readProjectListViewState(raw);
+          if (persisted) {
+            applyProjectListViewState(persisted);
+          }
+        }
+        setProjectListViewStateHydrated(true);
+      })
+      .catch(() => {
+        if (active) {
+          setProjectListViewStateHydrated(true);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [applyProjectListViewState]);
+  const {
+    linkModalVisible,
+    setLinkModalVisible,
+    imagePreviewAttachment,
+    setImagePreviewAttachment,
+    linkInput,
+    setLinkInput,
+    openAttachment,
+    downloadAttachment,
+    addProjectFileAttachment,
+    confirmAddProjectLink,
+    removeProjectAttachment,
+    resetProjectAttachmentUi,
+  } = useProjectAttachments({
+    selectedProject,
+    setSelectedProject,
+    updateProject,
+    t,
+    logProjectError,
+  });
+
+  const projectListRows = useMemo(() => {
+    if (!projectListViewStateHydrated) return [];
+    return buildProjectListRows({
+      areaById,
+      collapsedAreas,
+      groupedActiveProjects,
+      groupedArchivedProjects,
+      groupedDeferredProjects,
+      showArchivedProjects,
+      showDeferredProjects,
+      t,
+    });
+  }, [
+    areaById,
+    collapsedAreas,
+    groupedActiveProjects,
+    groupedArchivedProjects,
+    groupedDeferredProjects,
+    projectListViewStateHydrated,
+    showArchivedProjects,
+    showDeferredProjects,
+    t,
+  ]);
+  const projectListEmptyLabel = projectListViewStateHydrated
+    ? t('projects.empty')
+    : resolveText('common.loading', 'Loading...');
+
+  // Memos key off the id so a project object refresh with the same id reuses results.
+  const selectedProjectIdForLists = selectedProject?.id ?? null;
+  const selectedProjectTasks = useMemo(
+    () => (selectedProjectIdForLists ? tasksByProjectId.get(selectedProjectIdForLists) ?? EMPTY_PROJECT_TASKS : EMPTY_PROJECT_TASKS),
+    [tasksByProjectId, selectedProjectIdForLists]
+  );
+  const selectedProjectSections = useMemo<Section[]>(() => {
+    if (!selectedProjectIdForLists) return [];
+    return sections
+      .filter((section) => section.projectId === selectedProjectIdForLists && !section.deletedAt)
+      .sort((a, b) => {
+        const aOrder = Number.isFinite(a.order) ? a.order : 0;
+        const bOrder = Number.isFinite(b.order) ? b.order : 0;
+        if (aOrder !== bOrder) return aOrder - bOrder;
+        return a.title.localeCompare(b.title);
+      });
+  }, [sections, selectedProjectIdForLists]);
 
   const openProject = useCallback((project: Project) => {
     setSelectedProject(project);
-    setNotesExpanded(false);
-    setShowNotesPreview(false);
-    setNotesFullscreen(false);
+    setProjectTaskSortBy('default');
+    resetProjectNotesUi();
     setShowProjectMeta(false);
     setShowDueDatePicker(false);
     setShowReviewPicker(false);
     setShowStatusMenu(false);
-    setLinkModalVisible(false);
-    setLinkInput('');
-  }, []);
+    resetProjectAttachmentUi();
+  }, [resetProjectAttachmentUi, resetProjectNotesUi]);
+
+  const openProjectQuickAdd = useCallback((projectToAddTo: Project) => {
+    openQuickCapture({
+      initialProps: {
+        projectId: projectToAddTo.id,
+        status: 'next',
+      },
+      returnTo: buildProjectQuickCaptureReturnTo(projectToAddTo.id),
+    });
+  }, [openQuickCapture]);
 
   useEffect(() => {
     if (!projectId || typeof projectId !== 'string') return;
+    // Handle each open request once per screen instance — re-running on
+    // unrelated store updates would reset the open project's sort and pickers,
+    // and would reopen a project the user just closed. A fresh openToken marks
+    // a new explicit request, so tapping the same project again still opens it.
+    const openKey = `${projectId}:${typeof openToken === 'string' ? openToken : ''}`;
+    if (handledRouteProjectKeyRef.current === openKey) return;
     const project = projects.find((item) => item.id === projectId && !item.deletedAt);
     if (project) {
-      openProject(project);
+      handledRouteProjectKeyRef.current = openKey;
+      // Tokenless re-visits (capture returnTo, session restore) must not reset
+      // the detail state of a project that is already open.
+      if (selectedProject?.id !== project.id) {
+        openProject(project);
+      }
     }
-  }, [projectId, projects, openProject]);
+  }, [projectId, openToken, projects, openProject, selectedProject?.id]);
 
   useEffect(() => {
     if (!taskId || typeof taskId !== 'string') return;
     if (!selectedProject || selectedProject.id !== projectId) return;
-    const openKey = `${taskId}:${typeof openToken === 'string' ? openToken : ''}`;
+    const nextTaskTab = resolveTaskRouteTab(taskTab);
+    const openKey = `${taskId}:${typeof openToken === 'string' ? openToken : ''}:${nextTaskTab}`;
     if (lastOpenedTaskKeyRef.current === openKey) return;
     const task = tasks.find((item) => item.id === taskId && !item.deletedAt);
     if (!task || task.projectId !== selectedProject.id) return;
     lastOpenedTaskKeyRef.current = openKey;
     setHighlightTask(task.id);
+    setTaskModalDefaultTab(nextTaskTab);
+    setTaskModalOpenKey(`route:${openKey}`);
     setEditingTask(task);
-  }, [openToken, taskId, projectId, selectedProject, tasks, setHighlightTask]);
-
-  useEffect(() => {
-    selectedProjectNotesRef.current = selectedProject?.supportNotes || '';
-    const selectionEnd = (selectedProject?.supportNotes || '').length;
-    selectedProjectNotesUndoRef.current = [];
-    setSelectedProjectNotesUndoDepth(0);
-    setIsSelectedProjectNotesFocused(false);
-    pendingSelectedProjectNotesSelectionRef.current = null;
-    selectedProjectNotesSelectionRef.current = { start: selectionEnd, end: selectionEnd };
-    setSelectedProjectNotesSelection({ start: selectionEnd, end: selectionEnd });
-  }, [selectedProject]);
+  }, [openToken, taskId, projectId, selectedProject, taskTab, tasks, setHighlightTask]);
 
   const sortAreasByName = () => {
     const reordered = [...sortedAreas]
@@ -203,171 +445,205 @@ export default function ProjectsScreen() {
     setSelectedProject({ ...selectedProject, tagIds: next });
   };
 
-  const renderSectionItem = ({ item }: { item: ProjectSectionItem }) => {
+  const handleDeleteProject = useCallback((projectIdToDelete: string) => {
+    void Promise.resolve(deleteProject(projectIdToDelete))
+      .then(() => {
+        if (selectedProject?.id === projectIdToDelete) {
+          setSelectedProject(null);
+        }
+        showToast({
+          title: resolveText('common.notice', 'Notice'),
+          message: resolveText('projects.deleted', 'Project moved to Trash'),
+          tone: 'info',
+          actionLabel: resolveText('common.undo', 'Undo'),
+          onAction: () => {
+            void Promise.resolve(restoreProject(projectIdToDelete))
+              .catch((error) => {
+                logProjectError('Failed to restore project', error);
+                showToast({
+                  title: resolveText('common.notice', 'Notice'),
+                  message: resolveText('projects.restoreFailed', 'Failed to restore project'),
+                  tone: 'error',
+                });
+              });
+          },
+          durationMs: 5200,
+        });
+      })
+      .catch((error) => {
+        logProjectError('Failed to delete project', error);
+        showToast({
+          title: resolveText('common.notice', 'Notice'),
+          message: resolveText('projects.deleteFailed', 'Failed to delete project'),
+          tone: 'error',
+        });
+      });
+  }, [
+    deleteProject,
+    logProjectError,
+    resolveText,
+    restoreProject,
+    selectedProject?.id,
+    showToast,
+  ]);
+
+  const handleDuplicateProject = useCallback((projectIdToDuplicate: string) => {
+    void Promise.resolve(duplicateProject(projectIdToDuplicate))
+      .then((createdProject) => {
+        if (!createdProject) {
+          showToast({
+            title: resolveText('common.notice', 'Notice'),
+            message: resolveText('projects.duplicateFailed', 'Failed to duplicate project'),
+            tone: 'error',
+          });
+          return;
+        }
+        setSelectedProject(createdProject);
+        showToast({
+          title: resolveText('common.done', 'Done'),
+          message: resolveText('projects.duplicated', 'Project duplicated'),
+          tone: 'success',
+        });
+      })
+      .catch((error) => {
+        logProjectError('Failed to duplicate project', error);
+        showToast({
+          title: resolveText('common.notice', 'Notice'),
+          message: resolveText('projects.duplicateFailed', 'Failed to duplicate project'),
+          tone: 'error',
+        });
+      });
+  }, [duplicateProject, logProjectError, resolveText, showToast]);
+
+  const renderProjectItem = (project: Project) => {
     return (
       <ProjectRow
-        project={item.data}
-        tasks={tasks}
-        areaById={areaById}
+        project={project}
+        taskSummary={projectTaskSummaryById.get(project.id)}
         tc={tc}
         focusedCount={focusedCount}
         statusPalette={statusPalette}
         t={t}
-        onDeleteProject={deleteProject}
+        onDeleteProject={handleDeleteProject}
+        onDuplicateProject={handleDuplicateProject}
         onOpenProject={openProject}
         onToggleProjectFocus={toggleProjectFocus}
       />
     );
   };
 
-  const selectedProjectNotes = selectedProject?.supportNotes || '';
+  const toggleAreaCollapse = useCallback((areaId: string) => {
+    projectListViewStateTouchedRef.current = true;
+    const current = projectListViewStateRef.current;
+    const collapsedAreas = { ...current.collapsedAreas };
+    if (collapsedAreas[areaId]) {
+      delete collapsedAreas[areaId];
+    } else {
+      collapsedAreas[areaId] = true;
+    }
+    const nextState = {
+      ...current,
+      collapsedAreas,
+    };
+    setCollapsedAreas(compactCollapsedAreas(collapsedAreas));
+    persistProjectListViewState(nextState);
+  }, [persistProjectListViewState]);
+
+  const toggleProjectSection = useCallback((sectionKind: Extract<ProjectListRow, { type: 'section-toggle' }>['sectionKind']) => {
+    projectListViewStateTouchedRef.current = true;
+    const current = projectListViewStateRef.current;
+    if (sectionKind === 'deferred') {
+      const nextState = {
+        ...current,
+        showDeferredProjects: !current.showDeferredProjects,
+      };
+      setShowDeferredProjects(nextState.showDeferredProjects);
+      persistProjectListViewState(nextState);
+      return;
+    }
+    const nextState = {
+      ...current,
+      showArchivedProjects: !current.showArchivedProjects,
+    };
+    setShowArchivedProjects(nextState.showArchivedProjects);
+    persistProjectListViewState(nextState);
+  }, [persistProjectListViewState]);
+
+  const renderProjectListRow = ({ item, index }: { item: ProjectListRow; index: number }) => {
+    if (item.type === 'section-label') {
+      return <ListSectionHeader title={item.title} tc={tc} />;
+    }
+
+    if (item.type === 'section-toggle') {
+      const showTopBorder = index > 0;
+      return (
+        <TouchableOpacity
+          onPress={() => {
+            toggleProjectSection(item.sectionKind);
+          }}
+          style={[
+            styles.collapsibleSectionToggle,
+            showTopBorder && { borderTopWidth: 1, borderTopColor: tc.border },
+          ]}
+        >
+          <Text style={[styles.collapsibleSectionToggleText, { color: tc.secondaryText }]}>
+            {item.title}
+          </Text>
+          {item.expanded
+            ? <ChevronDown size={16} color={tc.secondaryText} strokeWidth={2.2} />
+            : <ChevronRight size={16} color={tc.secondaryText} strokeWidth={2.2} />}
+        </TouchableOpacity>
+      );
+    }
+
+    if (item.type === 'area-header') {
+      return (
+        <TouchableOpacity
+          onPress={() => toggleAreaCollapse(item.areaId)}
+          style={styles.collapsibleAreaHeader}
+        >
+          <View style={styles.collapsibleAreaHeaderContent}>
+            {item.color ? (
+              <View
+                style={[
+                  styles.collapsibleAreaDot,
+                  { backgroundColor: item.color, borderColor: tc.border },
+                ]}
+              />
+            ) : null}
+            {item.icon ? (
+              <Text style={[styles.collapsibleAreaIcon, { color: tc.secondaryText }]}>{item.icon}</Text>
+            ) : null}
+            <Text style={[styles.collapsibleAreaHeaderText, { color: tc.secondaryText }]} numberOfLines={1}>
+              {item.title}
+            </Text>
+          </View>
+          {item.collapsed
+            ? <ChevronRight size={16} color={tc.secondaryText} strokeWidth={2.2} />
+            : <ChevronDown size={16} color={tc.secondaryText} strokeWidth={2.2} />}
+        </TouchableOpacity>
+      );
+    }
+
+    return renderProjectItem(item.project);
+  };
+
   const selectedProjectAreaName = selectedProject?.areaId && areaById.has(selectedProject.areaId)
     ? areaById.get(selectedProject.areaId)?.name || t('projects.noArea')
     : t('projects.noArea');
-  const selectedProjectNotesDirection = selectedProject
-    ? resolveAutoTextDirection(`${selectedProject.title ?? ''}\n${selectedProjectNotes}`.trim(), language)
-    : 'ltr';
-  const selectedProjectNotesTextDirectionStyle = {
-    writingDirection: selectedProjectNotesDirection,
-    textAlign: selectedProjectNotesDirection === 'rtl' ? 'right' : 'left',
-  } as const;
-  const pushSelectedProjectNotesUndoEntry = useCallback((value: string, selection: MarkdownSelection) => {
-    const previousEntry = selectedProjectNotesUndoRef.current[selectedProjectNotesUndoRef.current.length - 1];
-    if (
-      previousEntry
-      && previousEntry.value === value
-      && previousEntry.selection.start === selection.start
-      && previousEntry.selection.end === selection.end
-    ) {
-      return;
-    }
-    const nextUndoEntries = [...selectedProjectNotesUndoRef.current, { value, selection }];
-    selectedProjectNotesUndoRef.current = nextUndoEntries.length > 100
-      ? nextUndoEntries.slice(nextUndoEntries.length - 100)
-      : nextUndoEntries;
-    setSelectedProjectNotesUndoDepth(selectedProjectNotesUndoRef.current.length);
-  }, []);
-  const applySelectedProjectNotesValue = useCallback((
-    text: string,
-    options?: {
-      nextSelection?: MarkdownSelection;
-      recordUndo?: boolean;
-      baseSelection?: MarkdownSelection;
-    },
-  ) => {
-    if (!selectedProject) return;
-    if ((options?.recordUndo ?? true) && text !== selectedProjectNotes) {
-      pushSelectedProjectNotesUndoEntry(selectedProjectNotes, options?.baseSelection ?? selectedProjectNotesSelectionRef.current);
-    }
-    selectedProjectNotesRef.current = text;
-    setSelectedProject({ ...selectedProject, supportNotes: text });
-    if (options?.nextSelection) {
-      selectedProjectNotesSelectionRef.current = options.nextSelection;
-      setSelectedProjectNotesSelection(options.nextSelection);
-    }
-  }, [pushSelectedProjectNotesUndoEntry, selectedProject, selectedProjectNotes]);
-  const restoreSelectedProjectNotesSelection = useCallback((selection: MarkdownSelection) => {
-    pendingSelectedProjectNotesSelectionRef.current = selection;
-    const applySelection = () => {
-      selectedProjectNotesInputRef.current?.setNativeProps?.({ selection });
-    };
-    requestAnimationFrame(applySelection);
-    setTimeout(() => {
-      applySelection();
-      if (
-        pendingSelectedProjectNotesSelectionRef.current
-        && selectionsEqual(pendingSelectedProjectNotesSelectionRef.current, selection)
-      ) {
-        pendingSelectedProjectNotesSelectionRef.current = null;
-      }
-    }, 40);
-  }, []);
-  const handleSelectedProjectNotesChange = useCallback((text: string) => {
-    const continued = continueMarkdownOnTextChange(
-      selectedProjectNotesRef.current,
-      text,
-      selectedProjectNotesSelectionRef.current,
-    );
-    if (continued) {
-      applySelectedProjectNotesValue(continued.value, {
-        baseSelection: selectedProjectNotesSelectionRef.current,
-        nextSelection: continued.selection,
-      });
-      restoreSelectedProjectNotesSelection(continued.selection);
-      return;
-    }
-    applySelectedProjectNotesValue(text);
-  }, [applySelectedProjectNotesValue, restoreSelectedProjectNotesSelection]);
-  useEffect(() => {
-    selectedProjectNotesSelectionRef.current = selectedProjectNotesSelection;
-  }, [selectedProjectNotesSelection]);
-  const handleSelectedProjectNotesSelectionChange = useCallback((selection: MarkdownSelection) => {
-    const pendingSelection = pendingSelectedProjectNotesSelectionRef.current;
-    if (pendingSelection) {
-      if (!selectionsEqual(pendingSelection, selection)) {
-        return;
-      }
-      pendingSelectedProjectNotesSelectionRef.current = null;
-    }
-    selectedProjectNotesSelectionRef.current = selection;
-    setSelectedProjectNotesSelection(selection);
-  }, []);
-  useEffect(() => {
-    setSelectedProjectNotesSelection((prev) => {
-      const nextStart = Math.min(prev.start, selectedProjectNotes.length);
-      const nextEnd = Math.min(prev.end, selectedProjectNotes.length);
-      if (nextStart === prev.start && nextEnd === prev.end) {
-        return prev;
-      }
-      return { start: nextStart, end: nextEnd };
-    });
-  }, [selectedProjectNotes.length]);
-  const handleSelectedProjectNotesUndo = useCallback(() => {
-    const previousEntry = selectedProjectNotesUndoRef.current[selectedProjectNotesUndoRef.current.length - 1];
-    if (!previousEntry) return undefined;
-    selectedProjectNotesUndoRef.current = selectedProjectNotesUndoRef.current.slice(0, -1);
-    setSelectedProjectNotesUndoDepth(selectedProjectNotesUndoRef.current.length);
-    applySelectedProjectNotesValue(previousEntry.value, {
-      nextSelection: previousEntry.selection,
-      recordUndo: false,
-    });
-    return previousEntry.selection;
-  }, [applySelectedProjectNotesValue]);
-  const handleSelectedProjectNotesApplyAction = useCallback((actionId: MarkdownToolbarActionId, selection: MarkdownSelection): MarkdownToolbarResult => {
-    const next = applyMarkdownToolbarAction(selectedProjectNotesRef.current, selection, actionId);
-    applySelectedProjectNotesValue(next.value, {
-      baseSelection: selection,
-      nextSelection: next.selection,
-    });
-    return next;
-  }, [applySelectedProjectNotesValue, selectedProjectNotesRef]);
-  const commitSelectedProjectNotes = () => {
-    if (!selectedProject) return;
-    updateProject(selectedProject.id, { supportNotes: selectedProjectNotesRef.current });
-  };
-  const handleSelectedProjectNotesApplyAutocomplete = useCallback((next: { value: string; selection: MarkdownSelection }) => {
-    applySelectedProjectNotesValue(next.value, {
-      baseSelection: selectedProjectNotesSelectionRef.current,
-      nextSelection: next.selection,
-    });
-    selectedProjectNotesSelectionRef.current = next.selection;
-    if (selectedProject) {
-      updateProject(selectedProject.id, { supportNotes: next.value });
-    }
-  }, [applySelectedProjectNotesValue, selectedProject, updateProject]);
-
 
   const handleAddProject = () => {
     if (newProjectTitle.trim()) {
-      const inferredAreaId =
-        selectedAreaFilter !== ALL_AREAS && selectedAreaFilter !== NO_AREA && areaById.has(selectedAreaFilter)
-          ? selectedAreaFilter
-          : undefined;
-      const areaColor = inferredAreaId ? areaById.get(inferredAreaId)?.color : undefined;
+      const resolvedAreaId =
+        newProjectAreaId && areaById.has(newProjectAreaId) ? newProjectAreaId : undefined;
+      const areaColor = resolvedAreaId ? areaById.get(resolvedAreaId)?.color : undefined;
       addProject(newProjectTitle, areaColor || DEFAULT_PROJECT_COLOR, {
-        areaId: inferredAreaId,
+        areaId: resolvedAreaId,
       });
       setNewProjectTitle('');
+      setNewProjectAreaId(
+        selectedAreaFilter !== ALL_AREAS && selectedAreaFilter !== NO_AREA ? selectedAreaFilter : ''
+      );
     }
   };
 
@@ -393,16 +669,14 @@ export default function ProjectsScreen() {
   };
 
   const closeProjectDetail = () => {
+    commitSelectedProjectNotes();
     persistSelectedProjectEdits(selectedProject);
     setSelectedProject(null);
-    setNotesExpanded(false);
-    setShowNotesPreview(false);
-    setNotesFullscreen(false);
+    resetProjectNotesUi();
     setShowProjectMeta(false);
     setShowReviewPicker(false);
     setShowStatusMenu(false);
-    setLinkModalVisible(false);
-    setLinkInput('');
+    resetProjectAttachmentUi();
     setShowAreaPicker(false);
     setShowTagPicker(false);
     if (projectId && router.canGoBack()) {
@@ -417,23 +691,14 @@ export default function ProjectsScreen() {
     setShowStatusMenu(false);
   };
 
+  // Archive without a native confirm: the action is fully reversible (the same
+  // button slot becomes Reactivate, task statuses are restored), and Alert.alert
+  // can present behind the pageSheet detail modal on iOS, leaving the button
+  // apparently dead.
   const handleArchiveSelectedProject = () => {
     if (!selectedProject) return;
-    Alert.alert(
-      t('projects.title'),
-      t('projects.archiveConfirm'),
-      [
-        { text: t('common.cancel'), style: 'cancel' },
-        {
-          text: t('projects.archive'),
-          style: 'destructive',
-          onPress: () => {
-            updateProject(selectedProject.id, { status: 'archived' });
-            setSelectedProject({ ...selectedProject, status: 'archived' });
-          }
-        }
-      ]
-    );
+    updateProject(selectedProject.id, { status: 'archived' });
+    setSelectedProject({ ...selectedProject, status: 'archived' });
   };
 
   const openAreaPicker = () => {
@@ -487,215 +752,113 @@ export default function ProjectsScreen() {
     return /\.(png|jpg|jpeg|gif|webp|heic|heif)$/i.test(attachment.uri);
   }, []);
 
-  const openAttachment = async (attachment: Attachment) => {
-    const shouldDownload = attachment.kind === 'file'
-      && attachment.cloudKey
-      && (attachment.localStatus === 'missing' || !attachment.uri);
-    if (shouldDownload && selectedProject) {
-      const next = updateAttachmentStatus(
-        selectedProject.attachments || [],
-        attachment.id,
-        'downloading'
-      );
-      updateProject(selectedProject.id, { attachments: next });
-      setSelectedProject({ ...selectedProject, attachments: next });
-    }
-
-    const resolved = await ensureAttachmentAvailable(attachment);
-    if (!resolved) {
-      if (shouldDownload && selectedProject) {
-        const next = updateAttachmentStatus(
-          selectedProject.attachments || [],
-          attachment.id,
-          'missing'
-        );
-        updateProject(selectedProject.id, { attachments: next });
-        setSelectedProject({ ...selectedProject, attachments: next });
-      }
-      const message = attachment.kind === 'file' ? t('attachments.missing') : t('attachments.fileNotSupported');
-      Alert.alert(t('attachments.title'), message);
-      return;
-    }
-    if (resolved.uri !== attachment.uri || resolved.localStatus !== attachment.localStatus) {
-      const next = (selectedProject?.attachments || []).map((item): Attachment =>
-        item.id === resolved.id ? { ...item, ...resolved } : item
-      );
-      if (selectedProject) {
-        updateProject(selectedProject.id, { attachments: next });
-        setSelectedProject({ ...selectedProject, attachments: next });
-      }
-    }
-
-    if (resolved.kind === 'link') {
-      Linking.openURL(resolved.uri).catch((error) => logProjectError('Failed to open attachment URL', error));
-      return;
-    }
-    if (isImageAttachment(resolved)) {
-      setImagePreviewAttachment(resolved);
-      return;
-    }
-
-    const available = await Sharing.isAvailableAsync().catch((error) => {
-      void logWarn('[Sharing] availability check failed', {
-        scope: 'project',
-        extra: { error: error instanceof Error ? error.message : String(error) },
-      });
-      return false;
-    });
-    if (available) {
-      Sharing.shareAsync(resolved.uri).catch((error) => logProjectError('Failed to share attachment', error));
-    } else {
-      Linking.openURL(resolved.uri).catch((error) => logProjectError('Failed to open attachment URL', error));
-    }
-  };
-
-  useEffect(() => {
-    if (!selectedProject) {
-      setImagePreviewAttachment(null);
-    }
-  }, [selectedProject]);
-
-  const downloadAttachment = async (attachment: Attachment) => {
-    if (!selectedProject) return;
-    const shouldDownload = attachment.kind === 'file'
-      && attachment.cloudKey
-      && (attachment.localStatus === 'missing' || !attachment.uri);
-    if (shouldDownload) {
-      const next = updateAttachmentStatus(
-        selectedProject.attachments || [],
-        attachment.id,
-        'downloading'
-      );
-      updateProject(selectedProject.id, { attachments: next });
-      setSelectedProject({ ...selectedProject, attachments: next });
-    }
-
-    const resolved = await ensureAttachmentAvailable(attachment);
-    if (!resolved) {
-      const next = updateAttachmentStatus(
-        selectedProject.attachments || [],
-        attachment.id,
-        'missing'
-      );
-      updateProject(selectedProject.id, { attachments: next });
-      setSelectedProject({ ...selectedProject, attachments: next });
-      const message = attachment.kind === 'file' ? t('attachments.missing') : t('attachments.fileNotSupported');
-      Alert.alert(t('attachments.title'), message);
-      return;
-    }
-    if (resolved.uri !== attachment.uri || resolved.localStatus !== attachment.localStatus) {
-      const next = (selectedProject.attachments || []).map((item): Attachment =>
-        item.id === resolved.id ? { ...item, ...resolved } : item
-      );
-      updateProject(selectedProject.id, { attachments: next });
-      setSelectedProject({ ...selectedProject, attachments: next });
-    }
-  };
-
-  const addProjectFileAttachment = async () => {
-    if (!selectedProject) return;
-    const result = await DocumentPicker.getDocumentAsync({
-      copyToCacheDirectory: false,
-      multiple: false,
-    });
-    if (result.canceled) return;
-    const asset = result.assets[0];
-    const size = asset.size;
-    if (typeof size === 'number') {
-      const validation = await validateAttachmentForUpload(
-        {
-          id: 'pending',
-          kind: 'file',
-          title: asset.name || 'file',
-          uri: asset.uri,
-          mimeType: asset.mimeType,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        },
-        size
-      );
-      if (!validation.valid) {
-        Alert.alert(t('attachments.title'), resolveAttachmentValidationMessage(validation.error, t));
-        return;
-      }
-    }
-    const now = new Date().toISOString();
-    const attachment: Attachment = {
-      id: generateUUID(),
-      kind: 'file',
-      title: asset.name || 'file',
-      uri: asset.uri,
-      mimeType: asset.mimeType,
-      size: asset.size,
-      createdAt: now,
-      updatedAt: now,
-      localStatus: 'available',
-    };
-    const next = [...(selectedProject.attachments || []), attachment];
-    updateProject(selectedProject.id, { attachments: next });
-    setSelectedProject({ ...selectedProject, attachments: next });
-  };
-
-  const confirmAddProjectLink = () => {
-    if (!selectedProject) return;
-    const normalized = normalizeLinkAttachmentInput(linkInput);
-    if (!normalized.uri) return;
-    const now = new Date().toISOString();
-    const attachment: Attachment = {
-      id: generateUUID(),
-      kind: normalized.kind,
-      title: normalized.title,
-      uri: normalized.uri,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const next = [...(selectedProject.attachments || []), attachment];
-    updateProject(selectedProject.id, { attachments: next });
-    setSelectedProject({ ...selectedProject, attachments: next });
-    setLinkModalVisible(false);
-    setLinkInput('');
-  };
-
-  const removeProjectAttachment = (id: string) => {
-    if (!selectedProject) return;
-    const now = new Date().toISOString();
-    const next = (selectedProject.attachments || []).map((a) =>
-      a.id === id ? { ...a, deletedAt: now, updatedAt: now } : a
-    );
-    updateProject(selectedProject.id, { attachments: next });
-    setSelectedProject({ ...selectedProject, attachments: next });
-  };
-
-
   const modalHeaderStyle = [styles.modalHeader, {
     borderBottomColor: tc.border,
     backgroundColor: tc.cardBg,
-    paddingTop: Math.max(insets.top, 10),
-    paddingBottom: 10,
+    paddingTop: Platform.OS === 'ios' ? Math.max(insets.top, 10) : 10,
+    paddingBottom: 8,
   }];
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <View style={[styles.container, { backgroundColor: tc.bg }]}>
       <View style={[styles.inputContainer, { borderBottomColor: tc.border }]}>
-        <TextInput
-          style={[styles.input, { borderColor: tc.border, backgroundColor: tc.inputBg, color: tc.text }]}
-          placeholder={t('projects.addPlaceholder')}
-          placeholderTextColor={tc.secondaryText}
-          value={newProjectTitle}
-          onChangeText={setNewProjectTitle}
-          onSubmitEditing={handleAddProject}
-          returnKeyType="done"
-        />
+        <View style={styles.addProjectRow}>
+          <CompactTextInput
+            style={[styles.input, styles.addProjectInput, { borderColor: tc.border, backgroundColor: tc.inputBg, color: tc.text }]}
+            placeholder={t('projects.addPlaceholder')}
+            placeholderTextColor={tc.secondaryText}
+            value={newProjectTitle}
+            onChangeText={setNewProjectTitle}
+            onSubmitEditing={handleAddProject}
+            returnKeyType="done"
+            accessibilityLabel={t('projects.addPlaceholder')}
+          />
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel={t('projects.add')}
+            onPress={handleAddProject}
+            style={[
+              styles.addIconButton,
+              { backgroundColor: filledButton.backgroundColor },
+              !newProjectTitle.trim() && styles.addButtonDisabled,
+            ]}
+            disabled={!newProjectTitle.trim()}
+          >
+            <Plus size={22} color={filledButton.textColor ?? tc.onTint} strokeWidth={2.4} />
+          </TouchableOpacity>
+        </View>
+        {newProjectTitle.trim().length > 0 && sortedAreas.length > 0 && (
+          <View style={styles.tagFilterChips}>
+            <TouchableOpacity
+              style={[
+                styles.tagFilterChip,
+                newProjectAreaId === ''
+                  ? { borderColor: tc.tint, backgroundColor: tc.tint }
+                  : { borderColor: tc.border, backgroundColor: tc.cardBg },
+              ]}
+              onPress={() => setNewProjectAreaId('')}
+              accessibilityRole="button"
+              accessibilityLabel={t('projects.noArea')}
+              accessibilityState={{ selected: newProjectAreaId === '' }}
+            >
+              <Text
+                style={[
+                  styles.tagFilterText,
+                  { color: newProjectAreaId === '' ? tc.onTint : tc.text },
+                ]}
+              >
+                {t('projects.noArea')}
+              </Text>
+            </TouchableOpacity>
+            {sortedAreas.map((area) => (
+              <TouchableOpacity
+                key={area.id}
+                style={[
+                  styles.tagFilterChip,
+                  newProjectAreaId === area.id
+                    ? { borderColor: tc.tint, backgroundColor: tc.tint }
+                    : { borderColor: tc.border, backgroundColor: tc.cardBg },
+                ]}
+                onPress={() => setNewProjectAreaId(area.id)}
+                accessibilityRole="button"
+                accessibilityLabel={area.name}
+                accessibilityState={{ selected: newProjectAreaId === area.id }}
+              >
+                <Text
+                  style={[
+                    styles.tagFilterText,
+                    { color: newProjectAreaId === area.id ? tc.onTint : tc.text },
+                  ]}
+                >
+                  {area.name}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
         <View style={styles.filterSection}>
           <TouchableOpacity
             style={styles.filterHeader}
             onPress={() => setShowTagFilter((prev) => !prev)}
+            accessibilityRole="button"
+            accessibilityLabel={`${t('projects.tagFilter')}: ${showTagFilter ? t('filters.hide') : t('filters.show')}`}
+            accessibilityState={{ expanded: showTagFilter }}
           >
-            <Text style={[styles.tagFilterLabel, { color: tc.text }]}>{t('projects.tagFilter')}</Text>
-            <Text style={[styles.filterToggleText, { color: tc.secondaryText }]}>
+            <CompactText
+              style={[styles.tagFilterLabel, { color: tc.text }]}
+              numberOfLines={1}
+            >
+              {t('projects.tagFilter')}
+            </CompactText>
+            <CompactText
+              style={[styles.filterToggleText, { color: tc.secondaryText }]}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.78}
+            >
               {showTagFilter ? t('filters.hide') : t('filters.show')}
-            </Text>
+            </CompactText>
           </TouchableOpacity>
           {showTagFilter && (
             <View style={styles.tagFilterChips}>
@@ -707,6 +870,9 @@ export default function ProjectsScreen() {
                     : { borderColor: tc.border, backgroundColor: tc.cardBg },
                 ]}
                 onPress={() => setSelectedTagFilter(ALL_TAGS)}
+                accessibilityRole="button"
+                accessibilityLabel={t('projects.allTags')}
+                accessibilityState={{ selected: selectedTagFilter === ALL_TAGS }}
               >
                 <Text
                   style={[
@@ -727,6 +893,9 @@ export default function ProjectsScreen() {
                       : { borderColor: tc.border, backgroundColor: tc.cardBg },
                   ]}
                   onPress={() => setSelectedTagFilter(tag)}
+                  accessibilityRole="button"
+                  accessibilityLabel={tag}
+                  accessibilityState={{ selected: selectedTagFilter === tag }}
                 >
                   <Text
                     style={[
@@ -747,6 +916,9 @@ export default function ProjectsScreen() {
                       : { borderColor: tc.border, backgroundColor: tc.cardBg },
                   ]}
                   onPress={() => setSelectedTagFilter(NO_TAGS)}
+                  accessibilityRole="button"
+                  accessibilityLabel={t('projects.noTags')}
+                  accessibilityState={{ selected: selectedTagFilter === NO_TAGS }}
                 >
                   <Text
                     style={[
@@ -761,38 +933,25 @@ export default function ProjectsScreen() {
             </View>
           )}
         </View>
-        <TouchableOpacity
-          onPress={handleAddProject}
-          style={[
-            styles.addButton,
-            { backgroundColor: tc.tint },
-            !newProjectTitle.trim() && styles.addButtonDisabled,
-          ]}
-          disabled={!newProjectTitle.trim()}
-        >
-          <Text style={styles.addButtonText}>{t('projects.add')}</Text>
-        </TouchableOpacity>
       </View>
 
-      <SectionList
-        sections={groupedProjects}
-        keyExtractor={(item) => `${item.type}-${item.data.id}`}
-        stickySectionHeadersEnabled={false}
+      <FlatList
+        data={projectListRows}
+        keyExtractor={(item) => item.key}
         contentContainerStyle={defaultListContentStyle}
         style={{ flex: 1 }}
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
-            <Text style={[styles.emptyText, { color: tc.secondaryText }]}>{t('projects.empty')}</Text>
+            <Text style={[styles.emptyText, { color: tc.secondaryText }]}>{projectListEmptyLabel}</Text>
           </View>
         }
-        renderSectionHeader={({ section }) => (
-          <ListSectionHeader title={section.title} tc={tc} />
-        )}
-        renderItem={({ item }) => renderSectionItem({ item })}
+        renderItem={renderProjectListRow}
+        removeClippedSubviews={false}
       />
 
       <ProjectDetailModal
         addProjectFileAttachment={addProjectFileAttachment}
+        addSection={addSection}
         closeProjectDetail={closeProjectDetail}
         commitSelectedProjectNotes={commitSelectedProjectNotes}
         formatProjectDate={formatProjectDate}
@@ -804,15 +963,19 @@ export default function ProjectsScreen() {
         handleSelectedProjectNotesUndo={handleSelectedProjectNotesUndo}
         handleSetProjectStatus={handleSetProjectStatus}
         isSelectedProjectNotesFocused={isSelectedProjectNotesFocused}
-        modalHeaderStyle={modalHeaderStyle as Array<Record<string, unknown>>}
+        modalHeaderStyle={modalHeaderStyle as Record<string, unknown>[]}
         notesExpanded={notesExpanded}
         notesFullscreen={notesFullscreen}
         onCloseNotesFullscreen={() => setNotesFullscreen(false)}
+        onDuplicateProject={handleDuplicateProject}
         onDownloadAttachment={downloadAttachment}
         onOpenAreaPicker={openAreaPicker}
         onOpenAttachment={openAttachment}
+        onOpenProjectQuickAdd={openProjectQuickAdd}
         onOpenTagPicker={openTagPicker}
         onRemoveProjectAttachment={removeProjectAttachment}
+        deleteSection={deleteSection}
+        reorderSections={reorderSections}
         onSetLinkInput={setLinkInput}
         onSetLinkModalVisible={setLinkModalVisible}
         onSetNotesExpanded={setNotesExpanded}
@@ -824,9 +987,14 @@ export default function ProjectsScreen() {
         onSetShowProjectMeta={setShowProjectMeta}
         onSetShowReviewPicker={setShowReviewPicker}
         onSetShowStatusMenu={setShowStatusMenu}
+        onProjectTaskSortByChange={setProjectTaskSortBy}
+        onToggleShowCompletedTasks={() => setShowCompletedProjectTasks((current) => !current)}
         overlayVisible={!!selectedProject}
         presentationStyle={Platform.OS === 'ios' ? 'pageSheet' : 'fullScreen'}
+        projectTaskSortBy={projectTaskSortBy}
         selectedProject={selectedProject}
+        selectedProjectSections={selectedProjectSections}
+        selectedProjectTasks={selectedProjectTasks}
         selectedProjectAreaName={selectedProjectAreaName}
         selectedProjectNotes={selectedProjectNotes}
         selectedProjectNotesDirection={selectedProjectNotesDirection}
@@ -839,18 +1007,21 @@ export default function ProjectsScreen() {
         showProjectMeta={showProjectMeta}
         showReviewPicker={showReviewPicker}
         showStatusMenu={showStatusMenu}
+        showCompletedTasks={showCompletedProjectTasks}
         statusPalette={statusPalette}
         t={t}
         tc={tc}
         updateProject={updateProject}
+        updateSection={updateSection}
       />
 
       <TaskEditModal
+        key={taskModalOpenKey}
         visible={editingTask !== null}
         task={editingTask}
         onClose={() => setEditingTask(null)}
         onSave={(taskId, updates) => updateTask(taskId, updates)}
-        defaultTab="view"
+        defaultTab={taskModalDefaultTab}
         onProjectNavigate={(projectId) => {
           if (!selectedProject || selectedProject.id !== projectId) {
             openProjectScreen(projectId);

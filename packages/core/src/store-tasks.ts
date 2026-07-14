@@ -1,19 +1,41 @@
-import type { AppData, Task, TaskStatus } from './types';
+import { collectFocusEligibilityTasks, resolveFocusStarAction, type FocusStarAction } from './focus-star';
+import type { AppData, PendingRemoteAttachmentDelete, Task, TaskStatus } from './types';
 import type { StorageAdapter, TaskQueryOptions } from './storage';
 import type { StoreActionResult, TaskStore } from './store-types';
 import {
     applyTaskUpdates,
     buildSaveSnapshot,
+    createProjectOrderReserver,
     ensureDeviceId,
+    getNextDataChangeAt,
     getTaskOrder,
     getReferenceTaskFieldClears,
     isTaskVisible,
-    normalizeRevision,
-    reserveNextProjectOrder,
+    nextRevision,
+    replaceEntitiesInArray,
+    replaceEntitiesInMap,
+    replaceEntityInArray,
+    replaceEntityInMap,
+    type ProjectOrderReserver,
+    toVisibleTask,
     updateVisibleTasks,
 } from './store-helpers';
 import { logWarn } from './logger';
 import { generateUUID as uuidv4 } from './uuid';
+import { normalizeRecurrenceForLoad } from './recurrence';
+import { normalizeRepeatReminderMinutes } from './schedule-utils';
+import { normalizeFocusTaskLimit } from './focus-utils';
+import { getTaskFocusEligibility, isTaskFutureStart } from './task-utils';
+import {
+    buildTaskContainerMovePatch,
+    normalizeOptionalContainerId,
+    reserveTaskContainerProjectOrder,
+    resolveTaskContainerAssignment,
+    resolveTaskContainerHierarchy,
+} from './task-container-rules';
+import { resolveDefaultNewTaskAreaId } from './area-utils';
+import { findSelectableProjectByTitleAndArea } from './project-utils';
+import { buildNewProject } from './store-projects/project-actions';
 
 const stripAttachmentRemoteMetadata = (attachments: Task['attachments']): Task['attachments'] =>
     attachments?.map((attachment) => (
@@ -26,21 +48,114 @@ const stripAttachmentRemoteMetadata = (attachments: Task['attachments']): Task['
             : attachment
     ));
 
+const collectAttachmentCloudKeysForTasks = (tasks: readonly Task[]): Set<string> => {
+    const cloudKeys = new Set<string>();
+    for (const task of tasks) {
+        if (task.purgedAt) continue;
+        for (const attachment of task.attachments || []) {
+            if (attachment.kind === 'file' && attachment.cloudKey) {
+                cloudKeys.add(attachment.cloudKey);
+            }
+        }
+    }
+    return cloudKeys;
+};
+
+const collectPendingRemoteDeletesForTasks = (
+    tasks: readonly Task[],
+    remainingTasks: readonly Task[] = [],
+): PendingRemoteAttachmentDelete[] => {
+    const byCloudKey = new Map<string, PendingRemoteAttachmentDelete>();
+    const retainedCloudKeys = collectAttachmentCloudKeysForTasks(remainingTasks);
+    for (const task of tasks) {
+        for (const attachment of task.attachments || []) {
+            if (attachment.kind !== 'file' || !attachment.cloudKey) continue;
+            if (retainedCloudKeys.has(attachment.cloudKey)) continue;
+            if (byCloudKey.has(attachment.cloudKey)) continue;
+            byCloudKey.set(attachment.cloudKey, {
+                cloudKey: attachment.cloudKey,
+                title: attachment.title || attachment.cloudKey,
+            });
+        }
+    }
+    return Array.from(byCloudKey.values());
+};
+
+const appendPendingRemoteDeletes = (
+    settings: TaskStore['settings'],
+    pendingDeletes: readonly PendingRemoteAttachmentDelete[],
+): TaskStore['settings'] => {
+    if (pendingDeletes.length === 0) return settings;
+    const byCloudKey = new Map<string, PendingRemoteAttachmentDelete>();
+    for (const existing of settings.attachments?.pendingRemoteDeletes || []) {
+        byCloudKey.set(existing.cloudKey, existing);
+    }
+    for (const pending of pendingDeletes) {
+        if (byCloudKey.has(pending.cloudKey)) continue;
+        byCloudKey.set(pending.cloudKey, pending);
+    }
+    return {
+        ...settings,
+        attachments: {
+            ...settings.attachments,
+            pendingRemoteDeletes: Array.from(byCloudKey.values()),
+        },
+    };
+};
+
+const normalizeOptionalTaskField = (value: string | undefined): string => value ?? '';
+
+const recurrenceKeyForDuplicateCheck = (task: Task): string => (
+    JSON.stringify(normalizeRecurrenceForLoad(task.recurrence) ?? null)
+);
+
+const isExistingRecurringFollowUp = (existing: Task, candidate: Task): boolean => {
+    if (existing.id === candidate.id) return false;
+    if (existing.deletedAt) return false;
+    if (existing.status === 'done' || existing.status === 'archived') return false;
+    if (existing.status !== candidate.status) return false;
+    if (existing.title.trim() !== candidate.title.trim()) return false;
+    if (normalizeOptionalTaskField(existing.projectId) !== normalizeOptionalTaskField(candidate.projectId)) return false;
+    if (normalizeOptionalTaskField(existing.sectionId) !== normalizeOptionalTaskField(candidate.sectionId)) return false;
+    if (normalizeOptionalTaskField(existing.areaId) !== normalizeOptionalTaskField(candidate.areaId)) return false;
+    if (normalizeOptionalTaskField(existing.startTime) !== normalizeOptionalTaskField(candidate.startTime)) return false;
+    if (normalizeOptionalTaskField(existing.dueDate) !== normalizeOptionalTaskField(candidate.dueDate)) return false;
+    if (normalizeOptionalTaskField(existing.reviewAt) !== normalizeOptionalTaskField(candidate.reviewAt)) return false;
+    return recurrenceKeyForDuplicateCheck(existing) === recurrenceKeyForDuplicateCheck(candidate);
+};
+
+const findExistingRecurringFollowUp = (tasks: readonly Task[], candidate: Task | null): Task | null => {
+    if (!candidate) return null;
+    return tasks.find((task) => isExistingRecurringFollowUp(task, candidate)) ?? null;
+};
+
+const stampNewRecurringFollowUp = (task: Task | null, deviceId: string): Task | null => {
+    if (!task) return null;
+    return {
+        ...task,
+        rev: nextRevision(undefined),
+        revBy: deviceId,
+    };
+};
+
 type TaskActions = Pick<
     TaskStore,
     | 'addTask'
+    | 'addTasks'
     | 'updateTask'
     | 'deleteTask'
     | 'restoreTask'
     | 'purgeTask'
     | 'purgeDeletedTasks'
     | 'duplicateTask'
+    | 'promoteTaskToProject'
     | 'resetTaskChecklist'
     | 'moveTask'
     | 'batchUpdateTasks'
     | 'batchMoveTasks'
     | 'batchDeleteTasks'
     | 'queryTasks'
+    | 'getFocusStarAction'
 >;
 
 type TaskActionContext = {
@@ -48,158 +163,199 @@ type TaskActionContext = {
     get: () => TaskStore;
     getStorage: () => StorageAdapter;
     debouncedSave: (data: AppData, onError?: (msg: string) => void) => void;
+    trackImmediateSave: (save: Promise<void>) => Promise<void>;
 };
 
 const actionOk = (extra?: Omit<StoreActionResult, 'success'>): StoreActionResult => ({ success: true, ...extra });
 const actionFail = (error: string): StoreActionResult => ({ success: false, error });
-const MAX_FOCUS_TASKS = 3;
 const hasOwnField = (value: object, field: PropertyKey): boolean => Object.prototype.hasOwnProperty.call(value, field);
-const normalizeOptionalReferenceId = (value: unknown): string | undefined => (
-    typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
-);
-const normalizeProjectIdInput = normalizeOptionalReferenceId;
 
-const validateExistingProjectId = (
-    projectId: unknown,
-    allProjects: AppData['projects']
-): { ok: true; projectId?: string } | { ok: false; error: string } => {
-    const normalizedProjectId = normalizeProjectIdInput(projectId);
-    if (!normalizedProjectId) {
-        return { ok: true, projectId: undefined };
+const applyVisibleTaskChanges = (
+    visibleTasks: Task[],
+    changedTasks: readonly Task[],
+    addedTasks: readonly Task[] = []
+): Task[] => {
+    if (changedTasks.length === 0 && addedTasks.length === 0) return visibleTasks;
+    const changedById = new Map(changedTasks.map((task) => [task.id, task]));
+    const emittedIds = new Set<string>();
+    let changed = false;
+    const nextVisibleTasks: Task[] = [];
+
+    for (const visibleTask of visibleTasks) {
+        const updatedTask = changedById.get(visibleTask.id);
+        if (!updatedTask) {
+            nextVisibleTasks.push(visibleTask);
+            emittedIds.add(visibleTask.id);
+            continue;
+        }
+        changed = true;
+        emittedIds.add(visibleTask.id);
+        if (isTaskVisible(updatedTask)) {
+            nextVisibleTasks.push(toVisibleTask(updatedTask));
+        }
     }
-    const exists = allProjects.some((project) => project.id === normalizedProjectId && !project.deletedAt);
-    if (exists) {
-        return { ok: true, projectId: normalizedProjectId };
+
+    for (const task of [...changedTasks, ...addedTasks]) {
+        if (emittedIds.has(task.id) || !isTaskVisible(task)) continue;
+        nextVisibleTasks.push(toVisibleTask(task));
+        emittedIds.add(task.id);
+        changed = true;
     }
-    return { ok: false, error: 'Project not found' };
+
+    return changed ? nextVisibleTasks : visibleTasks;
 };
 
-const validateExistingAreaId = (
-    areaId: unknown,
-    allAreas: AppData['areas']
-): { ok: true; areaId?: string } | { ok: false; error: string } => {
-    const normalizedAreaId = normalizeOptionalReferenceId(areaId);
-    if (!normalizedAreaId) {
-        return { ok: true, areaId: undefined };
-    }
-    const exists = allAreas.some((area) => area.id === normalizedAreaId && !area.deletedAt);
-    if (exists) {
-        return { ok: true, areaId: normalizedAreaId };
-    }
-    return { ok: false, error: 'Area not found' };
+type MutateTasksOptions = {
+    selectTasks: (state: TaskStore) => Task[];
+    buildUpdates: (task: Task, context: { now: string; state: TaskStore }) => Partial<Task>;
+    buildSettings?: (state: TaskStore, selectedTasks: readonly Task[], context: { now: string; settings: TaskStore['settings'] }) => TaskStore['settings'] | undefined;
+    updateVisible?: boolean;
+    missingMessage?: string;
+    ensureDeviceIdWhenEmpty?: boolean;
 };
 
-const resolveTaskContainerAssignment = ({
-    projectId,
-    sectionId,
-    areaId,
-    allProjects,
-    allSections,
-    allAreas,
-}: {
-    projectId: unknown;
-    sectionId: unknown;
-    areaId: unknown;
-    allProjects: AppData['projects'];
-    allSections: AppData['sections'];
-    allAreas: AppData['areas'];
-}):
-    | { ok: true; projectId?: string; sectionId?: string; areaId?: string }
-    | { ok: false; error: string } => {
-    const projectValidation = validateExistingProjectId(projectId, allProjects);
-    if (!projectValidation.ok) return projectValidation;
-
-    let resolvedProjectId = projectValidation.projectId;
-    const resolvedSectionId = normalizeOptionalReferenceId(sectionId);
-    if (resolvedSectionId) {
-        const section = allSections.find((candidate) => candidate.id === resolvedSectionId && !candidate.deletedAt);
-        if (!section) {
-            return { ok: false, error: 'Section not found' };
+const mutateTasks = async (
+    { set, debouncedSave }: Pick<TaskActionContext, 'set' | 'debouncedSave'>,
+    options: MutateTasksOptions
+): Promise<StoreActionResult> => {
+    const changeAt = Date.now();
+    const now = new Date().toISOString();
+    let snapshot: AppData | null = null;
+    let missing = false;
+    set((state) => {
+        const selectedTasks = options.selectTasks(state);
+        if (selectedTasks.length === 0 && !options.ensureDeviceIdWhenEmpty) {
+            missing = Boolean(options.missingMessage);
+            return state;
         }
-        const liveProjectExists = allProjects.some((candidate) => candidate.id === section.projectId && !candidate.deletedAt);
-        if (!liveProjectExists) {
-            return { ok: false, error: 'Section not found' };
+        const deviceState = ensureDeviceId(state.settings);
+        if (selectedTasks.length === 0 && !deviceState.updated) {
+            return state;
         }
-        if (resolvedProjectId && section.projectId !== resolvedProjectId) {
-            return { ok: false, error: 'Section does not belong to project' };
-        }
-        resolvedProjectId = section.projectId;
-    }
-
-    if (resolvedProjectId) {
+        const changedTasks = selectedTasks.map((task) => {
+            const updatedTask: Task = {
+                ...task,
+                ...options.buildUpdates(task, { now, state }),
+                updatedAt: now,
+                rev: nextRevision(task.rev),
+                revBy: deviceState.deviceId,
+            };
+            return updatedTask;
+        });
+        const nextVisibleTasks = options.updateVisible !== false
+            ? applyVisibleTaskChanges(state.tasks, changedTasks)
+            : state.tasks;
+        const nextAllTasks = changedTasks.length > 0
+            ? replaceEntitiesInArray(state._allTasks, changedTasks)
+            : state._allTasks;
+        const updatedSettings = options.buildSettings?.(state, selectedTasks, {
+            now,
+            settings: deviceState.settings,
+        });
+        const nextSettings = updatedSettings ?? deviceState.settings;
+        const settingsChanged = Boolean(updatedSettings) || deviceState.updated;
+        snapshot = buildSaveSnapshot(state, {
+            tasks: nextAllTasks,
+            ...(settingsChanged ? { settings: nextSettings } : {}),
+        });
         return {
-            ok: true,
-            projectId: resolvedProjectId,
-            sectionId: resolvedSectionId,
-            areaId: undefined,
+            tasks: nextVisibleTasks,
+            _allTasks: nextAllTasks,
+            _tasksById: changedTasks.length > 0
+                ? replaceEntitiesInMap(state._tasksById, changedTasks)
+                : state._tasksById,
+            lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
+            ...(settingsChanged ? { settings: nextSettings } : {}),
         };
+    });
+    if (snapshot) {
+        debouncedSave(snapshot, (msg) => set({ error: msg }));
+    }
+    return missing ? actionFail(options.missingMessage ?? 'Task not found') : actionOk();
+};
+
+const sanitizeRestoredTaskContainerReferences = (
+    task: Task,
+    state: TaskStore,
+): Pick<Task, 'projectId' | 'sectionId' | 'areaId'> => {
+    let projectId = normalizeOptionalContainerId(task.projectId);
+    let sectionId = normalizeOptionalContainerId(task.sectionId);
+    let areaId = normalizeOptionalContainerId(task.areaId);
+
+    const liveProjectIds = new Set(
+        state._allProjects
+            .filter((project) => !project.deletedAt && !project.purgedAt)
+            .map((project) => project.id),
+    );
+    const liveSection = sectionId
+        ? state._allSections.find((section) => section.id === sectionId && !section.deletedAt)
+        : undefined;
+    const sectionProjectId = liveSection && liveProjectIds.has(liveSection.projectId)
+        ? liveSection.projectId
+        : undefined;
+
+    if (projectId && !liveProjectIds.has(projectId)) {
+        projectId = undefined;
+    }
+    if (sectionId && !sectionProjectId) {
+        sectionId = undefined;
     }
 
-    const areaValidation = validateExistingAreaId(areaId, allAreas);
-    if (!areaValidation.ok) return areaValidation;
+    const resolved = resolveTaskContainerHierarchy({
+        projectId,
+        sectionId,
+        areaId,
+        sectionProjectId,
+    });
 
-    return {
-        ok: true,
-        projectId: undefined,
-        sectionId: undefined,
-        areaId: areaValidation.areaId,
-    };
+    if (resolved.areaId && !state._allAreas.some((area) => area.id === resolved.areaId && !area.deletedAt)) {
+        resolved.areaId = undefined;
+    }
+
+    return resolved;
 };
 
 const prepareTaskUpdatesForStore = ({
     task,
     updates,
-    allTasks,
     allProjects,
     allSections,
     allAreas,
+    reserveProjectOrder,
+    projectOrderReserver,
 }: {
     task: Task;
     updates: Partial<Task>;
-    allTasks: Task[];
     allProjects: AppData['projects'];
     allSections: AppData['sections'];
     allAreas: AppData['areas'];
+    reserveProjectOrder?: boolean;
+    projectOrderReserver?: ProjectOrderReserver;
 }): { ok: true; updates: Partial<Task> } | { ok: false; error: string } => {
-    const resolveEffectiveContainer = (candidateUpdates: Partial<Task>) => resolveTaskContainerAssignment({
-        projectId: hasOwnField(candidateUpdates, 'projectId') ? candidateUpdates.projectId : task.projectId,
-        sectionId: hasOwnField(candidateUpdates, 'sectionId') ? candidateUpdates.sectionId : task.sectionId,
-        areaId: hasOwnField(candidateUpdates, 'areaId') ? candidateUpdates.areaId : task.areaId,
+    const containerPatch = buildTaskContainerMovePatch({
+        task,
+        updates,
         allProjects,
         allSections,
         allAreas,
+        reserveProjectOrder,
+        projectOrderReserver,
     });
+    if (!containerPatch.ok) return containerPatch;
 
-    let adjustedUpdates = normalizeTaskUpdateForStore({
-        task,
-        updates,
-        allTasks,
-    });
-
-    const firstResolution = resolveEffectiveContainer(adjustedUpdates);
-    if (!firstResolution.ok) return firstResolution;
-
-    adjustedUpdates = normalizeTaskUpdateForStore({
+    const adjustedUpdates = normalizeTaskUpdateForStore({
         task,
         updates: {
-            ...adjustedUpdates,
-            projectId: firstResolution.projectId,
-            sectionId: firstResolution.sectionId,
-            areaId: firstResolution.areaId,
+            ...updates,
+            ...containerPatch.updates,
         },
-        allTasks,
     });
-
-    const finalResolution = resolveEffectiveContainer(adjustedUpdates);
-    if (!finalResolution.ok) return finalResolution;
 
     return {
         ok: true,
         updates: {
             ...adjustedUpdates,
-            projectId: finalResolution.projectId,
-            sectionId: finalResolution.sectionId,
-            areaId: finalResolution.areaId,
+            ...containerPatch.updates,
         },
     };
 };
@@ -207,13 +363,17 @@ const prepareTaskUpdatesForStore = ({
 const normalizeTaskUpdateForStore = ({
     task,
     updates,
-    allTasks,
 }: {
     task: Task;
     updates: Partial<Task>;
-    allTasks: Task[];
 }): Partial<Task> => {
     let adjustedUpdates = updates;
+    if (hasOwnField(updates, 'recurrence')) {
+        adjustedUpdates = {
+            ...adjustedUpdates,
+            recurrence: normalizeRecurrenceForLoad(updates.recurrence),
+        };
+    }
     const hasOrder = Object.prototype.hasOwnProperty.call(updates, 'order');
     const hasOrderNum = Object.prototype.hasOwnProperty.call(updates, 'orderNum');
     if (hasOrder || hasOrderNum) {
@@ -224,121 +384,165 @@ const normalizeTaskUpdateForStore = ({
             orderNum: normalizedOrder,
         };
     }
-    if (!Object.prototype.hasOwnProperty.call(updates, 'projectId')) {
-        return adjustedUpdates;
-    }
-
-    const rawProjectId = updates.projectId;
-    const normalizedProjectId =
-        typeof rawProjectId === 'string' && rawProjectId.trim().length > 0
-            ? rawProjectId
-            : undefined;
-    const nextProjectId = normalizedProjectId ?? undefined;
-    const projectChanged = (task.projectId ?? undefined) !== nextProjectId;
-    if (projectChanged) {
-        const shouldClearSection = !Object.prototype.hasOwnProperty.call(updates, 'sectionId');
-        const hasTaskOrderOverride = hasOrder || hasOrderNum;
-        if (nextProjectId) {
-            if (!hasTaskOrderOverride) {
-                const nextOrder = reserveNextProjectOrder(nextProjectId, allTasks);
-                adjustedUpdates = {
-                    ...adjustedUpdates,
-                    order: nextOrder,
-                    orderNum: nextOrder,
-                };
-            }
-            if (!Object.prototype.hasOwnProperty.call(updates, 'areaId')) {
-                adjustedUpdates = {
-                    ...adjustedUpdates,
-                    areaId: undefined,
-                };
-            }
-            if (shouldClearSection) {
-                adjustedUpdates = {
-                    ...adjustedUpdates,
-                    sectionId: undefined,
-                };
-            }
-        } else {
-            adjustedUpdates = {
-                ...adjustedUpdates,
-                projectId: undefined,
-                order: undefined,
-                orderNum: undefined,
-                sectionId: undefined,
-            };
-        }
-    } else if (normalizedProjectId !== updates.projectId) {
+    // A schedule edit that defers the task (future start, or a recurring task
+    // hidden until its due/review date, #843) drops the Today star with it:
+    // the row leaves Focus either way, and a star surviving invisibly would
+    // resurface unasked when the deferral ends. Evaluated on the merged task so
+    // e.g. clearing the start of a recurring due-later task also unstars.
+    const editsSchedule = hasOwnField(updates, 'startTime')
+        || hasOwnField(updates, 'dueDate')
+        || hasOwnField(updates, 'reviewAt')
+        || hasOwnField(updates, 'recurrence');
+    if (editsSchedule && isTaskFutureStart({ ...task, ...adjustedUpdates })) {
         adjustedUpdates = {
             ...adjustedUpdates,
-            projectId: normalizedProjectId,
+            isFocusedToday: false,
         };
     }
-
+    // Star ↔ status invariant: starring an unprocessed inbox task promotes it
+    // to next (committing to do it today is a clarify decision), and demoting a
+    // starred task to inbox takes the star with it. When one patch does both,
+    // the star (the more deliberate action) wins. Review-due waiting/someday
+    // tasks deliberately KEEP their status when starred — "chase this today"
+    // does not stop the task being waiting-for. Creation-side promotion lives
+    // in addTask, where focus eligibility is evaluated before the star commits.
+    const starTurningOn = adjustedUpdates.isFocusedToday === true && task.isFocusedToday !== true;
+    const statusBecomingInbox = hasOwnField(updates, 'status') && updates.status === 'inbox' && task.status !== 'inbox';
+    if (statusBecomingInbox && !starTurningOn) {
+        if ((hasOwnField(adjustedUpdates, 'isFocusedToday') ? adjustedUpdates.isFocusedToday : task.isFocusedToday) === true) {
+            adjustedUpdates = {
+                ...adjustedUpdates,
+                isFocusedToday: false,
+            };
+        }
+    } else if (starTurningOn && (hasOwnField(updates, 'status') ? updates.status : task.status) === 'inbox') {
+        adjustedUpdates = {
+            ...adjustedUpdates,
+            status: 'next',
+        };
+    }
+    if (
+        hasOwnField(adjustedUpdates, 'status')
+        && adjustedUpdates.status !== task.status
+        && !hasOwnField(updates, 'boardOrder')
+    ) {
+        adjustedUpdates = {
+            ...adjustedUpdates,
+            boardOrder: undefined,
+        };
+    }
     return adjustedUpdates;
 };
 
-export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskActionContext): TaskActions => ({
+const createTaskQueryMatcher = (
+    options: TaskQueryOptions,
+    { checkVisibility }: { checkVisibility: boolean }
+): ((task: Task) => boolean) => {
+    const statusFilter = options.status;
+    const excludeStatuses = options.excludeStatuses ?? [];
+    const includeArchived = options.includeArchived === true;
+    const includeDeleted = options.includeDeleted === true;
+    const projectId = options.projectId;
+
+    return (task) => {
+        if (checkVisibility && !isTaskVisible(task, { includeArchived, includeDeleted })) return false;
+        if (statusFilter && statusFilter !== 'all' && task.status !== statusFilter) return false;
+        if (excludeStatuses.length > 0 && excludeStatuses.includes(task.status)) return false;
+        if (projectId && task.projectId !== projectId) return false;
+        return true;
+    };
+};
+
+export const createTaskActions = ({ set, get, getStorage, debouncedSave, trackImmediateSave }: TaskActionContext): TaskActions => ({
     /**
      * Add a new task to the store and persist to storage.
      * @param title Task title
      * @param initialProps Optional initial properties
      */
     addTask: async (title: string, initialProps?: Partial<Task>) => {
-        const changeAt = Date.now();
         const trimmedTitle = typeof title === 'string' ? title.trim() : '';
         if (!trimmedTitle) {
             const message = 'Task title is required';
             set({ error: message });
             return actionFail(message);
         }
-        const currentState = get();
-        const containerResolution = resolveTaskContainerAssignment({
-            projectId: initialProps?.projectId,
-            sectionId: initialProps?.sectionId,
-            areaId: initialProps?.areaId,
-            allProjects: currentState._allProjects,
-            allSections: currentState._allSections,
-            allAreas: currentState._allAreas,
-        });
-        if (!containerResolution.ok) {
-            set({ error: containerResolution.error });
-            return actionFail(containerResolution.error);
-        }
-        const resolvedStatus = (initialProps?.status ?? 'inbox') as TaskStatus;
-        const hasTaskOrder = Object.prototype.hasOwnProperty.call(initialProps ?? {}, 'order')
-            || Object.prototype.hasOwnProperty.call(initialProps ?? {}, 'orderNum');
-        const resolvedProjectId = containerResolution.projectId;
-        const resolvedSectionId = containerResolution.sectionId;
-        const resolvedAreaId = containerResolution.areaId;
-        const referenceClears = resolvedStatus === 'reference'
-            ? getReferenceTaskFieldClears()
-            : {};
-        const now = new Date().toISOString();
-        let snapshot: AppData | null = null;
-        let createdTaskId = '';
+        const result = await get().addTasks([{ title: trimmedTitle, initialProps }]);
+        if (!result.success) return result;
+        return actionOk({ id: result.ids?.[0] });
+    },
 
-        set((state) => {
-            const deviceState = ensureDeviceId(state.settings);
-            const deviceId = deviceState.deviceId;
-            const explicitOrder = getTaskOrder(initialProps ?? {});
+    /**
+     * Add multiple tasks in one store update and persistence snapshot.
+     */
+    addTasks: async (items: Array<{ title: string; initialProps?: Partial<Task> }>) => {
+        const changeAt = Date.now();
+        const normalizedItems = items.map((item) => ({
+            title: typeof item.title === 'string' ? item.title.trim() : '',
+            initialProps: item.initialProps ?? {},
+        })).filter((item) => item.title.length > 0);
+        if (normalizedItems.length === 0) return actionOk({ ids: [] });
+
+        const currentState = get();
+        const deviceState = ensureDeviceId(currentState.settings);
+        const deviceId = deviceState.deviceId;
+        const now = new Date().toISOString();
+        const projectOrderReserver = createProjectOrderReserver(currentState._allTasks);
+        const focusTaskLimit = normalizeFocusTaskLimit(currentState.settings.gtd?.focusTaskLimit);
+        let focusedCount = currentState.getDerivedState().focusedCount;
+        const nextAllTasks = [...currentState._allTasks];
+        const newTasks: Task[] = [];
+
+        for (const item of normalizedItems) {
+            const initialTaskProps = item.initialProps;
+            const hasExplicitAreaId = hasOwnField(initialTaskProps, 'areaId');
+            const shouldApplyDefaultArea = !hasExplicitAreaId
+                && !normalizeOptionalContainerId(initialTaskProps.projectId)
+                && !normalizeOptionalContainerId(initialTaskProps.sectionId);
+            const defaultAreaId = shouldApplyDefaultArea
+                ? resolveDefaultNewTaskAreaId(currentState.settings, currentState._allAreas)
+                : undefined;
+            const containerResolution = resolveTaskContainerAssignment({
+                projectId: initialTaskProps.projectId,
+                sectionId: initialTaskProps.sectionId,
+                areaId: defaultAreaId ?? initialTaskProps.areaId,
+                allProjects: currentState._allProjects,
+                allSections: currentState._allSections,
+                allAreas: currentState._allAreas,
+            });
+            if (!containerResolution.ok) {
+                set({ error: containerResolution.error });
+                return actionFail(containerResolution.error);
+            }
+
+            const resolvedStatus = (initialTaskProps.status ?? 'inbox') as TaskStatus;
+            const hasTaskOrder = hasOwnField(initialTaskProps, 'order') || hasOwnField(initialTaskProps, 'orderNum');
+            const resolvedProjectId = containerResolution.projectId;
+            const resolvedSectionId = containerResolution.sectionId;
+            const resolvedAreaId = containerResolution.areaId;
+            const referenceClears = resolvedStatus === 'reference'
+                ? getReferenceTaskFieldClears()
+                : {};
+            const explicitOrder = getTaskOrder(initialTaskProps);
             const resolvedOrder = !hasTaskOrder && resolvedProjectId
-                ? reserveNextProjectOrder(resolvedProjectId, state._allTasks)
+                ? projectOrderReserver(resolvedProjectId)
                 : explicitOrder;
-            createdTaskId = uuidv4();
             const newTask: Task = {
-                ...initialProps,
-                id: createdTaskId,
-                title: trimmedTitle,
+                ...initialTaskProps,
+                id: uuidv4(),
+                title: item.title,
                 status: resolvedStatus,
-                taskMode: initialProps?.taskMode ?? 'task',
-                tags: initialProps?.tags ?? [],
-                contexts: initialProps?.contexts ?? [],
-                pushCount: initialProps?.pushCount ?? 0,
+                taskMode: initialTaskProps.taskMode ?? 'task',
+                tags: initialTaskProps.tags ?? [],
+                contexts: initialTaskProps.contexts ?? [],
+                pushCount: initialTaskProps.pushCount ?? 0,
+                recurrence: normalizeRecurrenceForLoad(initialTaskProps.recurrence),
+                repeatReminderMinutes: normalizeRepeatReminderMinutes(initialTaskProps.repeatReminderMinutes),
                 rev: 1,
                 revBy: deviceId,
                 createdAt: now,
                 updatedAt: now,
+                deletedAt: undefined,
+                purgedAt: undefined,
                 ...referenceClears,
                 areaId: resolvedAreaId,
                 projectId: resolvedProjectId,
@@ -347,16 +551,41 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
                 orderNum: resolvedOrder,
             };
 
-            const newAllTasks = [...state._allTasks, newTask];
-            const newVisibleTasks = updateVisibleTasks(state.tasks, null, newTask);
+            if (newTask.isFocusedToday === true) {
+                // Starring at capture is an explicit "this is an actionable next action I'm
+                // doing today" decision, which is incompatible with the unprocessed Inbox
+                // default. Evaluate (and, if focus sticks, commit) the task as Next so the
+                // star can take effect — focus eligibility requires status 'next'. The
+                // promotion is committed only when focus actually lands, so a refused star
+                // (cap full / ineligible) never silently reclassifies an Inbox task.
+                const promotedStatus: TaskStatus = newTask.status === 'inbox' ? 'next' : newTask.status;
+                const focusCandidate: Task = { ...newTask, status: promotedStatus, isFocusedToday: false };
+                const focusEligibility = getTaskFocusEligibility(focusCandidate, {
+                    tasks: [...nextAllTasks, focusCandidate],
+                    projects: currentState._allProjects,
+                    showFutureStarts: currentState.settings.appearance?.showFutureStarts,
+                });
+                if (!focusEligibility.eligible || focusedCount >= focusTaskLimit) {
+                    newTask.isFocusedToday = false;
+                } else {
+                    newTask.status = promotedStatus;
+                    focusedCount += 1;
+                }
+            }
+
+            newTasks.push(newTask);
+            nextAllTasks.push(newTask);
+        }
+
+        let snapshot: AppData | null = null;
+        set((state) => {
             snapshot = buildSaveSnapshot(state, {
-                tasks: newAllTasks,
+                tasks: nextAllTasks,
                 ...(deviceState.updated ? { settings: deviceState.settings } : {}),
             });
             return {
-                tasks: newVisibleTasks,
-                _allTasks: newAllTasks,
-                lastDataChangeAt: changeAt,
+                _allTasks: nextAllTasks,
+                lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
                 ...(deviceState.updated ? { settings: deviceState.settings } : {}),
             };
         });
@@ -364,7 +593,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
         if (snapshot) {
             debouncedSave(snapshot, (msg) => set({ error: msg }));
         }
-        return actionOk({ id: createdTaskId });
+        return actionOk({ id: newTasks[0]?.id, ids: newTasks.map((task) => task.id) });
     },
 
     /**
@@ -376,7 +605,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
         const changeAt = Date.now();
         const now = new Date().toISOString();
         const currentState = get();
-        const existingTask = currentState._allTasks.find((task) => task.id === id);
+        const existingTask = currentState._tasksById.get(id);
         if (!existingTask) {
             const message = 'Task not found';
             logWarn('updateTask skipped: task not found', {
@@ -390,7 +619,6 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
         const preparedUpdates = prepareTaskUpdatesForStore({
             task: existingTask,
             updates,
-            allTasks: currentState._allTasks,
             allProjects: currentState._allProjects,
             allSections: currentState._allSections,
             allAreas: currentState._allAreas,
@@ -401,43 +629,50 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
         }
         const isPromotingTaskFocus = preparedUpdates.updates.isFocusedToday === true && existingTask.isFocusedToday !== true;
         if (isPromotingTaskFocus) {
-            const focusedCount = currentState._allTasks.filter(
-                (task) => task.isFocusedToday === true && !task.deletedAt
-            ).length;
-            if (focusedCount >= MAX_FOCUS_TASKS) {
-                const message = `Maximum of ${MAX_FOCUS_TASKS} focused tasks allowed`;
+            const focusTaskLimit = normalizeFocusTaskLimit(currentState.settings.gtd?.focusTaskLimit);
+            const focusedCount = currentState.getDerivedState().focusedCount;
+            if (focusedCount >= focusTaskLimit) {
+                const message = `Maximum of ${focusTaskLimit} focused tasks allowed`;
                 set({ error: message });
                 return actionFail(message);
             }
         }
         let snapshot: AppData | null = null;
+        const incrementalPersistence: { task?: Task; hasRecurringFollowUp: boolean } = {
+            hasRecurringFollowUp: false,
+        };
         set((state) => {
-            const oldTask = state._allTasks.find((t) => t.id === id);
+            const oldTask = state._tasksById.get(id);
             if (!oldTask) {
                 return state;
             }
             const deviceState = ensureDeviceId(state.settings);
-            const nextRevision = {
-                rev: normalizeRevision(oldTask.rev) + 1,
+            const revisionPatch = {
+                rev: nextRevision(oldTask.rev),
                 revBy: deviceState.deviceId,
             };
 
             const { updatedTask, nextRecurringTask } = applyTaskUpdates(
                 oldTask,
-                { ...preparedUpdates.updates, ...nextRevision },
+                { ...preparedUpdates.updates, ...revisionPatch },
                 now
             );
+            const stampedNextRecurringTask = stampNewRecurringFollowUp(nextRecurringTask, deviceState.deviceId);
+            const recurringFollowUpTask = findExistingRecurringFollowUp(state._allTasks, stampedNextRecurringTask)
+                ? null
+                : stampedNextRecurringTask;
+            incrementalPersistence.task = updatedTask;
+            incrementalPersistence.hasRecurringFollowUp = recurringFollowUpTask !== null;
 
-            const updatedAllTasksBase = state._allTasks.map((task) =>
-                task.id === id ? updatedTask : task
-            );
-            const updatedAllTasks = nextRecurringTask
-                ? [...updatedAllTasksBase, nextRecurringTask]
+            const updatedAllTasksBase = replaceEntityInArray(state._allTasks, id, updatedTask);
+            const updatedAllTasks = recurringFollowUpTask
+                ? [...updatedAllTasksBase, recurringFollowUpTask]
                 : updatedAllTasksBase;
+            const updatedTasksById = replaceEntityInMap(state._tasksById, updatedTask);
 
             let updatedVisibleTasks = updateVisibleTasks(state.tasks, oldTask, updatedTask);
-            if (nextRecurringTask) {
-                updatedVisibleTasks = updateVisibleTasks(updatedVisibleTasks, null, nextRecurringTask);
+            if (recurringFollowUpTask) {
+                updatedVisibleTasks = updateVisibleTasks(updatedVisibleTasks, null, recurringFollowUpTask);
             }
             snapshot = buildSaveSnapshot(state, {
                 tasks: updatedAllTasks,
@@ -446,12 +681,28 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
             return {
                 tasks: updatedVisibleTasks,
                 _allTasks: updatedAllTasks,
-                lastDataChangeAt: changeAt,
+                _tasksById: recurringFollowUpTask
+                    ? replaceEntityInMap(updatedTasksById, recurringFollowUpTask)
+                    : updatedTasksById,
+                lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
                 ...(deviceState.updated ? { settings: deviceState.settings } : {}),
             };
         });
 
-        if (snapshot) {
+        const storage = getStorage();
+        if (incrementalPersistence.task && !incrementalPersistence.hasRecurringFollowUp && storage.saveTask) {
+            const taskToPersist = incrementalPersistence.task;
+            void trackImmediateSave(storage.saveTask(taskToPersist, snapshot ?? undefined)).catch((error) => {
+                const message = error instanceof Error ? error.message : String(error);
+                logWarn('Incremental task save failed', {
+                    scope: 'store',
+                    category: 'storage',
+                    context: { taskId: taskToPersist.id },
+                    error,
+                });
+                set({ error: `Failed to save task: ${message}` });
+            });
+        } else if (snapshot) {
             debouncedSave(snapshot, (msg) => set({ error: msg }));
         }
         return actionOk();
@@ -462,185 +713,97 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
      * @param id Task ID
      */
     deleteTask: async (id: string) => {
-        const changeAt = Date.now();
-        const now = new Date().toISOString();
-        let snapshot: AppData | null = null;
-        let missingTask = false;
-        set((state) => {
-            const oldTask = state._allTasks.find((task) => task.id === id);
-            if (!oldTask) {
-                missingTask = true;
-                return state;
-            }
-            const deviceState = ensureDeviceId(state.settings);
-            const updatedTask = {
-                ...oldTask,
-                deletedAt: now,
-                updatedAt: now,
-                rev: normalizeRevision(oldTask.rev) + 1,
-                revBy: deviceState.deviceId,
-            };
-            // Update in full data (set tombstone)
-            const newAllTasks = state._allTasks.map((task) =>
-                task.id === id ? updatedTask : task
-            );
-            // Filter for UI state (hide deleted)
-            const newVisibleTasks = updateVisibleTasks(state.tasks, oldTask, updatedTask);
-            snapshot = buildSaveSnapshot(state, {
-                tasks: newAllTasks,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
-            });
-            return {
-                tasks: newVisibleTasks,
-                _allTasks: newAllTasks,
-                lastDataChangeAt: changeAt,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
-            };
+        return mutateTasks({ set, debouncedSave }, {
+            selectTasks: (state) => {
+                const task = state._tasksById.get(id);
+                return task ? [task] : [];
+            },
+            buildUpdates: (_task, { now }) => ({ deletedAt: now }),
+            missingMessage: 'Task not found',
         });
-        if (snapshot) {
-            debouncedSave(snapshot, (msg) => set({ error: msg }));
-        }
-        return missingTask ? actionFail('Task not found') : actionOk();
     },
 
     /**
      * Restore a soft-deleted task.
      */
     restoreTask: async (id: string) => {
-        const changeAt = Date.now();
-        const now = new Date().toISOString();
-        let snapshot: AppData | null = null;
-        let missingTask = false;
-        set((state) => {
-            const oldTask = state._allTasks.find((task) => task.id === id);
-            if (!oldTask) {
-                missingTask = true;
-                return state;
-            }
-            const deviceState = ensureDeviceId(state.settings);
-            const updatedTask = {
-                ...oldTask,
+        return mutateTasks({ set, debouncedSave }, {
+            selectTasks: (state) => {
+                const task = state._tasksById.get(id);
+                return task ? [task] : [];
+            },
+            buildUpdates: (task, { state }) => ({
                 deletedAt: undefined,
                 purgedAt: undefined,
-                updatedAt: now,
-                rev: normalizeRevision(oldTask.rev) + 1,
-                revBy: deviceState.deviceId,
-            };
-            const newAllTasks = state._allTasks.map((task) =>
-                task.id === id ? updatedTask : task
-            );
-            const newVisibleTasks = updateVisibleTasks(state.tasks, oldTask, updatedTask);
-            snapshot = buildSaveSnapshot(state, {
-                tasks: newAllTasks,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
-            });
-            return {
-                tasks: newVisibleTasks,
-                _allTasks: newAllTasks,
-                lastDataChangeAt: changeAt,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
-            };
+                ...sanitizeRestoredTaskContainerReferences(task, state),
+            }),
+            missingMessage: 'Task not found',
         });
-        if (snapshot) {
-            debouncedSave(snapshot, (msg) => set({ error: msg }));
-        }
-        return missingTask ? actionFail('Task not found') : actionOk();
     },
 
     /**
      * Permanently delete a task (removes from storage).
      */
     purgeTask: async (id: string) => {
-        const changeAt = Date.now();
-        const now = new Date().toISOString();
-        let snapshot: AppData | null = null;
-        let missingTask = false;
-        set((state) => {
-            const oldTask = state._allTasks.find((task) => task.id === id);
-            if (!oldTask) {
-                missingTask = true;
-                return state;
-            }
-            const deviceState = ensureDeviceId(state.settings);
-            const updatedTask = {
-                ...oldTask,
-                deletedAt: oldTask.deletedAt ?? now,
+        return mutateTasks({ set, debouncedSave }, {
+            selectTasks: (state) => {
+                const task = state._tasksById.get(id);
+                return task ? [task] : [];
+            },
+            buildUpdates: (task, { now }) => ({
+                deletedAt: task.deletedAt ?? now,
                 purgedAt: now,
-                attachments: stripAttachmentRemoteMetadata(oldTask.attachments),
-                updatedAt: now,
-                rev: normalizeRevision(oldTask.rev) + 1,
-                revBy: deviceState.deviceId,
-            };
-            const newAllTasks = state._allTasks.map((task) =>
-                task.id === id ? updatedTask : task
-            );
-            const newVisibleTasks = updateVisibleTasks(state.tasks, oldTask, updatedTask);
-            snapshot = buildSaveSnapshot(state, {
-                tasks: newAllTasks,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
-            });
-            return {
-                tasks: newVisibleTasks,
-                _allTasks: newAllTasks,
-                lastDataChangeAt: changeAt,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
-            };
+                attachments: stripAttachmentRemoteMetadata(task.attachments),
+            }),
+            buildSettings: (state, selectedTasks, { settings }) => {
+                const selectedIds = new Set(selectedTasks.map((task) => task.id));
+                const remainingTasks = state._allTasks.filter((task) => !selectedIds.has(task.id));
+                const pendingDeletes = collectPendingRemoteDeletesForTasks(selectedTasks, remainingTasks);
+                return pendingDeletes.length > 0
+                    ? appendPendingRemoteDeletes(settings, pendingDeletes)
+                    : undefined;
+            },
+            missingMessage: 'Task not found',
         });
-        if (snapshot) {
-            debouncedSave(snapshot, (msg) => set({ error: msg }));
-        }
-        return missingTask ? actionFail('Task not found') : actionOk();
     },
 
     /**
      * Permanently delete all soft-deleted tasks.
      */
     purgeDeletedTasks: async () => {
-        const changeAt = Date.now();
-        const now = new Date().toISOString();
-        let snapshot: AppData | null = null;
-        set((state) => {
-            const deviceState = ensureDeviceId(state.settings);
-            const newAllTasks = state._allTasks.map((task) =>
-                task.deletedAt
-                    ? {
-                        ...task,
-                        purgedAt: now,
-                        attachments: stripAttachmentRemoteMetadata(task.attachments),
-                        updatedAt: now,
-                        rev: normalizeRevision(task.rev) + 1,
-                        revBy: deviceState.deviceId,
-                    }
-                    : task
-            );
-            snapshot = buildSaveSnapshot(state, {
-                tasks: newAllTasks,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
-            });
-            return {
-                tasks: state.tasks,
-                _allTasks: newAllTasks,
-                lastDataChangeAt: changeAt,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
-            };
+        return mutateTasks({ set, debouncedSave }, {
+            selectTasks: (state) => state._allTasks.filter((task) => task.deletedAt && !task.purgedAt),
+            buildUpdates: (task, { now }) => ({
+                purgedAt: now,
+                attachments: stripAttachmentRemoteMetadata(task.attachments),
+            }),
+            buildSettings: (state, selectedTasks, { settings }) => {
+                const selectedIds = new Set(selectedTasks.map((task) => task.id));
+                const remainingTasks = state._allTasks.filter((task) => !selectedIds.has(task.id));
+                const pendingDeletes = collectPendingRemoteDeletesForTasks(selectedTasks, remainingTasks);
+                return pendingDeletes.length > 0
+                    ? appendPendingRemoteDeletes(settings, pendingDeletes)
+                    : undefined;
+            },
+            updateVisible: false,
+            ensureDeviceIdWhenEmpty: true,
         });
-        if (snapshot) {
-            debouncedSave(snapshot, (msg) => set({ error: msg }));
-        }
-        return actionOk();
     },
 
     /**
-     * Duplicate a task for reusable lists/templates.
+     * Duplicate a task as a fresh, re-doable copy: clones the details (title, dates,
+     * recurrence, tags, project) but resets completion — unchecks the checklist, clears
+     * completedAt, and reactivates done/archived tasks so the copy is always actionable.
      */
     duplicateTask: async (id: string, asNextAction?: boolean) => {
         const changeAt = Date.now();
         const now = new Date().toISOString();
         let snapshot: AppData | null = null;
         let missingTask = false;
+        let duplicatedTaskId: string | undefined;
         set((state) => {
-            const sourceTask = state._allTasks.find((task) => task.id === id && !task.deletedAt);
-            if (!sourceTask) {
+            const sourceTask = state._tasksById.get(id);
+            if (!sourceTask || sourceTask.deletedAt) {
                 missingTask = true;
                 return state;
             }
@@ -651,32 +814,38 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
                 id: uuidv4(),
                 isCompleted: false,
             }));
-            const duplicatedAttachments = (sourceTask.attachments || []).map((attachment) => ({
-                ...attachment,
-                id: uuidv4(),
-                createdAt: now,
-                updatedAt: now,
-                deletedAt: undefined,
-            }));
+            const duplicatedAttachments = (sourceTask.attachments || []).flatMap((attachment) => {
+                if (attachment.kind === 'file') {
+                    return [];
+                }
+                return [{
+                    ...attachment,
+                    id: uuidv4(),
+                    createdAt: now,
+                    updatedAt: now,
+                    deletedAt: undefined,
+                    cloudKey: undefined,
+                    fileHash: undefined,
+                    localStatus: undefined,
+                }];
+            });
+            const projectOrderReserver = createProjectOrderReserver(state._allTasks);
             const duplicatedOrder = sourceTask.projectId
-                ? reserveNextProjectOrder(sourceTask.projectId, state._allTasks)
+                ? projectOrderReserver(sourceTask.projectId)
                 : undefined;
+            duplicatedTaskId = uuidv4();
 
             const newTask: Task = {
                 ...sourceTask,
-                id: uuidv4(),
-                title: `${sourceTask.title} (Copy)`,
-                status: asNextAction ? 'next' : 'inbox',
+                id: duplicatedTaskId,
+                title: sourceTask.title,
+                status: asNextAction || sourceTask.status === 'done' || sourceTask.status === 'archived' ? 'next' : sourceTask.status,
                 checklist: duplicatedChecklist.length > 0 ? duplicatedChecklist : undefined,
                 attachments: duplicatedAttachments.length > 0 ? duplicatedAttachments : undefined,
-                startTime: undefined,
-                dueDate: undefined,
-                recurrence: undefined,
-                reviewAt: undefined,
                 completedAt: undefined,
                 isFocusedToday: false,
-                pushCount: 0,
                 deletedAt: undefined,
+                purgedAt: undefined,
                 createdAt: now,
                 updatedAt: now,
                 rev: 1,
@@ -694,67 +863,158 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
             return {
                 tasks: newVisibleTasks,
                 _allTasks: newAllTasks,
-                lastDataChangeAt: changeAt,
+                lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
                 ...(deviceState.updated ? { settings: deviceState.settings } : {}),
             };
         });
         if (snapshot) {
             debouncedSave(snapshot, (msg) => set({ error: msg }));
         }
-        return missingTask ? actionFail('Task not found') : actionOk();
+        return missingTask ? actionFail('Task not found') : actionOk({ id: duplicatedTaskId });
+    },
+
+    /**
+     * Create or reuse a project from a task while keeping the task as the first action.
+     */
+    promoteTaskToProject: async (id: string, options?: { title?: string; color?: string; areaId?: string }) => {
+        const changeAt = Date.now();
+        const now = new Date().toISOString();
+        let snapshot: AppData | null = null;
+        let missingTask = false;
+        let errorMessage: string | undefined;
+        let promotedProjectId: string | undefined;
+        let reusedExistingProject = false;
+        set((state) => {
+            const sourceTask = state._tasksById.get(id);
+            if (!sourceTask || sourceTask.deletedAt) {
+                missingTask = true;
+                return state;
+            }
+
+            const trimmedTitle = (typeof options?.title === 'string' ? options.title : sourceTask.title).trim();
+            if (!trimmedTitle) {
+                errorMessage = 'Project title is required';
+                return { error: errorMessage };
+            }
+
+            const explicitAreaId = normalizeOptionalContainerId(options?.areaId);
+            const sourceProject = sourceTask.projectId ? state._projectsById.get(sourceTask.projectId) : undefined;
+            const inheritedAreaId = explicitAreaId ?? sourceTask.areaId ?? sourceProject?.areaId;
+            const targetAreaId = inheritedAreaId && state._allAreas.some((area) => area.id === inheritedAreaId && !area.deletedAt)
+                ? inheritedAreaId
+                : undefined;
+            if (explicitAreaId && !targetAreaId) {
+                errorMessage = 'Area not found';
+                return { error: errorMessage };
+            }
+
+            const existingProject = findSelectableProjectByTitleAndArea(
+                state._allProjects,
+                trimmedTitle,
+                targetAreaId
+            );
+            reusedExistingProject = Boolean(existingProject);
+            const projectSupportNotes = typeof sourceTask.description === 'string' && sourceTask.description.trim()
+                ? sourceTask.description.trim()
+                : undefined;
+            const projectTagIds = Array.from(new Set((sourceTask.tags || [])
+                .map((tag) => typeof tag === 'string' ? tag.trim() : '')
+                .filter(Boolean)));
+            const deviceState = ensureDeviceId(state.settings);
+            let targetProject = existingProject;
+            let nextAllProjects = state._allProjects;
+            if (!targetProject) {
+                const newProject = buildNewProject({
+                    title: trimmedTitle,
+                    color: options?.color,
+                    initialProps: {
+                        ...(targetAreaId ? { areaId: targetAreaId } : {}),
+                        ...(projectSupportNotes ? { supportNotes: projectSupportNotes } : {}),
+                        tagIds: projectTagIds,
+                    },
+                    existingProjects: state._allProjects,
+                    settings: state.settings,
+                    deviceId: deviceState.deviceId,
+                    now,
+                });
+                targetProject = newProject;
+                nextAllProjects = [...state._allProjects, newProject];
+            }
+
+            promotedProjectId = targetProject.id;
+            const projectOrderReserver = createProjectOrderReserver(state._allTasks);
+            const preparedUpdates = prepareTaskUpdatesForStore({
+                task: sourceTask,
+                updates: {
+                    projectId: targetProject.id,
+                    sectionId: undefined,
+                    areaId: undefined,
+                },
+                allProjects: nextAllProjects,
+                allSections: state._allSections,
+                allAreas: state._allAreas,
+                projectOrderReserver,
+            });
+            if (!preparedUpdates.ok) {
+                errorMessage = preparedUpdates.error;
+                return { error: errorMessage };
+            }
+
+            const { updatedTask } = applyTaskUpdates(
+                sourceTask,
+                {
+                    ...preparedUpdates.updates,
+                    rev: nextRevision(sourceTask.rev),
+                    revBy: deviceState.deviceId,
+                },
+                now
+            );
+            const nextAllTasks = replaceEntityInArray(state._allTasks, id, updatedTask);
+            const nextVisibleTasks = updateVisibleTasks(state.tasks, sourceTask, updatedTask);
+            snapshot = buildSaveSnapshot(state, {
+                tasks: nextAllTasks,
+                projects: nextAllProjects,
+                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+            });
+            return {
+                tasks: nextVisibleTasks,
+                _allTasks: nextAllTasks,
+                _allProjects: nextAllProjects,
+                lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
+                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
+            };
+        });
+        if (snapshot) {
+            debouncedSave(snapshot, (msg) => set({ error: msg }));
+        }
+        if (missingTask) return actionFail('Task not found');
+        if (errorMessage) return actionFail(errorMessage);
+        return actionOk({ id: promotedProjectId, reused: reusedExistingProject });
     },
 
     /**
      * Reset checklist items to unchecked (useful for reusable lists).
      */
     resetTaskChecklist: async (id: string) => {
-        const changeAt = Date.now();
-        const now = new Date().toISOString();
-        let snapshot: AppData | null = null;
-        let missingTask = false;
-        set((state) => {
-            const sourceTask = state._allTasks.find((task) => task.id === id && !task.deletedAt);
-            if (!sourceTask || !sourceTask.checklist || sourceTask.checklist.length === 0) {
-                missingTask = true;
-                return state;
-            }
-            const deviceState = ensureDeviceId(state.settings);
-
-            const resetChecklist = sourceTask.checklist.map((item) => ({
-                ...item,
-                isCompleted: false,
-            }));
-            const wasDone = sourceTask.status === 'done';
-            const nextStatus: TaskStatus = wasDone ? 'next' : sourceTask.status;
-
-            const updatedTask: Task = {
-                ...sourceTask,
-                checklist: resetChecklist,
-                status: nextStatus,
-                completedAt: wasDone ? undefined : sourceTask.completedAt,
-                isFocusedToday: wasDone ? false : sourceTask.isFocusedToday,
-                updatedAt: now,
-                rev: normalizeRevision(sourceTask.rev) + 1,
-                revBy: deviceState.deviceId,
-            };
-
-            const newAllTasks = state._allTasks.map((task) => (task.id === id ? updatedTask : task));
-            const newVisibleTasks = updateVisibleTasks(state.tasks, sourceTask, updatedTask);
-            snapshot = buildSaveSnapshot(state, {
-                tasks: newAllTasks,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
-            });
-            return {
-                tasks: newVisibleTasks,
-                _allTasks: newAllTasks,
-                lastDataChangeAt: changeAt,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
-            };
+        return mutateTasks({ set, debouncedSave }, {
+            selectTasks: (state) => {
+                const task = state._tasksById.get(id);
+                return task && !task.deletedAt && task.checklist && task.checklist.length > 0 ? [task] : [];
+            },
+            buildUpdates: (task) => {
+                const wasDone = task.status === 'done';
+                return {
+                    checklist: task.checklist?.map((item) => ({
+                        ...item,
+                        isCompleted: false,
+                    })),
+                    status: wasDone ? 'next' : task.status,
+                    completedAt: wasDone ? undefined : task.completedAt,
+                    isFocusedToday: wasDone ? false : task.isFocusedToday,
+                };
+            },
+            missingMessage: 'Task not found',
         });
-        if (snapshot) {
-            debouncedSave(snapshot, (msg) => set({ error: msg }));
-        }
-        return missingTask ? actionFail('Task not found') : actionOk();
     },
 
     /**
@@ -788,7 +1048,7 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
             set({ error: message });
             return actionFail(message);
         }
-        const existingTaskIds = new Set(state._allTasks.map((task) => task.id));
+        const existingTaskIds = new Set(state._tasksById.keys());
         const missingIds = updatesList
             .map((update) => update.id)
             .filter((id, index, ids) => !existingTaskIds.has(id) && ids.indexOf(id) === index);
@@ -797,18 +1057,17 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
             set({ error: message });
             return actionFail(message);
         }
-        const tasksById = new Map(state._allTasks.map((task) => [task.id, task] as const));
         const preparedUpdatesById = new Map<string, Partial<Task>>();
         for (const { id, updates } of updatesList) {
-            const task = tasksById.get(id);
+            const task = state._tasksById.get(id);
             if (!task) continue;
             const preparedUpdates = prepareTaskUpdatesForStore({
                 task,
                 updates,
-                allTasks: state._allTasks,
                 allProjects: state._allProjects,
                 allSections: state._allSections,
                 allAreas: state._allAreas,
+                reserveProjectOrder: false,
             });
             if (!preparedUpdates.ok) {
                 set({ error: preparedUpdates.error });
@@ -822,40 +1081,44 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
 
         set((state) => {
             const deviceState = ensureDeviceId(state.settings);
-            let newVisibleTasks = state.tasks;
             let nextRecurringTasks: Task[] = [];
+            const changedTasks: Task[] = [];
             const newAllTasksBase = [...state._allTasks];
+            const projectOrderReserver = createProjectOrderReserver(newAllTasksBase);
             for (let index = 0; index < state._allTasks.length; index += 1) {
                 const task = newAllTasksBase[index];
                 const preparedUpdates = preparedUpdatesById.get(task.id);
                 if (!preparedUpdates) continue;
-                const adjustedUpdates = normalizeTaskUpdateForStore({
+                const adjustedUpdates = reserveTaskContainerProjectOrder({
                     task,
                     updates: preparedUpdates,
-                    allTasks: newAllTasksBase,
-                });
+                    projectOrderReserver,
+                }) as Partial<Task>;
                 const { updatedTask, nextRecurringTask } = applyTaskUpdates(
                     task,
                     {
                         ...adjustedUpdates,
-                        rev: normalizeRevision(task.rev) + 1,
+                        rev: nextRevision(task.rev),
                         revBy: deviceState.deviceId,
                     },
                     now
                 );
-                if (nextRecurringTask) nextRecurringTasks = [...nextRecurringTasks, nextRecurringTask];
-                newVisibleTasks = updateVisibleTasks(newVisibleTasks, task, updatedTask);
+                const stampedNextRecurringTask = stampNewRecurringFollowUp(nextRecurringTask, deviceState.deviceId);
+                const duplicateFollowUp = findExistingRecurringFollowUp(
+                    [...newAllTasksBase, ...nextRecurringTasks],
+                    stampedNextRecurringTask
+                );
+                if (stampedNextRecurringTask && !duplicateFollowUp) {
+                    nextRecurringTasks = [...nextRecurringTasks, stampedNextRecurringTask];
+                }
                 newAllTasksBase[index] = updatedTask;
+                changedTasks.push(updatedTask);
             }
 
             const newAllTasks = nextRecurringTasks.length > 0
                 ? [...newAllTasksBase, ...nextRecurringTasks]
                 : newAllTasksBase;
-            if (nextRecurringTasks.length > 0) {
-                nextRecurringTasks.forEach((task) => {
-                    newVisibleTasks = updateVisibleTasks(newVisibleTasks, null, task);
-                });
-            }
+            const newVisibleTasks = applyVisibleTaskChanges(state.tasks, changedTasks, nextRecurringTasks);
 
             snapshot = buildSaveSnapshot(state, {
                 tasks: newAllTasks,
@@ -865,7 +1128,8 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
             return {
                 tasks: newVisibleTasks,
                 _allTasks: newAllTasks,
-                lastDataChangeAt: changeAt,
+                _tasksById: replaceEntitiesInMap(state._tasksById, [...changedTasks, ...nextRecurringTasks]),
+                lastDataChangeAt: getNextDataChangeAt(state.lastDataChangeAt, changeAt),
                 ...(deviceState.updated ? { settings: deviceState.settings } : {}),
             };
         });
@@ -883,47 +1147,37 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
     batchDeleteTasks: async (ids: string[]) => {
         if (ids.length === 0) return actionOk();
         const state = get();
-        const existingTaskIds = new Set(state._allTasks.map((task) => task.id));
+        const existingTaskIds = new Set(
+            state._allTasks
+                .filter((task) => !task.deletedAt)
+                .map((task) => task.id)
+        );
         const missingIds = ids.filter((id, index) => !existingTaskIds.has(id) && ids.indexOf(id) === index);
         if (missingIds.length > 0) {
             const message = `Tasks not found: ${missingIds.join(', ')}`;
             set({ error: message });
             return actionFail(message);
         }
-        const changeAt = Date.now();
-        const now = new Date().toISOString();
         const idSet = new Set(ids);
-        let snapshot: AppData | null = null;
-        set((state) => {
-            const deviceState = ensureDeviceId(state.settings);
-            let newVisibleTasks = state.tasks;
-            const newAllTasks = state._allTasks.map((task) => {
-                if (!idSet.has(task.id)) return task;
-                const updatedTask = {
-                    ...task,
-                    deletedAt: now,
-                    updatedAt: now,
-                    rev: normalizeRevision(task.rev) + 1,
-                    revBy: deviceState.deviceId,
-                };
-                newVisibleTasks = updateVisibleTasks(newVisibleTasks, task, updatedTask);
-                return updatedTask;
-            });
-            snapshot = buildSaveSnapshot(state, {
-                tasks: newAllTasks,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
-            });
-            return {
-                tasks: newVisibleTasks,
-                _allTasks: newAllTasks,
-                lastDataChangeAt: changeAt,
-                ...(deviceState.updated ? { settings: deviceState.settings } : {}),
-            };
+        return mutateTasks({ set, debouncedSave }, {
+            selectTasks: (state) => state._allTasks.filter((task) => idSet.has(task.id)),
+            buildUpdates: (_task, { now }) => ({ deletedAt: now }),
         });
-        if (snapshot) {
-            debouncedSave(snapshot, (msg) => set({ error: msg }));
-        }
-        return actionOk();
+    },
+
+    getFocusStarAction: (task: Task, options?: { allowUnclarified?: boolean }): FocusStarAction => {
+        const state = get();
+        const derived = state.getDerivedState();
+        return resolveFocusStarAction(task, {
+            tasks: collectFocusEligibilityTasks(derived.activeTasksByStatus),
+            projects: derived.projectMap,
+            focusedCount: derived.focusedCount,
+            focusTaskLimit: normalizeFocusTaskLimit(state.settings.gtd?.focusTaskLimit),
+            showFutureStarts: state.settings.appearance?.showFutureStarts,
+            sequentialProjectIds: derived.sequentialProjectIds,
+            sectionScopedProjectIds: derived.sequentialWithinSectionProjectIds,
+            allowUnclarified: options?.allowUnclarified,
+        });
     },
 
     queryTasks: async (options: TaskQueryOptions) => {
@@ -931,17 +1185,19 @@ export const createTaskActions = ({ set, get, getStorage, debouncedSave }: TaskA
         if (storage.queryTasks) {
             return storage.queryTasks(options);
         }
-        const tasks = get()._allTasks;
-        const statusFilter = options.status;
-        const excludeStatuses = options.excludeStatuses ?? [];
         const includeArchived = options.includeArchived === true;
         const includeDeleted = options.includeDeleted === true;
-        return tasks.filter((task) => {
-            if (!isTaskVisible(task, { includeArchived, includeDeleted })) return false;
-            if (statusFilter && statusFilter !== 'all' && task.status !== statusFilter) return false;
-            if (excludeStatuses.length > 0 && excludeStatuses.includes(task.status)) return false;
-            if (options.projectId && task.projectId !== options.projectId) return false;
-            return true;
-        });
+        if (!includeArchived && !includeDeleted) {
+            const statusFilter = options.status;
+            const state = get();
+            const derived = state.getDerivedState();
+            const indexedTasks = options.projectId
+                ? derived.tasksByProjectId.get(options.projectId) ?? []
+                : statusFilter && statusFilter !== 'all'
+                    ? derived.activeTasksByStatus.get(statusFilter) ?? []
+                    : state.tasks;
+            return indexedTasks.filter(createTaskQueryMatcher(options, { checkVisibility: false }));
+        }
+        return get()._allTasks.filter(createTaskQueryMatcher(options, { checkVisibility: true }));
     },
 });

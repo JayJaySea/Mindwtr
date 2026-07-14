@@ -118,6 +118,11 @@ vi.mock('expo-file-system/legacy', () => ({
   moveAsync: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('expo-clipboard', () => ({
+  __esModule: true,
+  setStringAsync: vi.fn().mockResolvedValue(true),
+}));
+
 vi.mock('@expo/vector-icons', () => {
   const Icon = (props: any) => React.createElement('Icon', props, props.children);
   return {
@@ -146,9 +151,13 @@ vi.mock('lucide-react-native', () => {
     'AlertTriangle',
     'Archive',
     'ArrowLeft',
+    'ArrowDown',
     'ArrowRight',
     'ArrowRightCircle',
+    'ArrowUp',
     'AtSign',
+    'Bell',
+    'BookmarkPlus',
     'Calendar',
     'CalendarDays',
     'Check',
@@ -156,19 +165,30 @@ vi.mock('lucide-react-native', () => {
     'CheckCircle2',
     'CheckSquare',
     'ChevronDown',
+    'ChevronUp',
     'ChevronRight',
     'Clock',
+    'Database',
     'Flag',
     'Folder',
+    'GripVertical',
     'Inbox',
+    'Info',
+    'Layers',
     'Lightbulb',
+    'ListChecks',
+    'ListOrdered',
     'Menu',
     'Mic',
+    'Monitor',
+    'MoveVertical',
     'PauseCircle',
     'Play',
     'Plus',
+    'RefreshCw',
     'RotateCcw',
     'Search',
+    'Settings2',
     'SlidersHorizontal',
     'Sparkles',
     'Square',

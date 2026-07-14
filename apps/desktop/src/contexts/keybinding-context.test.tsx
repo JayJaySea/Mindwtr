@@ -6,9 +6,9 @@ import { LanguageProvider } from './language-context';
 import { KeybindingProvider } from './keybinding-context';
 import { useKeybindings } from './keybinding-context';
 import { useUiStore } from '../store/ui-store';
-import { AREA_FILTER_ALL } from '../lib/area-filter';
+import { AREA_FILTER_ALL } from '@mindwtr/core';
 
-const DummyList = () => {
+const DummyList = ({ focusAddInput, openSelected, setStatusSelected }: { focusAddInput?: () => void; openSelected?: () => void; setStatusSelected?: (status: string) => void } = {}) => {
     const { registerTaskListScope } = useKeybindings();
     const [selectedIndex, setSelectedIndex] = useState(0);
     const ids = ['1', '2'];
@@ -32,11 +32,14 @@ const DummyList = () => {
             selectFirst,
             selectLast,
             editSelected: vi.fn(),
+            openSelected,
             toggleDoneSelected: vi.fn(),
             deleteSelected: vi.fn(),
+            setStatusSelected,
+            focusAddInput,
         });
         return () => registerTaskListScope(null);
-    }, [registerTaskListScope, selectNext, selectPrev, selectFirst, selectLast]);
+    }, [focusAddInput, openSelected, registerTaskListScope, selectNext, selectPrev, selectFirst, selectLast, setStatusSelected]);
 
     return (
         <div>
@@ -177,6 +180,51 @@ describe('KeybindingProvider (vim)', () => {
         window.removeEventListener('mindwtr:quick-add', quickAddListener);
     });
 
+    it.each(['vim', 'emacs'] as const)('opens app-scoped quick add with a in %s style', (style) => {
+        const focusAddInput = vi.fn();
+        const quickAddListener = vi.fn();
+        window.addEventListener('mindwtr:quick-add', quickAddListener);
+        useTaskStore.setState((state) => ({
+            settings: {
+                ...state.settings,
+                keybindingStyle: style,
+            },
+        }));
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={vi.fn()}>
+                    <DummyList focusAddInput={focusAddInput} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        fireEvent.keyDown(window, { key: 'a' });
+
+        expect(quickAddListener).toHaveBeenCalledTimes(1);
+        expect((quickAddListener.mock.calls[0]?.[0] as CustomEvent).detail).toBeUndefined();
+        expect(focusAddInput).not.toHaveBeenCalled();
+        window.removeEventListener('mindwtr:quick-add', quickAddListener);
+    });
+
+    it('does not use o as an add-task shortcut', () => {
+        const quickAddListener = vi.fn();
+        window.addEventListener('mindwtr:quick-add', quickAddListener);
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={vi.fn()}>
+                    <DummyList />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        fireEvent.keyDown(window, { key: 'o' });
+
+        expect(quickAddListener).not.toHaveBeenCalled();
+        window.removeEventListener('mindwtr:quick-add', quickAddListener);
+    });
+
     it('opens settings with Cmd+,', () => {
         const onNavigate = vi.fn();
         render(
@@ -216,7 +264,7 @@ describe('KeybindingProvider (vim)', () => {
     it('switches the global area filter with a number chord in sidebar order', async () => {
         useTaskStore.setState((state) => ({
             ...state,
-            areas: [
+            _allAreas: [
                 { id: 'area-work', name: 'Work', order: 2, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
                 { id: 'area-home', name: 'Home', order: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
                 { id: 'area-errands', name: 'Errands', order: 1, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
@@ -238,7 +286,7 @@ describe('KeybindingProvider (vim)', () => {
             </LanguageProvider>
         );
 
-        fireEvent.keyDown(window, { key: 'a' });
+        fireEvent.keyDown(window, { key: 'A', shiftKey: true });
         fireEvent.keyDown(window, { key: '2' });
 
         await waitFor(() => {
@@ -246,10 +294,10 @@ describe('KeybindingProvider (vim)', () => {
         });
     });
 
-    it('clears the global area filter with a0', async () => {
+    it('clears the global area filter with A0', async () => {
         useTaskStore.setState((state) => ({
             ...state,
-            areas: [
+            _allAreas: [
                 { id: 'area-home', name: 'Home', order: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
             ],
             settings: {
@@ -269,12 +317,238 @@ describe('KeybindingProvider (vim)', () => {
             </LanguageProvider>
         );
 
-        fireEvent.keyDown(window, { key: 'a' });
+        fireEvent.keyDown(window, { key: 'A', shiftKey: true });
         fireEvent.keyDown(window, { key: '0' });
 
         await waitFor(() => {
             expect(useTaskStore.getState().settings?.filters?.areaId).toBe(AREA_FILTER_ALL);
         });
+    });
+
+    it('starts the area filter chord when Shift+a reports lowercase a', async () => {
+        useTaskStore.setState((state) => ({
+            ...state,
+            _allAreas: [
+                { id: 'area-home', name: 'Home', order: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
+                { id: 'area-work', name: 'Work', order: 1, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
+            ],
+            settings: {
+                ...state.settings,
+                filters: {
+                    ...(state.settings?.filters ?? {}),
+                    areaId: AREA_FILTER_ALL,
+                },
+            },
+        }));
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={vi.fn()}>
+                    <DummyList />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        fireEvent.keyDown(window, { key: 'a', shiftKey: true });
+        fireEvent.keyDown(window, { key: '2' });
+
+        await waitFor(() => {
+            expect(useTaskStore.getState().settings?.filters?.areaId).toBe('area-work');
+        });
+    });
+
+    it('can switch area filters repeatedly with A number chords', async () => {
+        useTaskStore.setState((state) => ({
+            ...state,
+            _allAreas: [
+                { id: 'area-home', name: 'Home', order: 0, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
+                { id: 'area-work', name: 'Work', order: 1, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' },
+            ],
+            settings: {
+                ...state.settings,
+                filters: {
+                    ...(state.settings?.filters ?? {}),
+                    areaId: AREA_FILTER_ALL,
+                },
+            },
+        }));
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={vi.fn()}>
+                    <DummyList />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        fireEvent.keyDown(window, { key: 'A', shiftKey: true });
+        fireEvent.keyDown(window, { key: '1' });
+
+        await waitFor(() => {
+            expect(useTaskStore.getState().settings?.filters?.areaId).toBe('area-home');
+        });
+
+        fireEvent.keyDown(window, { key: 'A', shiftKey: true });
+        fireEvent.keyDown(window, { key: '2' });
+
+        await waitFor(() => {
+            expect(useTaskStore.getState().settings?.filters?.areaId).toBe('area-work');
+        });
+
+        fireEvent.keyDown(window, { key: 'A', shiftKey: true });
+        fireEvent.keyDown(window, { key: '0' });
+
+        await waitFor(() => {
+            expect(useTaskStore.getState().settings?.filters?.areaId).toBe(AREA_FILTER_ALL);
+        });
+    });
+
+    it('ignores list shortcuts while focus is inside an open menu', () => {
+        const editSelected = vi.fn();
+        const toggleDoneSelected = vi.fn();
+
+        const MenuHarness = () => {
+            const { registerTaskListScope } = useKeybindings();
+            useEffect(() => {
+                registerTaskListScope({
+                    kind: 'taskList',
+                    selectNext: vi.fn(),
+                    selectPrev: vi.fn(),
+                    selectFirst: vi.fn(),
+                    selectLast: vi.fn(),
+                    editSelected,
+                    toggleDoneSelected,
+                    deleteSelected: vi.fn(),
+                });
+                return () => registerTaskListScope(null);
+            }, [registerTaskListScope]);
+            return (
+                <div role="menu">
+                    <button type="button" role="menuitem">Duplicate</button>
+                </div>
+            );
+        };
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={vi.fn()}>
+                    <MenuHarness />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        const item = document.querySelector('[role="menuitem"]') as HTMLButtonElement;
+        item.focus();
+        fireEvent.keyDown(item, { key: 'e' });
+        fireEvent.keyDown(item, { key: 'x' });
+
+        expect(editSelected).not.toHaveBeenCalled();
+        expect(toggleDoneSelected).not.toHaveBeenCalled();
+    });
+
+    it('ignores list shortcuts while a modal dialog is open, even with focus outside it', () => {
+        const editSelected = vi.fn();
+        const toggleDoneSelected = vi.fn();
+        const openSelected = vi.fn();
+        const selectNext = vi.fn();
+
+        const DialogHarness = () => {
+            const { registerTaskListScope } = useKeybindings();
+            useEffect(() => {
+                registerTaskListScope({
+                    kind: 'taskList',
+                    selectNext,
+                    selectPrev: vi.fn(),
+                    selectFirst: vi.fn(),
+                    selectLast: vi.fn(),
+                    editSelected,
+                    openSelected,
+                    toggleDoneSelected,
+                    deleteSelected: vi.fn(),
+                });
+                return () => registerTaskListScope(null);
+            }, [registerTaskListScope]);
+            // Same shape as the global search / quick add overlays.
+            return <div role="dialog" aria-modal="true" />;
+        };
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={vi.fn()}>
+                    <DialogHarness />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        // Focus is nowhere interactive (e.g. after clicking a non-focusable
+        // element inside the dialog) — the exact state that used to let Enter
+        // and action keys reach the task list behind the dialog.
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        fireEvent.keyDown(window, { key: 'ArrowDown' });
+        fireEvent.keyDown(window, { key: 'Enter' });
+        fireEvent.keyDown(window, { key: 'e' });
+        fireEvent.keyDown(window, { key: 'x' });
+
+        expect(selectNext).not.toHaveBeenCalled();
+        expect(openSelected).not.toHaveBeenCalled();
+        expect(editSelected).not.toHaveBeenCalled();
+        expect(toggleDoneSelected).not.toHaveBeenCalled();
+    });
+
+    it('opens the selected task with Enter when nothing interactive is focused', () => {
+        const openSelected = vi.fn();
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={vi.fn()}>
+                    <DummyList openSelected={openSelected} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        fireEvent.keyDown(window, { key: 'Enter' });
+
+        expect(openSelected).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves Enter alone while a button has focus', () => {
+        const openSelected = vi.fn();
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={vi.fn()}>
+                    <DummyList openSelected={openSelected} />
+                    <button type="button">Focused control</button>
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        (document.querySelector('button') as HTMLButtonElement).focus();
+        fireEvent.keyDown(window, { key: 'Enter' });
+
+        expect(openSelected).not.toHaveBeenCalled();
+    });
+
+    it('focuses the title toggle, not the done button, when fallback navigation activates a row', () => {
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="projects" onNavigate={vi.fn()}>
+                    <div data-main-content tabIndex={-1}>
+                        <div data-task-id="1" ref={setVisibleRect}>
+                            <button type="button" aria-label="Done">Done circle</button>
+                            <button type="button" data-task-view-toggle aria-expanded={false}>
+                                Task 1
+                            </button>
+                        </div>
+                    </div>
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        fireEvent.keyDown(window, { key: 'j' });
+
+        expect(document.activeElement).toBe(document.querySelector('[data-task-view-toggle]'));
     });
 
     it('falls back to visible task cards in views without registered scope', () => {
@@ -288,11 +562,6 @@ describe('KeybindingProvider (vim)', () => {
                 </KeybindingProvider>
             </LanguageProvider>
         );
-
-        fireEvent.keyDown(window, { key: 'o' });
-        expect(document.activeElement?.getAttribute('data-view-filter-input')).not.toBeNull();
-        fireEvent.keyDown(window, { key: 'Escape' });
-        expect(document.activeElement?.getAttribute('data-view-filter-input')).toBeNull();
 
         fireEvent.keyDown(window, { key: 'j' });
         fireEvent.keyDown(window, { key: 'e' });
@@ -319,5 +588,399 @@ describe('KeybindingProvider (vim)', () => {
         fireEvent.keyDown(window, { key: 'j' });
         fireEvent.keyDown(window, { key: 'e' });
         expect(onOpenTask2).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows an undo toast when fallback keyboard delete soft-deletes a task', async () => {
+        const deleteTask = vi.fn(async () => ({ success: true }));
+        const restoreTask = vi.fn(async () => ({ success: true }));
+        const showToast = vi.fn();
+        useUiStore.setState({ showToast });
+        useTaskStore.setState((state) => ({
+            ...state,
+            _allTasks: [{
+                id: '1',
+                title: 'Task 1',
+                status: 'next',
+                tags: [],
+                contexts: [],
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z',
+            }],
+            settings: {
+                ...state.settings,
+                keybindingStyle: 'vim',
+                undoNotificationsEnabled: true,
+            },
+            deleteTask,
+            restoreTask,
+        }));
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="projects" onNavigate={vi.fn()}>
+                    <FallbackTaskList onEditTask1={vi.fn()} onEditTask2={vi.fn()} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        fireEvent.keyDown(window, { key: 'd' });
+        fireEvent.keyDown(window, { key: 'd' });
+
+        await waitFor(() => {
+            expect(deleteTask).toHaveBeenCalledWith('1');
+            expect(showToast).toHaveBeenCalledWith(
+                expect.any(String),
+                'info',
+                5000,
+                expect.objectContaining({ label: expect.any(String) })
+            );
+        });
+
+        const undoAction = showToast.mock.calls[0]?.[3];
+        undoAction.onClick();
+        expect(restoreTask).toHaveBeenCalledWith('1');
+    });
+
+    it('undoes the last keyboard delete with Ctrl+Z even when toasts are disabled', async () => {
+        const deleteTask = vi.fn(async () => ({ success: true }));
+        const restoreTask = vi.fn(async () => ({ success: true }));
+        const showToast = vi.fn();
+        useUiStore.setState({ showToast });
+        useTaskStore.setState((state) => ({
+            ...state,
+            _allTasks: [{
+                id: '1',
+                title: 'Task 1',
+                status: 'next',
+                tags: [],
+                contexts: [],
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z',
+            }],
+            settings: {
+                ...state.settings,
+                keybindingStyle: 'vim',
+                undoNotificationsEnabled: false,
+            },
+            deleteTask,
+            restoreTask,
+        }));
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="projects" onNavigate={vi.fn()}>
+                    <FallbackTaskList onEditTask1={vi.fn()} onEditTask2={vi.fn()} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        fireEvent.keyDown(window, { key: 'd' });
+        fireEvent.keyDown(window, { key: 'd' });
+
+        await waitFor(() => {
+            expect(deleteTask).toHaveBeenCalledWith('1');
+        });
+        expect(showToast).not.toHaveBeenCalled();
+
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+
+        expect(restoreTask).toHaveBeenCalledWith('1');
+    });
+
+    it.each(['vim', 'emacs', 'standard'] as const)('sets status with the s chord in %s style', (style) => {
+        const setStatusSelected = vi.fn();
+        useTaskStore.setState((state) => ({
+            settings: {
+                ...state.settings,
+                keybindingStyle: style,
+            },
+        }));
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={vi.fn()}>
+                    <DummyList setStatusSelected={setStatusSelected} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        fireEvent.keyDown(window, { key: 's' });
+        fireEvent.keyDown(window, { key: 'n' });
+
+        expect(setStatusSelected).toHaveBeenCalledTimes(1);
+        expect(setStatusSelected).toHaveBeenCalledWith('next');
+    });
+
+    it('finishes the status chord with a as archived instead of opening quick add', () => {
+        const setStatusSelected = vi.fn();
+        const quickAddListener = vi.fn();
+        window.addEventListener('mindwtr:quick-add', quickAddListener);
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={vi.fn()}>
+                    <DummyList setStatusSelected={setStatusSelected} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        fireEvent.keyDown(window, { key: 's' });
+        fireEvent.keyDown(window, { key: 'a' });
+
+        expect(setStatusSelected).toHaveBeenCalledWith('archived');
+        expect(quickAddListener).not.toHaveBeenCalled();
+        window.removeEventListener('mindwtr:quick-add', quickAddListener);
+    });
+
+    it('does not navigate when s starts the status chord after g navigation chords', () => {
+        const onNavigate = vi.fn();
+        const setStatusSelected = vi.fn();
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={onNavigate}>
+                    <DummyList setStatusSelected={setStatusSelected} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        fireEvent.keyDown(window, { key: 'g' });
+        fireEvent.keyDown(window, { key: 's' });
+
+        expect(onNavigate).toHaveBeenCalledWith('someday');
+        expect(setStatusSelected).not.toHaveBeenCalled();
+    });
+
+    it('focuses the add-task input with Insert', () => {
+        const focusAddInput = vi.fn();
+        const quickAddListener = vi.fn();
+        window.addEventListener('mindwtr:quick-add', quickAddListener);
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={vi.fn()}>
+                    <DummyList focusAddInput={focusAddInput} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        fireEvent.keyDown(window, { key: 'Insert' });
+
+        expect(focusAddInput).toHaveBeenCalledTimes(1);
+        expect(quickAddListener).not.toHaveBeenCalled();
+        window.removeEventListener('mindwtr:quick-add', quickAddListener);
+    });
+
+    it('falls back to quick add on Insert when the scope has no add input', () => {
+        const quickAddListener = vi.fn();
+        window.addEventListener('mindwtr:quick-add', quickAddListener);
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="projects" onNavigate={vi.fn()}>
+                    <div data-main-content tabIndex={-1} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        fireEvent.keyDown(window, { key: 'Insert' });
+
+        expect(quickAddListener).toHaveBeenCalledTimes(1);
+        window.removeEventListener('mindwtr:quick-add', quickAddListener);
+    });
+
+    it('moves the fallback-selected task with the status chord and offers undo', async () => {
+        const moveTask = vi.fn(async () => ({ success: true }));
+        const showToast = vi.fn();
+        useUiStore.setState({ showToast });
+        useTaskStore.setState((state) => ({
+            ...state,
+            tasks: [{
+                id: '1',
+                title: 'Task 1',
+                status: 'next',
+                tags: [],
+                contexts: [],
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z',
+            }],
+            settings: {
+                ...state.settings,
+                keybindingStyle: 'vim',
+                undoNotificationsEnabled: true,
+            },
+            moveTask,
+        }));
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="projects" onNavigate={vi.fn()}>
+                    <FallbackTaskList onEditTask1={vi.fn()} onEditTask2={vi.fn()} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        fireEvent.keyDown(window, { key: 's' });
+        fireEvent.keyDown(window, { key: 's' });
+
+        await waitFor(() => {
+            expect(moveTask).toHaveBeenCalledWith('1', 'someday');
+            expect(showToast).toHaveBeenCalledWith(
+                expect.any(String),
+                'info',
+                5000,
+                expect.objectContaining({ label: expect.any(String) })
+            );
+        });
+
+        const undoAction = showToast.mock.calls[0]?.[3];
+        undoAction.onClick();
+        expect(moveTask).toHaveBeenCalledWith('1', 'next');
+    });
+});
+
+describe('KeybindingProvider (standard)', () => {
+    const StandardScopeList = ({
+        toggleDoneSelected,
+        toggleSelectSelected,
+        deleteSelected,
+        openSelected,
+        editSelected,
+    }: {
+        toggleDoneSelected: () => void;
+        toggleSelectSelected: () => void;
+        deleteSelected: () => void;
+        openSelected: () => void;
+        editSelected: () => void;
+    }) => {
+        const { registerTaskListScope } = useKeybindings();
+        useEffect(() => {
+            registerTaskListScope({
+                kind: 'taskList',
+                selectNext: vi.fn(),
+                selectPrev: vi.fn(),
+                selectFirst: vi.fn(),
+                selectLast: vi.fn(),
+                editSelected,
+                openSelected,
+                toggleDoneSelected,
+                toggleSelectSelected,
+                deleteSelected,
+            });
+            return () => registerTaskListScope(null);
+        }, [deleteSelected, editSelected, openSelected, registerTaskListScope, toggleDoneSelected, toggleSelectSelected]);
+        return <div data-task-id="1">Task 1</div>;
+    };
+
+    beforeEach(() => {
+        useUiStore.setState({ editingTaskId: null });
+        useTaskStore.setState((state) => ({
+            settings: {
+                ...state.settings,
+                keybindingStyle: 'standard',
+            },
+        }));
+    });
+
+    it('maps e/x/#/Enter/Shift+Enter to done/select/delete/open/edit', () => {
+        const toggleDoneSelected = vi.fn();
+        const toggleSelectSelected = vi.fn();
+        const deleteSelected = vi.fn();
+        const openSelected = vi.fn();
+        const editSelected = vi.fn();
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={vi.fn()}>
+                    <StandardScopeList
+                        toggleDoneSelected={toggleDoneSelected}
+                        toggleSelectSelected={toggleSelectSelected}
+                        deleteSelected={deleteSelected}
+                        openSelected={openSelected}
+                        editSelected={editSelected}
+                    />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        fireEvent.keyDown(window, { key: 'e' });
+        fireEvent.keyDown(window, { key: 'x' });
+        fireEvent.keyDown(window, { key: '#', shiftKey: true });
+        fireEvent.keyDown(window, { key: 'Enter' });
+        fireEvent.keyDown(window, { key: 'Enter', shiftKey: true });
+
+        expect(toggleDoneSelected).toHaveBeenCalledTimes(1);
+        expect(toggleSelectSelected).toHaveBeenCalledTimes(1);
+        expect(deleteSelected).toHaveBeenCalledTimes(1);
+        expect(openSelected).toHaveBeenCalledTimes(1);
+        expect(editSelected).toHaveBeenCalledTimes(1);
+    });
+
+    it('navigates views with g chords in standard style', () => {
+        const onNavigate = vi.fn();
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="inbox" onNavigate={onNavigate}>
+                    <div data-main-content tabIndex={-1} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        fireEvent.keyDown(window, { key: 'g' });
+        fireEvent.keyDown(window, { key: 'n' });
+
+        expect(onNavigate).toHaveBeenCalledWith('next');
+    });
+
+    it('undoes the last complete/delete with plain z', async () => {
+        const deleteTask = vi.fn(async () => ({ success: true }));
+        const restoreTask = vi.fn(async () => ({ success: true }));
+        useUiStore.setState({ showToast: vi.fn() });
+        useTaskStore.setState((state) => ({
+            ...state,
+            _allTasks: [{
+                id: '1',
+                title: 'Task 1',
+                status: 'next',
+                tags: [],
+                contexts: [],
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z',
+            }],
+            settings: {
+                ...state.settings,
+                keybindingStyle: 'standard',
+                undoNotificationsEnabled: false,
+            },
+            deleteTask,
+            restoreTask,
+        }));
+
+        render(
+            <LanguageProvider>
+                <KeybindingProvider currentView="projects" onNavigate={vi.fn()}>
+                    <FallbackTaskList onEditTask1={vi.fn()} onEditTask2={vi.fn()} />
+                </KeybindingProvider>
+            </LanguageProvider>
+        );
+
+        fireEvent.keyDown(window, { key: '#', shiftKey: true });
+
+        await waitFor(() => {
+            expect(deleteTask).toHaveBeenCalledWith('1');
+        });
+
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        fireEvent.keyDown(window, { key: 'z' });
+
+        expect(restoreTask).toHaveBeenCalledWith('1');
     });
 });

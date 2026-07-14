@@ -1,7 +1,8 @@
 import type { ExternalCalendarSubscription } from '@mindwtr/core';
-import type { SystemCalendarPermissionStatus } from '../../../lib/system-calendar';
+import type { SystemCalendarPermissionStatus, SystemCalendarPushTarget } from '../../../lib/system-calendar';
 
 import { SettingsCalendarPage } from './SettingsCalendarPage';
+import { SettingsEmailCaptureSection } from './SettingsEmailCaptureSection';
 import { SettingsObsidianSection } from './SettingsObsidianSection';
 
 type Labels = {
@@ -10,6 +11,7 @@ type Labels = {
     calendarName: string;
     calendarUrl: string;
     calendarAdd: string;
+    calendarChooseLocalFile: string;
     calendarRemove: string;
     externalCalendars: string;
     calendarSystemTitle: string;
@@ -21,15 +23,28 @@ type Labels = {
     calendarSystemPermissionUnsupported: string;
     calendarSystemRequestAccess: string;
     calendarSystemDeniedHint: string;
+    calendarPushTitle: string;
+    calendarPushDesc: string;
+    calendarPushEnable: string;
+    calendarPushTarget: string;
+    calendarPushManagedTarget: string;
+    calendarPushRefresh: string;
+    calendarPushLoading: string;
+    calendarPushTargetHint: string;
     obsidianVault: string;
     obsidianVaultDesc: string;
     obsidianEnable: string;
     obsidianVaultPath: string;
     obsidianVaultPathHint: string;
+    obsidianDetectedVaults: string;
     obsidianScanFolders: string;
     obsidianScanFoldersHint: string;
     obsidianInboxFile: string;
     obsidianInboxFileHint: string;
+    obsidianDataview: string;
+    obsidianDataviewDesc: string;
+    obsidianDataviewMetadata: string;
+    obsidianDataviewMetadataHint: string;
     obsidianTaskNotes: string;
     obsidianTaskNotesDesc: string;
     obsidianTaskNotesIncludeArchived: string;
@@ -49,29 +64,58 @@ type Labels = {
     obsidianNeverScanned: string;
     obsidianMissingMarker: string;
     browse: string;
+    emailCapture: string;
+    emailCaptureDesc: string;
+    emailCaptureHost: string;
+    emailCapturePort: string;
+    emailCaptureUsername: string;
+    emailCapturePassword: string;
+    emailCapturePasswordHint: string;
+    emailCapturePasswordStored: string;
+    emailCaptureFolder: string;
+    emailCaptureFolderHint: string;
+    emailCaptureSave: string;
+    emailCaptureRemove: string;
+    emailCaptureCheckNow: string;
+    emailCaptureChecking: string;
+    emailCaptureLastChecked: string;
+    emailCaptureNeverChecked: string;
+    emailCaptureImportedCount: string;
+    emailCaptureSaveFailed: string;
 };
 
 type SettingsIntegrationsPageProps = {
     t: Labels;
     isTauri: boolean;
+    showSaved: () => void;
     newCalendarName: string;
     newCalendarUrl: string;
     calendarError: string | null;
     externalCalendars: ExternalCalendarSubscription[];
     showSystemCalendarSection: boolean;
     systemCalendarPermission: SystemCalendarPermissionStatus;
+    calendarPushEnabled: boolean;
+    calendarPushTargetCalendarId: string | null;
+    calendarPushTargets: SystemCalendarPushTarget[];
+    calendarPushLoading: boolean;
     onCalendarNameChange: (value: string) => void;
     onCalendarUrlChange: (value: string) => void;
     onAddCalendar: () => void;
+    onChooseLocalCalendarFile: () => Promise<void> | void;
     onToggleCalendar: (id: string, enabled: boolean) => void;
+    onCalendarColorChange: (id: string, color: string) => void;
     onRemoveCalendar: (id: string) => void;
     onRequestSystemCalendarPermission: () => void;
+    onToggleCalendarPush: (enabled: boolean) => Promise<void> | void;
+    onCalendarPushTargetChange: (id: string | null) => Promise<void> | void;
+    onRefreshCalendarPushTargets: () => Promise<void> | void;
     maskCalendarUrl: (url: string) => string;
     obsidianVaultPath: string;
     obsidianEnabled: boolean;
     obsidianScanFoldersText: string;
     obsidianInboxFile: string;
     obsidianTaskNotesIncludeArchived: boolean;
+    obsidianDataviewMetadataEnabled: boolean;
     obsidianNewTaskFormat: 'auto' | 'inline' | 'tasknotes';
     obsidianLastScannedAt: string | null;
     obsidianHasVaultMarker: boolean | null;
@@ -85,6 +129,7 @@ type SettingsIntegrationsPageProps = {
     onObsidianScanFoldersTextChange: (value: string) => void;
     onObsidianInboxFileChange: (value: string) => void;
     onObsidianTaskNotesIncludeArchivedChange: (value: boolean) => void;
+    onObsidianDataviewMetadataEnabledChange: (value: boolean) => void;
     onObsidianNewTaskFormatChange: (value: 'auto' | 'inline' | 'tasknotes') => void;
     onBrowseObsidianVault: () => Promise<void> | void;
     onSaveObsidian: () => Promise<void> | void;
@@ -95,24 +140,35 @@ type SettingsIntegrationsPageProps = {
 export function SettingsIntegrationsPage({
     t,
     isTauri,
+    showSaved,
     newCalendarName,
     newCalendarUrl,
     calendarError,
     externalCalendars,
     showSystemCalendarSection,
     systemCalendarPermission,
+    calendarPushEnabled,
+    calendarPushTargetCalendarId,
+    calendarPushTargets,
+    calendarPushLoading,
     onCalendarNameChange,
     onCalendarUrlChange,
     onAddCalendar,
+    onChooseLocalCalendarFile,
     onToggleCalendar,
+    onCalendarColorChange,
     onRemoveCalendar,
     onRequestSystemCalendarPermission,
+    onToggleCalendarPush,
+    onCalendarPushTargetChange,
+    onRefreshCalendarPushTargets,
     maskCalendarUrl,
     obsidianVaultPath,
     obsidianEnabled,
     obsidianScanFoldersText,
     obsidianInboxFile,
     obsidianTaskNotesIncludeArchived,
+    obsidianDataviewMetadataEnabled,
     obsidianNewTaskFormat,
     obsidianLastScannedAt,
     obsidianHasVaultMarker,
@@ -126,6 +182,7 @@ export function SettingsIntegrationsPage({
     onObsidianScanFoldersTextChange,
     onObsidianInboxFileChange,
     onObsidianTaskNotesIncludeArchivedChange,
+    onObsidianDataviewMetadataEnabledChange,
     onObsidianNewTaskFormatChange,
     onBrowseObsidianVault,
     onSaveObsidian,
@@ -142,12 +199,21 @@ export function SettingsIntegrationsPage({
                 externalCalendars={externalCalendars}
                 showSystemCalendarSection={showSystemCalendarSection}
                 systemCalendarPermission={systemCalendarPermission}
+                calendarPushEnabled={calendarPushEnabled}
+                calendarPushTargetCalendarId={calendarPushTargetCalendarId}
+                calendarPushTargets={calendarPushTargets}
+                calendarPushLoading={calendarPushLoading}
                 onCalendarNameChange={onCalendarNameChange}
                 onCalendarUrlChange={onCalendarUrlChange}
                 onAddCalendar={onAddCalendar}
+                onChooseLocalCalendarFile={isTauri ? onChooseLocalCalendarFile : undefined}
                 onToggleCalendar={onToggleCalendar}
+                onCalendarColorChange={onCalendarColorChange}
                 onRemoveCalendar={onRemoveCalendar}
                 onRequestSystemCalendarPermission={onRequestSystemCalendarPermission}
+                onToggleCalendarPush={onToggleCalendarPush}
+                onCalendarPushTargetChange={onCalendarPushTargetChange}
+                onRefreshCalendarPushTargets={onRefreshCalendarPushTargets}
                 maskCalendarUrl={maskCalendarUrl}
             />
 
@@ -159,6 +225,7 @@ export function SettingsIntegrationsPage({
                 obsidianScanFoldersText={obsidianScanFoldersText}
                 obsidianInboxFile={obsidianInboxFile}
                 obsidianTaskNotesIncludeArchived={obsidianTaskNotesIncludeArchived}
+                obsidianDataviewMetadataEnabled={obsidianDataviewMetadataEnabled}
                 obsidianNewTaskFormat={obsidianNewTaskFormat}
                 obsidianLastScannedAt={obsidianLastScannedAt}
                 obsidianHasVaultMarker={obsidianHasVaultMarker}
@@ -172,11 +239,18 @@ export function SettingsIntegrationsPage({
                 onObsidianScanFoldersTextChange={onObsidianScanFoldersTextChange}
                 onObsidianInboxFileChange={onObsidianInboxFileChange}
                 onObsidianTaskNotesIncludeArchivedChange={onObsidianTaskNotesIncludeArchivedChange}
+                onObsidianDataviewMetadataEnabledChange={onObsidianDataviewMetadataEnabledChange}
                 onObsidianNewTaskFormatChange={onObsidianNewTaskFormatChange}
                 onBrowseObsidianVault={onBrowseObsidianVault}
                 onSaveObsidian={onSaveObsidian}
                 onRemoveObsidian={onRemoveObsidian}
                 onRescanObsidian={onRescanObsidian}
+            />
+
+            <SettingsEmailCaptureSection
+                t={t}
+                isTauri={isTauri}
+                showSaved={showSaved}
             />
         </div>
     );

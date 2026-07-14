@@ -1,21 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Attachment, DEFAULT_PROJECT_COLOR, buildTaskUpdatesFromSpeechResult, generateUUID, useTaskStore, validateAttachmentForUpload, type Task } from '@mindwtr/core';
-import { invoke } from '@tauri-apps/api/core';
+import { Attachment, DEFAULT_PROJECT_COLOR, buildTaskUpdatesFromSpeechResult, findSelectableProjectByTitleAndArea, generateUUID, normalizeLinkAttachmentInput, translateWithFallback, useTaskStore, type Task } from '@mindwtr/core';
 import { dataDir } from '@tauri-apps/api/path';
-import { BaseDirectory, readFile, readTextFile, size } from '@tauri-apps/plugin-fs';
+import { BaseDirectory, readFile, readTextFile } from '@tauri-apps/plugin-fs';
 import { loadAIKey } from '../../lib/ai-config';
-import { normalizeAttachmentPathForUrl, resolveAttachmentOpenTarget, toAttachmentBrowserUrl } from '../../lib/attachment-paths';
+import { importPickedFileAttachment } from '../../lib/attachment-import';
+import { normalizeAttachmentPathForUrl, resolveAttachmentOpenTarget } from '../../lib/attachment-paths';
 import { normalizeAttachmentInput } from '../../lib/attachment-utils';
+import { openAttachmentTarget } from '../../lib/open-attachment-target';
 import { isTauriRuntime } from '../../lib/runtime';
 import { logWarn } from '../../lib/app-log';
+import { getManagedDataDir } from '../../lib/managed-paths';
 import { processAudioCapture } from '../../lib/speech-to-text';
-import { DEFAULT_WHISPER_MODEL } from '../../lib/speech-models';
+import { DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL } from '../../lib/speech-models';
 import {
     isAudioAttachment,
     isImageAttachment,
     isTextAttachment,
     resolveAttachmentSource,
 } from './task-item-attachment-utils';
+
+type LinkPromptVariant = 'link' | 'obsidian';
 
 type UseTaskItemAttachmentsProps = {
     task: Task;
@@ -37,30 +41,28 @@ export function useTaskItemAttachments({ task, t }: UseTaskItemAttachmentsProps)
     const [textError, setTextError] = useState<string | null>(null);
     const [textLoading, setTextLoading] = useState(false);
     const [showLinkPrompt, setShowLinkPrompt] = useState(false);
+    const [editingLinkAttachmentId, setEditingLinkAttachmentId] = useState<string | null>(null);
+    const [linkPromptDefaultValue, setLinkPromptDefaultValue] = useState('');
+    const [linkPromptVariant, setLinkPromptVariant] = useState<LinkPromptVariant>('link');
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const audioLoadRequestRef = useRef(0);
     const audioObjectUrlRef = useRef<string | null>(null);
 
-    const resolveValidationMessage = useCallback((error?: string) => {
-        if (error === 'file_too_large') return t('attachments.fileTooLarge');
-        if (error === 'mime_type_blocked' || error === 'mime_type_not_allowed') return t('attachments.invalidFileType');
-        return t('attachments.fileNotSupported');
-    }, [t]);
     const resolveText = useCallback((key: string, fallback: string) => {
-        const translated = t(key);
-        return translated === key ? fallback : translated;
+        return translateWithFallback(t, key, fallback);
     }, [t]);
 
     const resolveAudioBlobSource = useCallback(async (attachment: Attachment) => {
         if (!isTauriRuntime()) return null;
         const uri = resolveAttachmentOpenTarget(attachment.uri);
         try {
-            const baseDir = await dataDir();
+            // Blob playback is limited to app-managed files (attachments and
+            // audio captures under the managed data dir, portable-aware).
+            const managedDir = await getManagedDataDir();
             const normalizedUri = normalizeAttachmentPathForUrl(uri);
-            const normalizedBaseDir = normalizeAttachmentPathForUrl(baseDir);
+            const normalizedBaseDir = normalizeAttachmentPathForUrl(managedDir);
             if (!normalizedUri.startsWith(normalizedBaseDir)) return null;
-            const relative = normalizedUri.slice(normalizedBaseDir.length).replace(/^[\\/]/, '');
-            const bytes = await readFile(relative, { baseDir: BaseDirectory.Data });
+            const bytes = await readFile(normalizedUri);
             const buffer = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
             const mimeType = attachment.mimeType || 'audio/wav';
             const blob = new Blob([buffer], { type: mimeType });
@@ -120,22 +122,16 @@ export function useTaskItemAttachments({ task, t }: UseTaskItemAttachmentsProps)
 
     const openExternal = useCallback(async (uri: string) => {
         setAttachmentError(null);
-        const normalized = toAttachmentBrowserUrl(uri);
-        const openTarget = resolveAttachmentOpenTarget(uri);
-        if (isTauriRuntime()) {
-            try {
-                await invoke('open_path', { path: openTarget });
-                return;
-            } catch (error) {
-                void logWarn('Failed to open attachment', {
-                    scope: 'attachment',
-                    extra: { error: error instanceof Error ? error.message : String(error) },
-                });
-                const message = error instanceof Error ? error.message : String(error);
-                setAttachmentError(message || t('attachments.fileNotSupported'));
-            }
+        try {
+            await openAttachmentTarget(uri);
+        } catch (error) {
+            void logWarn('Failed to open attachment', {
+                scope: 'attachment',
+                extra: { error: error instanceof Error ? error.message : String(error) },
+            });
+            const message = error instanceof Error ? error.message : String(error);
+            setAttachmentError(message || t('attachments.fileNotSupported'));
         }
-        window.open(normalized, '_blank');
     }, [t]);
 
     const closeAudio = useCallback(() => {
@@ -214,11 +210,13 @@ export function useTaskItemAttachments({ task, t }: UseTaskItemAttachmentsProps)
             const model = speech.model ?? (
                 provider === 'openai' ? 'gpt-4o-transcribe'
                     : provider === 'gemini' ? 'gemini-2.5-flash'
-                        : DEFAULT_WHISPER_MODEL
+                        : provider === 'parakeet' ? DEFAULT_PARAKEET_MODEL
+                            : DEFAULT_WHISPER_MODEL
             );
-            const apiKey = provider === 'whisper' ? '' : await loadAIKey(provider).catch(() => '');
-            const modelPath = provider === 'whisper' ? speech.offlineModelPath : undefined;
-            const speechReady = provider === 'whisper' ? Boolean(modelPath) : Boolean(apiKey);
+            const apiSpeechProvider = provider === 'openai' || provider === 'gemini' ? provider : null;
+            const apiKey = apiSpeechProvider ? await loadAIKey(apiSpeechProvider).catch(() => '') : '';
+            const modelPath = apiSpeechProvider ? undefined : speech.offlineModelPath;
+            const speechReady = apiSpeechProvider ? Boolean(apiKey) : Boolean(modelPath);
             if (!speechReady) {
                 throw new Error(resolveText('attachments.transcriptionUnavailable', 'Speech-to-text is not ready. Check your AI settings and try again.'));
             }
@@ -250,11 +248,16 @@ export function useTaskItemAttachments({ task, t }: UseTaskItemAttachmentsProps)
 
             const { updates, suggestedProjectTitle } = buildTaskUpdatesFromSpeechResult(existing, result, currentSettings);
             if (suggestedProjectTitle && !existing.projectId) {
-                const match = currentProjects.find((project) => project.title.toLowerCase() === suggestedProjectTitle.toLowerCase());
+                const targetAreaId = updates.areaId ?? existing.areaId;
+                const match = findSelectableProjectByTitleAndArea(currentProjects, suggestedProjectTitle, targetAreaId);
                 if (match) {
                     updates.projectId = match.id;
                 } else {
-                    const created = await addProjectNow(suggestedProjectTitle, DEFAULT_PROJECT_COLOR);
+                    const created = await addProjectNow(
+                        suggestedProjectTitle,
+                        DEFAULT_PROJECT_COLOR,
+                        targetAreaId ? { areaId: targetAreaId } : undefined
+                    );
                     if (!created) {
                         throw new Error(resolveText('attachments.transcriptionFailed', 'Transcription failed. Please try again.'));
                     }
@@ -300,6 +303,10 @@ export function useTaskItemAttachments({ task, t }: UseTaskItemAttachmentsProps)
     }, [audioAttachment, closeAudio, closeImage, closeText, imageAttachment, textAttachment]);
 
     const openAttachment = useCallback((attachment: Attachment) => {
+        if (attachment.kind === 'link') {
+            void openExternal(attachment.uri);
+            return;
+        }
         if (isAudioAttachment(attachment)) {
             const requestId = audioLoadRequestRef.current + 1;
             audioLoadRequestRef.current = requestId;
@@ -379,51 +386,50 @@ export function useTaskItemAttachments({ task, t }: UseTaskItemAttachmentsProps)
             title: t('attachments.addFile'),
         });
         if (!selected || typeof selected !== 'string') return;
-        try {
-            const fileSize = await size(selected);
-            const validation = await validateAttachmentForUpload(
-                {
-                    id: 'pending',
-                    kind: 'file',
-                    title: selected.split(/[/\\]/).pop() || selected,
-                    uri: selected,
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString(),
-                },
-                fileSize
-            );
-            if (!validation.valid) {
-                setAttachmentError(resolveValidationMessage(validation.error));
-                return;
-            }
-        } catch (error) {
-            void logWarn('Failed to validate attachment size', {
-                scope: 'attachment',
-                extra: { error: error instanceof Error ? error.message : String(error) },
-            });
+        const result = await importPickedFileAttachment(selected);
+        if ('errorKey' in result) {
+            setAttachmentError(t(result.errorKey));
+            return;
         }
-        const now = new Date().toISOString();
-        const title = selected.split(/[/\\]/).pop() || selected;
-        const attachment: Attachment = {
-            id: generateUUID(),
-            kind: 'file',
-            title,
-            uri: selected,
-            createdAt: now,
-            updatedAt: now,
-        };
-        setEditAttachments((prev) => [...prev, attachment]);
-    }, [resolveValidationMessage, t]);
+        setEditAttachments((prev) => [...prev, result.attachment]);
+    }, [t]);
 
     const addLinkAttachment = useCallback(() => {
         setAttachmentError(null);
+        setEditingLinkAttachmentId(null);
+        setLinkPromptDefaultValue('');
+        setLinkPromptVariant('link');
+        setShowLinkPrompt(true);
+    }, []);
+
+    const addObsidianNoteAttachment = useCallback(() => {
+        setAttachmentError(null);
+        setEditingLinkAttachmentId(null);
+        setLinkPromptDefaultValue('');
+        setLinkPromptVariant('obsidian');
         setShowLinkPrompt(true);
     }, []);
 
     const handleAddLinkAttachment = useCallback((value: string) => {
-        const normalized = normalizeAttachmentInput(value);
+        const normalized = editingLinkAttachmentId
+            ? normalizeLinkAttachmentInput(value)
+            : normalizeAttachmentInput(value);
         if (!normalized.uri) return false;
         const now = new Date().toISOString();
+        if (editingLinkAttachmentId) {
+            setEditAttachments((prev) => prev.map((attachment) => (
+                attachment.id === editingLinkAttachmentId
+                    ? {
+                        ...attachment,
+                        kind: 'link',
+                        title: normalized.title,
+                        uri: normalized.uri,
+                        updatedAt: now,
+                    }
+                    : attachment
+            )));
+            return true;
+        }
         const attachment: Attachment = {
             id: generateUUID(),
             kind: normalized.kind,
@@ -434,6 +440,25 @@ export function useTaskItemAttachments({ task, t }: UseTaskItemAttachmentsProps)
         };
         setEditAttachments((prev) => [...prev, attachment]);
         return true;
+    }, [editingLinkAttachmentId]);
+
+    const editLinkAttachment = useCallback((attachment: Attachment) => {
+        if (attachment.kind !== 'link') return;
+        setAttachmentError(null);
+        setEditingLinkAttachmentId(attachment.id);
+        setLinkPromptVariant('link');
+        setLinkPromptDefaultValue(
+            attachment.title && attachment.title !== attachment.uri
+                ? `${attachment.title} | ${attachment.uri}`
+                : attachment.uri,
+        );
+        setShowLinkPrompt(true);
+    }, []);
+
+    const closeLinkPrompt = useCallback(() => {
+        setShowLinkPrompt(false);
+        setEditingLinkAttachmentId(null);
+        setLinkPromptDefaultValue('');
     }, []);
 
     const removeAttachment = useCallback((id: string) => {
@@ -446,11 +471,11 @@ export function useTaskItemAttachments({ task, t }: UseTaskItemAttachmentsProps)
     const resetAttachmentState = useCallback((attachments: Attachment[] | undefined) => {
         setEditAttachments(attachments || []);
         setAttachmentError(null);
-        setShowLinkPrompt(false);
+        closeLinkPrompt();
         closeAudio();
         closeImage();
         closeText();
-    }, [closeAudio, closeImage, closeText]);
+    }, [closeAudio, closeImage, closeLinkPrompt, closeText]);
 
     return {
         editAttachments,
@@ -459,8 +484,14 @@ export function useTaskItemAttachments({ task, t }: UseTaskItemAttachmentsProps)
         setAttachmentError,
         showLinkPrompt,
         setShowLinkPrompt,
+        editingLinkAttachmentId,
+        linkPromptDefaultValue,
+        linkPromptVariant,
+        closeLinkPrompt,
         addFileAttachment,
         addLinkAttachment,
+        addObsidianNoteAttachment,
+        editLinkAttachment,
         handleAddLinkAttachment,
         removeAttachment,
         openAttachment,

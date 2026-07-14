@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useContext, useState } from 'react';
 import {
     TouchableOpacity,
     Text,
@@ -9,30 +9,31 @@ import {
     Modal,
     Pressable
 } from 'react-native';
-import { TaskStatus, getStatusColor } from '@mindwtr/core';
+import { TaskStatus } from '@mindwtr/core';
 import { useLanguage } from '../contexts/language-context';
+import { useStatusColors } from '../hooks/use-status-colors';
+import { resolveThemeColors } from '../hooks/use-theme-colors';
+import { ThemeContext } from '../contexts/theme-context';
 
 interface TaskStatusBadgeProps {
     status: TaskStatus;
     onUpdate: (status: TaskStatus) => void;
 }
 
+const QUICK_STATUS_OPTIONS: TaskStatus[] = ['inbox', 'next', 'waiting', 'someday', 'done', 'reference'];
+
 export function TaskStatusBadge({ status, onUpdate }: TaskStatusBadgeProps) {
     const [modalVisible, setModalVisible] = useState(false);
-    const colors = getStatusColor(status);
+    const statusColors = useStatusColors();
+    const tc = resolveThemeColors(useContext(ThemeContext));
+    const colors = statusColors[status];
     const { t } = useLanguage();
 
     const getStatusLabel = (s: TaskStatus) => t(`status.${s}`);
 
     const handlePress = () => {
-        // Determine relevant options based on current status
-        // Always showing full list for flexibility, but could prioritize
-        const options: TaskStatus[] = status === 'reference'
-            ? ['inbox', 'next', 'waiting', 'someday', 'reference', 'done']
-            : ['inbox', 'next', 'waiting', 'someday', 'done'];
-
         if (Platform.OS === 'ios') {
-            const labels = options.map(s => getStatusLabel(s));
+            const labels = QUICK_STATUS_OPTIONS.map(s => getStatusLabel(s));
             const cancelIndex = labels.length;
             ActionSheetIOS.showActionSheetWithOptions(
                 {
@@ -40,8 +41,8 @@ export function TaskStatusBadge({ status, onUpdate }: TaskStatusBadgeProps) {
                     cancelButtonIndex: cancelIndex,
                 },
                 (buttonIndex) => {
-                    if (buttonIndex < options.length) {
-                        onUpdate(options[buttonIndex]);
+                    if (buttonIndex < QUICK_STATUS_OPTIONS.length) {
+                        onUpdate(QUICK_STATUS_OPTIONS[buttonIndex]);
                     }
                 }
             );
@@ -54,10 +55,6 @@ export function TaskStatusBadge({ status, onUpdate }: TaskStatusBadgeProps) {
         onUpdate(selectedStatus);
         setModalVisible(false);
     };
-
-    const ANDROID_OPTIONS: TaskStatus[] = status === 'reference'
-        ? ['inbox', 'next', 'waiting', 'someday', 'reference', 'done']
-        : ['inbox', 'next', 'waiting', 'someday', 'done'];
 
     return (
         <>
@@ -87,26 +84,28 @@ export function TaskStatusBadge({ status, onUpdate }: TaskStatusBadgeProps) {
                     onPress={() => setModalVisible(false)}
                 >
                     <Pressable
-                        style={styles.modalContent}
+                        style={[styles.modalContent, { backgroundColor: tc.cardBg }]}
                         onPress={(e) => e.stopPropagation()}
                     >
-                        <Text style={styles.modalTitle}>{t('taskStatus.changeStatus')}</Text>
+                        <Text style={[styles.modalTitle, { color: tc.text }]}>{t('taskStatus.changeStatus')}</Text>
                         <ScrollView contentContainerStyle={styles.optionsList}>
-                            {ANDROID_OPTIONS.map((opt) => {
-                                const optColors = getStatusColor(opt);
+                            {QUICK_STATUS_OPTIONS.map((opt) => {
+                                const optColors = statusColors[opt];
                                 return (
                                     <Pressable
                                         key={opt}
                                         style={[
                                             styles.optionButton,
-                                            opt === status && styles.optionButtonActive,
+                                            { backgroundColor: tc.cardBg, borderBottomColor: tc.border },
+                                            opt === status && { backgroundColor: tc.filterBg },
                                             { borderLeftColor: optColors.text }
                                         ]}
                                         onPress={() => handleOptionSelect(opt)}
                                     >
                                         <Text style={[
                                             styles.optionText,
-                                            opt === status && styles.optionTextActive
+                                            { color: tc.secondaryText },
+                                            opt === status && [styles.optionTextActive, { color: tc.text }]
                                         ]}>
                                             {getStatusLabel(opt)}
                                         </Text>
@@ -115,10 +114,10 @@ export function TaskStatusBadge({ status, onUpdate }: TaskStatusBadgeProps) {
                             })}
                         </ScrollView>
                         <Pressable
-                            style={styles.cancelButton}
+                            style={[styles.cancelButton, { backgroundColor: tc.filterBg }]}
                             onPress={() => setModalVisible(false)}
                         >
-                            <Text style={styles.cancelButtonText}>{t('common.cancel')}</Text>
+                            <Text style={[styles.cancelButtonText, { color: tc.secondaryText }]}>{t('common.cancel')}</Text>
                         </Pressable>
                     </Pressable>
                 </Pressable>
@@ -138,12 +137,6 @@ const styles = StyleSheet.create({
         fontSize: 10,
         fontWeight: '600',
     },
-    textLight: {
-        color: '#FFFFFF',
-    },
-    textDark: {
-        color: '#374151',
-    },
     modalOverlay: {
         flex: 1,
         backgroundColor: 'rgba(0, 0, 0, 0.5)',
@@ -152,7 +145,6 @@ const styles = StyleSheet.create({
         padding: 20,
     },
     modalContent: {
-        backgroundColor: '#FFFFFF',
         borderRadius: 12,
         width: '100%',
         maxWidth: 320,
@@ -165,7 +157,6 @@ const styles = StyleSheet.create({
         fontWeight: '600',
         marginBottom: 16,
         textAlign: 'center',
-        color: '#111827',
     },
     optionsList: {
         paddingBottom: 8,
@@ -174,34 +165,25 @@ const styles = StyleSheet.create({
         paddingVertical: 12,
         paddingHorizontal: 16,
         borderBottomWidth: 1,
-        borderBottomColor: '#F3F4F6',
         borderLeftWidth: 4,
         borderLeftColor: 'transparent',
-        backgroundColor: '#FFFFFF',
         marginBottom: 4,
         borderRadius: 4,
     },
-    optionButtonActive: {
-        backgroundColor: '#F9FAFB',
-    },
     optionText: {
         fontSize: 16,
-        color: '#374151',
     },
     optionTextActive: {
         fontWeight: '600',
-        color: '#111827',
     },
     cancelButton: {
         marginTop: 8,
         paddingVertical: 12,
         alignItems: 'center',
-        backgroundColor: '#F3F4F6',
         borderRadius: 8,
     },
     cancelButtonText: {
         fontSize: 16,
         fontWeight: '600',
-        color: '#6B7280',
     },
 });

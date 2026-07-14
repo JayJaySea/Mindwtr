@@ -3,6 +3,10 @@ name: Release iOS App Store
 on:
   workflow_call:
     inputs:
+      tag:
+        description: Release tag (e.g., v1.0.5 or v1.0.5-rc.1)
+        required: false
+        type: string
       upload:
         description: Upload to App Store Connect
         required: false
@@ -13,13 +17,32 @@ on:
         required: false
         type: boolean
         default: true
+      distribute_testflight:
+        description: Distribute the uploaded build to the configured TestFlight external group without App Store review submission
+        required: false
+        type: boolean
+        default: false
+      force_appstore_upload:
+        description: Fail instead of silently skipping App Store upload when an existing non-editable version blocks a corrected Apple build
+        required: false
+        type: boolean
+        default: false
       testflight_group:
         description: TestFlight external group for review-blocked uploads
         required: false
         type: string
         default: 'external_testing'
+      skip_screenshots:
+        description: Skip App Store screenshot upload
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
+      tag:
+        description: Release tag (e.g., v1.0.5 or v1.0.5-rc.1)
+        required: false
+        type: string
       upload:
         description: Upload to App Store Connect
         required: false
@@ -30,11 +53,26 @@ on:
         required: false
         type: boolean
         default: false
+      distribute_testflight:
+        description: Distribute the uploaded build to the configured TestFlight external group without App Store review submission
+        required: false
+        type: boolean
+        default: false
+      force_appstore_upload:
+        description: Fail instead of silently skipping App Store upload when an existing non-editable version blocks a corrected Apple build
+        required: false
+        type: boolean
+        default: false
       testflight_group:
         description: TestFlight external group for review-blocked uploads
         required: false
         type: string
         default: 'external_testing'
+      skip_screenshots:
+        description: Skip App Store screenshot upload
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -58,10 +96,15 @@ jobs:
       EXPECTED_APP_GROUP: group.tech.dongdongbh.mindwtr
       EXPECTED_ICLOUD_CONTAINER: iCloud.tech.dongdongbh.mindwtr
       ANALYTICS_HEARTBEAT_URL: ${{ secrets.ANALYTICS_HEARTBEAT_URL }}
+      ANALYTICS_RELEASE_VERSION: ${{ inputs.tag || github.ref_name }}
       DROPBOX_APP_KEY: ${{ vars.DROPBOX_APP_KEY || secrets.DROPBOX_APP_KEY }}
+      FEEDBACK_ENDPOINT_URL: ${{ vars.FEEDBACK_ENDPOINT_URL || vars.VITE_FEEDBACK_ENDPOINT_URL || 'https://feedback.mindwtr.app' }}
+      DONATION_PROMPT_ENABLED: "true"
     steps:
       - name: Checkout code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.tag || github.event.inputs.tag || github.ref }}
 
       - name: Setup Ruby
         run: bash scripts/ci/setup-ruby.sh 3.3
@@ -113,7 +156,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -121,7 +164,10 @@ jobs:
           bun-version-file: ".bun-version"
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
+
+      - name: Validate iOS App Intents availability
+        run: node scripts/ci/validate-ios-app-intents-availability.js
 
       - name: Validate required secrets
         env:
@@ -721,6 +767,51 @@ jobs:
           fi
           echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> "$GITHUB_ENV"
 
+      - name: Record iOS dSYM UUIDs
+        run: |
+          set -euo pipefail
+          DSYM_DIR="$ARCHIVE_PATH/dSYMs"
+          DSYM_MANIFEST="$DSYM_DIR/dsym-uuids.txt"
+
+          if [ ! -d "$DSYM_DIR" ]; then
+            echo "::error::Archived dSYM directory not found: $DSYM_DIR"
+            exit 1
+          fi
+
+          {
+            echo "Mindwtr iOS dSYM UUIDs"
+            echo "App version: ${APP_VERSION}"
+            echo "Build number: ${APP_BUILD_NUMBER}"
+            echo "Git SHA: ${GITHUB_SHA}"
+            echo "Archive: ${ARCHIVE_PATH}"
+          } > "$DSYM_MANIFEST"
+
+          found_dsym=0
+          while IFS= read -r -d '' dwarf_file; do
+            found_dsym=1
+            {
+              echo
+              echo "File: ${dwarf_file#$DSYM_DIR/}"
+              dwarfdump --uuid "$dwarf_file"
+            } >> "$DSYM_MANIFEST"
+          done < <(find "$DSYM_DIR" -path '*/Contents/Resources/DWARF/*' -type f -print0)
+
+          if [ "$found_dsym" -ne 1 ]; then
+            echo "::error::No DWARF files found under archived dSYM directory: $DSYM_DIR"
+            exit 1
+          fi
+
+          cat "$DSYM_MANIFEST"
+
+      - name: Upload iOS dSYMs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: mindwtr-ios-appstore-dsyms-${{ github.run_id }}
+          path: ${{ runner.temp }}/Mindwtr.xcarchive/dSYMs/
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Export IPA
         timeout-minutes: 10
         run: |
@@ -816,13 +907,42 @@ jobs:
         if: ${{ inputs.upload }}
         env:
           RELEASE_BODY: ${{ github.event.release.body || '' }}
-          APP_SUPPORT_URL: "https://github.com/dongdongbh/Mindwtr/issues"
-          APP_MARKETING_URL: "https://github.com/dongdongbh/Mindwtr"
+          APP_SUPPORT_URL: "https://mindwtr.app/support"
+          APP_MARKETING_URL: "https://mindwtr.app/"
         run: |
           set -euo pipefail
           export FASTLANE_METADATA_DIR="$RUNNER_TEMP/fastlane_metadata"
           scripts/ci/prepare-fastlane-metadata.sh
           echo "FASTLANE_METADATA_PATH=$FASTLANE_METADATA_DIR" >> "$GITHUB_ENV"
+
+      - name: Prepare Fastlane screenshots
+        if: ${{ inputs.upload && !inputs.skip_screenshots }}
+        run: |
+          set -euo pipefail
+          SHOULD_UPLOAD_SCREENSHOTS="$(scripts/ci/should-upload-fastlane-screenshots.sh apps/mobile/screenshots)"
+          if [ "${SHOULD_UPLOAD_SCREENSHOTS}" != "true" ]; then
+            echo "No iOS screenshot changes detected since the previous release tag; skipping App Store screenshot upload."
+            echo "FASTLANE_SCREENSHOTS_PATH=" >> "$GITHUB_ENV"
+            echo "SKIP_SCREENSHOTS_FOR_UPLOAD=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          export FASTLANE_SCREENSHOTS_DIR="$RUNNER_TEMP/fastlane_screenshots"
+          bash scripts/ci/prepare-fastlane-screenshots.sh ios apps/mobile/screenshots
+          if find "$FASTLANE_SCREENSHOTS_DIR" -mindepth 2 -type f | grep -q .; then
+            echo "FASTLANE_SCREENSHOTS_PATH=$FASTLANE_SCREENSHOTS_DIR" >> "$GITHUB_ENV"
+            echo "SKIP_SCREENSHOTS_FOR_UPLOAD=false" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No iOS App Store screenshots found under apps/mobile/screenshots/{iphone,ipad}; skipping screenshot upload."
+            echo "FASTLANE_SCREENSHOTS_PATH=" >> "$GITHUB_ENV"
+            echo "SKIP_SCREENSHOTS_FOR_UPLOAD=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Skip Fastlane screenshots
+        if: ${{ inputs.upload && inputs.skip_screenshots }}
+        run: |
+          echo "FASTLANE_SCREENSHOTS_PATH=" >> "$GITHUB_ENV"
+          echo "SKIP_SCREENSHOTS_FOR_UPLOAD=true" >> "$GITHUB_ENV"
 
       - name: Resolve App Store review submission flag
         if: ${{ inputs.upload }}
@@ -832,6 +952,8 @@ jobs:
           IOS_ASC_ISSUER_ID: ${{ secrets.IOS_ASC_ISSUER_ID }}
           IOS_ASC_PRIVATE_KEY: ${{ secrets.IOS_ASC_PRIVATE_KEY }}
           REQUESTED_SUBMIT_FOR_REVIEW: ${{ inputs.submit_for_review && 'true' || 'false' }}
+          REQUESTED_DISTRIBUTE_TESTFLIGHT: ${{ inputs.distribute_testflight && 'true' || 'false' }}
+          FORCE_APPSTORE_UPLOAD: ${{ inputs.force_appstore_upload && 'true' || 'false' }}
         run: |
           set -euo pipefail
 
@@ -843,7 +965,16 @@ jobs:
             EFFECTIVE_SUBMIT_FOR_REVIEW="false"
             echo "Review submission disabled by input; checking App Store review state for TestFlight external routing."
           fi
-          echo "ENABLE_TESTFLIGHT_EXTERNAL_RELEASE=false" >> "$GITHUB_ENV"
+          if [ "${REQUESTED_DISTRIBUTE_TESTFLIGHT:-false}" = "true" ]; then
+            echo "ENABLE_TESTFLIGHT_EXTERNAL_RELEASE=true" >> "$GITHUB_ENV"
+            if [ "$REQUESTED_SUBMIT_FOR_REVIEW" != "true" ]; then
+              echo "SKIP_METADATA_FOR_UPLOAD=true" >> "$GITHUB_ENV"
+              echo "FASTLANE_SCREENSHOTS_PATH=" >> "$GITHUB_ENV"
+              echo "SKIP_SCREENSHOTS_FOR_UPLOAD=true" >> "$GITHUB_ENV"
+            fi
+          else
+            echo "ENABLE_TESTFLIGHT_EXTERNAL_RELEASE=false" >> "$GITHUB_ENV"
+          fi
           echo "SKIP_APPSTORE_UPLOAD=false" >> "$GITHUB_ENV"
 
           if [ -z "${IOS_ASC_KEY_ID:-}" ] || [ -z "${IOS_ASC_ISSUER_ID:-}" ] || [ -z "${IOS_ASC_PRIVATE_KEY:-}" ]; then
@@ -908,9 +1039,17 @@ jobs:
           ACTIVE_REVIEW_VERSION="$(jq -r '.data[0].attributes.versionString // empty' "$REVIEW_JSON_FILE")"
           ACTIVE_REVIEW_STATE="$(jq -r '.data[0].attributes.appStoreState // empty' "$REVIEW_JSON_FILE")"
           if [ -n "${ACTIVE_REVIEW_ID}" ]; then
+            if [ "${FORCE_APPSTORE_UPLOAD:-false}" = "true" ]; then
+              echo "::error::Found existing iOS App Store submission in state ${ACTIVE_REVIEW_STATE:-unknown} (version ${ACTIVE_REVIEW_VERSION:-unknown}). Cancel/remove that App Store review in App Store Connect before forcing upload of a corrected Apple build."
+              exit 1
+            fi
             echo "::warning::Found existing iOS App Store submission in state ${ACTIVE_REVIEW_STATE:-unknown} (version ${ACTIVE_REVIEW_VERSION:-unknown}). Upload will continue for TestFlight using version ${APP_VERSION} with build ${APP_BUILD_NUMBER}, and review submission is disabled."
             echo "EFFECTIVE_SUBMIT_FOR_REVIEW=false" >> "$GITHUB_ENV"
             echo "ENABLE_TESTFLIGHT_EXTERNAL_RELEASE=true" >> "$GITHUB_ENV"
+            echo "SKIP_APP_VERSION_UPDATE_FOR_UPLOAD=true" >> "$GITHUB_ENV"
+            echo "SKIP_METADATA_FOR_UPLOAD=true" >> "$GITHUB_ENV"
+            echo "FASTLANE_SCREENSHOTS_PATH=" >> "$GITHUB_ENV"
+            echo "SKIP_SCREENSHOTS_FOR_UPLOAD=true" >> "$GITHUB_ENV"
             exit 0
           fi
 
@@ -928,6 +1067,10 @@ jobs:
                 echo "::notice::Found existing iOS App Store version ${APP_VERSION} in state ${TARGET_VERSION_STATE:-unknown}. Reusing the existing version record for upload."
                 echo "SKIP_APP_VERSION_UPDATE_FOR_UPLOAD=true" >> "$GITHUB_ENV"
               elif [ -n "${TARGET_VERSION_ID}" ]; then
+                if [ "${FORCE_APPSTORE_UPLOAD:-false}" = "true" ]; then
+                  echo "::error::Existing iOS App Store version ${APP_VERSION} is not editable (state ${TARGET_VERSION_STATE:-unknown}). Cancel/remove the existing review or create the next app version before forcing upload of a corrected Apple build."
+                  exit 1
+                fi
                 echo "::warning::Existing iOS App Store version ${APP_VERSION} is not editable (state ${TARGET_VERSION_STATE:-unknown}). Skipping App Store Connect publish for this run."
                 echo "EFFECTIVE_SUBMIT_FOR_REVIEW=false" >> "$GITHUB_ENV"
                 echo "SKIP_METADATA_FOR_UPLOAD=true" >> "$GITHUB_ENV"
@@ -959,6 +1102,7 @@ jobs:
           SUBMIT_FOR_REVIEW: ${{ env.EFFECTIVE_SUBMIT_FOR_REVIEW || 'false' }}
           SKIP_APP_VERSION_UPDATE: ${{ env.SKIP_APP_VERSION_UPDATE_FOR_UPLOAD || 'false' }}
           SKIP_METADATA: ${{ env.SKIP_METADATA_FOR_UPLOAD || 'false' }}
+          SKIP_SCREENSHOTS: ${{ env.SKIP_SCREENSHOTS_FOR_UPLOAD || 'true' }}
           FASTLANE_SKIP_UPDATE_CHECK: "1"
           FASTLANE_HIDE_CHANGELOG: "1"
           FASTLANE_OPT_OUT_USAGE: "1"
@@ -978,19 +1122,25 @@ jobs:
 
           platform :ios do
             lane :upload_app_store do
+              screenshots_path = ENV["FASTLANE_SCREENSHOTS_PATH"]
+              skip_screenshots = ENV.fetch("SKIP_METADATA", "false") == "true" || ENV.fetch("SKIP_SCREENSHOTS", "true") == "true"
               deliver_options = {
                 app_identifier: ENV.fetch("EXPECTED_BUNDLE_ID"),
                 app_version: ENV.fetch("APP_VERSION"),
                 ipa: ENV.fetch("IPA_PATH"),
                 metadata_path: ENV.fetch("FASTLANE_METADATA_PATH"),
                 skip_metadata: ENV.fetch("SKIP_METADATA", "false") == "true",
-                skip_screenshots: true,
+                skip_screenshots: skip_screenshots,
                 skip_app_version_update: ENV.fetch("SKIP_APP_VERSION_UPDATE", "false") == "true",
                 force: true,
                 run_precheck_before_submit: false,
                 submit_for_review: ENV.fetch("SUBMIT_FOR_REVIEW", "false") == "true",
                 automatic_release: true
               }
+              if screenshots_path && !screenshots_path.empty?
+                deliver_options[:screenshots_path] = screenshots_path
+                deliver_options[:overwrite_screenshots] = true unless skip_screenshots
+              end
               api_key = app_store_connect_api_key(
                 key_id: ENV.fetch("FASTLANE_ASC_KEY_ID"),
                 issuer_id: ENV.fetch("FASTLANE_ASC_ISSUER_ID"),

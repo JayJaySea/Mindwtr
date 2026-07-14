@@ -85,15 +85,21 @@ aur/src/
 
 # Flatpak build cache
 .flatpak-builder/
+build-dir/
 
 # Agent files
+AGENT.md
 AGENTS.md
-.codex/
-.agents/
-.claude/
-.gemini/
-.kiro/
+.codex
+.codegraph/
+.agents
+.serena
+.claude
+.cursor/
+.gemini
+.kiro
 skills-lock.json
+docs/agents
 
 # CI artifacts
 scripts/ci/__pycache__/
@@ -102,4 +108,8 @@ scripts/ci/__pycache__/
 Mindwtr.wiki/
 
 # Local workspace configuration
+.worktrees/
 pnpm-workspace.yaml
+
+# Brainstorming/implementation working files (decisions distilled to docs/adr/)
+docs/superpowers/

@@ -1,8 +1,9 @@
 import { useCallback, useMemo } from 'react';
 import {
     filterProjectsBySelectedArea,
+    formatTimeEstimateLabel as formatCoreTimeEstimateLabel,
+    isCustomTimeEstimate,
     parseRRuleString,
-    RECURRENCE_RULES,
     safeParseDate,
     type AppData,
     type Project,
@@ -23,13 +24,15 @@ import {
 import {
     DEFAULT_TASK_EDITOR_ORDER,
     DEFAULT_TASK_EDITOR_VISIBLE,
+    getEditedTaskValue,
     getTaskEditorSectionAssignments,
     getTaskEditorSectionOpenDefaults,
     STATUS_OPTIONS,
     TASK_EDITOR_FIXED_FIELDS,
 } from './task-edit-modal.utils';
+import type { PickerOption } from './TaskEditFieldRenderer.types';
 
-const DEFAULT_TIME_ESTIMATE_PRESETS: TimeEstimate[] = ['10min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
+const DEFAULT_TIME_ESTIMATE_PRESETS: TimeEstimate[] = ['5min', '10min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
 const ALL_TIME_ESTIMATES: TimeEstimate[] = ['5min', '10min', '15min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
 const PRIORITY_OPTIONS: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 const ENERGY_LEVEL_OPTIONS: Array<NonNullable<Task['energyLevel']>> = ['low', 'medium', 'high'];
@@ -43,6 +46,10 @@ const REFERENCE_HIDDEN_FIELDS = new Set<TaskEditorFieldId>([
     'timeEstimate',
     'checklist',
 ]);
+
+export const getMonthlyRecurrenceAnchorDate = (editedTask: Partial<Task>, task: Task | null): Date => (
+    safeParseDate(editedTask.dueDate || editedTask.startTime || task?.dueDate || task?.startTime) ?? new Date()
+);
 
 type UseTaskEditDerivedStateArgs = {
     task: Task | null;
@@ -73,7 +80,7 @@ export function useTaskEditDerivedState({
     visibleAttachmentsLength,
     t,
 }: UseTaskEditDerivedStateArgs) {
-    const activeProjectId = editedTask.projectId ?? task?.projectId;
+    const activeProjectId = getEditedTaskValue(editedTask, task, 'projectId');
     const projectFilterAreaId =
         typeof editedTask.areaId === 'string' && editedTask.areaId.trim().length > 0
             ? editedTask.areaId
@@ -83,13 +90,13 @@ export function useTaskEditDerivedState({
         [projectFilterAreaId, projects]
     );
 
-    const recurrenceOptions: { value: RecurrenceRule | ''; label: string }[] = useMemo(
+    const recurrenceOptions: PickerOption<RecurrenceRule>[] = useMemo(
         () => [
             { value: '', label: t('recurrence.none') },
-            ...RECURRENCE_RULES.map((rule) => ({
-                value: rule,
-                label: t(`recurrence.${rule}`),
-            })),
+            { value: 'daily', label: t('recurrence.daily') },
+            { value: 'weekly', label: t('recurrence.weekly') },
+            { value: 'monthly', label: t('recurrence.monthly') },
+            { value: 'yearly', label: t('recurrence.yearly') },
         ],
         [t]
     );
@@ -101,9 +108,10 @@ export function useTaskEditDerivedState({
         const parsed = parseRRuleString(recurrenceRRuleValue);
         return parsed.interval && parsed.interval > 0 ? parsed.interval : 1;
     }, [recurrenceRRuleValue, recurrenceRuleValue]);
+    const monthlyAnchorSource = editedTask.dueDate || editedTask.startTime || task?.dueDate || task?.startTime;
     const monthlyAnchorDate = useMemo(
-        () => safeParseDate(editedTask.dueDate ?? task?.dueDate) ?? new Date(),
-        [editedTask.dueDate, task?.dueDate]
+        () => safeParseDate(monthlyAnchorSource) ?? new Date(),
+        [monthlyAnchorSource]
     );
     const monthlyWeekdayCode = WEEKDAY_ORDER[monthlyAnchorDate.getDay()] as RecurrenceWeekday;
     const monthlyPattern = useMemo<'date' | 'custom'>(() => {
@@ -112,36 +120,27 @@ export function useTaskEditDerivedState({
         const hasLast = parsed.byDay?.some((day) => String(day).startsWith('-1'));
         const hasNth = parsed.byDay?.some((day) => /^[1-4]/.test(String(day)));
         const hasByMonthDay = parsed.byMonthDay && parsed.byMonthDay.length > 0;
-        const interval = parsed.interval && parsed.interval > 0 ? parsed.interval : 1;
         const isCustomDay = hasByMonthDay && parsed.byMonthDay?.[0] !== monthlyAnchorDate.getDate();
-        return hasNth || hasLast || interval > 1 || isCustomDay ? 'custom' : 'date';
+        return hasNth || hasLast || isCustomDay ? 'custom' : 'date';
     }, [monthlyAnchorDate, recurrenceRRuleValue, recurrenceRuleValue]);
 
-    const formatTimeEstimateLabel = useCallback((value: TimeEstimate) => {
-        if (value === '5min') return '5m';
-        if (value === '10min') return '10m';
-        if (value === '15min') return '15m';
-        if (value === '30min') return '30m';
-        if (value === '1hr') return '1h';
-        if (value === '2hr') return '2h';
-        if (value === '3hr') return '3h';
-        if (value === '4hr') return '4h';
-        return '4h+';
-    }, []);
+    const formatTimeEstimateLabel = useCallback((value: TimeEstimate) => formatCoreTimeEstimateLabel(value), []);
 
-    const savedPresets = settings.gtd?.timeEstimatePresets;
-    const basePresets = savedPresets?.length ? savedPresets : DEFAULT_TIME_ESTIMATE_PRESETS;
-    const normalizedPresets = ALL_TIME_ESTIMATES.filter((value) => basePresets.includes(value));
     const currentEstimate = editedTask.timeEstimate as TimeEstimate | undefined;
-    const effectivePresets = currentEstimate && !normalizedPresets.includes(currentEstimate)
-        ? [...normalizedPresets, currentEstimate]
-        : normalizedPresets;
     const timeEstimateOptions: { value: TimeEstimate | ''; label: string }[] = useMemo(
-        () => [
-            { value: '', label: t('common.none') },
-            ...effectivePresets.map((value) => ({ value, label: formatTimeEstimateLabel(value) })),
-        ],
-        [effectivePresets, formatTimeEstimateLabel, t]
+        () => {
+            const savedPresets = settings.gtd?.timeEstimatePresets;
+            const basePresets = savedPresets?.length ? savedPresets : DEFAULT_TIME_ESTIMATE_PRESETS;
+            const normalizedPresets = ALL_TIME_ESTIMATES.filter((value) => basePresets.includes(value));
+            const effectivePresets = currentEstimate && !isCustomTimeEstimate(currentEstimate) && !normalizedPresets.includes(currentEstimate)
+                ? [...normalizedPresets, currentEstimate]
+                : normalizedPresets;
+            return [
+                { value: '', label: t('common.none') },
+                ...effectivePresets.map((value) => ({ value, label: formatTimeEstimateLabel(value) })),
+            ];
+        },
+        [currentEstimate, formatTimeEstimateLabel, settings.gtd?.timeEstimatePresets, t]
     );
 
     const savedOrder = useMemo(() => settings.gtd?.taskEditor?.order ?? [], [settings.gtd?.taskEditor?.order]);
@@ -194,16 +193,18 @@ export function useTaskEditDerivedState({
         },
         [taskEditorOrder]
     );
+    const activeSectionId = getEditedTaskValue(editedTask, task, 'sectionId');
+    const activeAreaId = getEditedTaskValue(editedTask, task, 'areaId');
     const hasValue = useCallback((fieldId: TaskEditorFieldId) => {
         switch (fieldId) {
             case 'status':
-                return (editedTask.status ?? task?.status) !== 'inbox';
+                return false;
             case 'project':
-                return Boolean(editedTask.projectId ?? task?.projectId);
+                return Boolean(activeProjectId);
             case 'section':
-                return Boolean(editedTask.sectionId ?? task?.sectionId);
+                return Boolean(activeSectionId);
             case 'area':
-                return Boolean(editedTask.areaId ?? task?.areaId);
+                return Boolean(activeAreaId);
             case 'priority':
                 if (!prioritiesEnabled) return false;
                 return Boolean(editedTask.priority ?? task?.priority);
@@ -215,6 +216,8 @@ export function useTaskEditDerivedState({
                 return Boolean(contextInputDraft.trim());
             case 'description':
                 return Boolean(descriptionDraft.trim());
+            case 'location':
+                return Boolean(String(editedTask.location ?? task?.location ?? '').trim());
             case 'tags':
                 return Boolean(tagInputDraft.trim());
             case 'timeEstimate':
@@ -236,35 +239,32 @@ export function useTaskEditDerivedState({
                 return false;
         }
     }, [
+        activeAreaId,
+        activeProjectId,
+        activeSectionId,
         contextInputDraft,
         descriptionDraft,
         editedTask.assignedTo,
-        editedTask.areaId,
         editedTask.checklist,
         editedTask.dueDate,
         editedTask.energyLevel,
+        editedTask.location,
         editedTask.priority,
-        editedTask.projectId,
         editedTask.recurrence,
         editedTask.reviewAt,
-        editedTask.sectionId,
         editedTask.startTime,
-        editedTask.status,
         editedTask.timeEstimate,
         prioritiesEnabled,
         tagInputDraft,
         task?.assignedTo,
-        task?.areaId,
         task?.checklist,
         task?.dueDate,
         task?.energyLevel,
+        task?.location,
         task?.priority,
-        task?.projectId,
         task?.recurrence,
         task?.reviewAt,
-        task?.sectionId,
         task?.startTime,
-        task?.status,
         task?.timeEstimate,
         timeEstimatesEnabled,
         visibleAttachmentsLength,
@@ -301,6 +301,7 @@ export function useTaskEditDerivedState({
         () => filterVisibleFields(orderFields(taskEditorOrder.filter((fieldId) => sectionAssignments[fieldId] === 'details'))),
         [filterVisibleFields, orderFields, sectionAssignments, taskEditorOrder]
     );
+    const showStatusField = isFieldVisible('status');
     const projectSections = useMemo(() => {
         if (!activeProjectId) return [];
         return sections
@@ -335,6 +336,7 @@ export function useTaskEditDerivedState({
         recurrenceStrategyValue,
         schedulingFields,
         sectionOpenDefaults,
+        showStatusField,
         timeEstimateOptions,
     };
 }

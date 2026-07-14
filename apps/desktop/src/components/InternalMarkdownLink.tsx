@@ -1,8 +1,10 @@
 import React from 'react';
-import { parseMarkdownReferenceHref, useTaskStore, shallow } from '@mindwtr/core';
+import { parseMarkdownReferenceHref, tFallback, useTaskStore, shallow, type Project, type Task } from '@mindwtr/core';
 
 import { useLanguage } from '../contexts/language-context';
 import { dispatchNavigateEvent } from '../lib/navigation-events';
+import { reportError } from '../lib/report-error';
+import { isTauriRuntime } from '../lib/runtime';
 import { cn } from '../lib/utils';
 import { resolveTaskNavigationView } from '../lib/task-navigation';
 import { useUiStore } from '../store/ui-store';
@@ -11,19 +13,73 @@ type InternalMarkdownLinkProps = {
     href?: string;
     className?: string;
     children: React.ReactNode;
+    linkContext: InternalMarkdownLinkContext;
 };
 
-function isSafeExternalHref(href: string): boolean {
-    try {
-        const url = new URL(href);
-        return ['http:', 'https:', 'mailto:', 'tel:'].includes(url.protocol);
-    } catch {
-        return false;
-    }
+type TaskStoreSnapshot = ReturnType<typeof useTaskStore.getState>;
+type UiStoreSnapshot = ReturnType<typeof useUiStore.getState>;
+
+export type InternalMarkdownLinkContext = {
+    tasksById: Map<string, Task>;
+    deletedTasksById: Map<string, Task>;
+    projectsById: Map<string, Project>;
+    deletedProjectsById: Map<string, Project>;
+    restoreTask: TaskStoreSnapshot['restoreTask'];
+    restoreProject: TaskStoreSnapshot['restoreProject'];
+    setHighlightTask: TaskStoreSnapshot['setHighlightTask'];
+    setProjectView: UiStoreSnapshot['setProjectView'];
+};
+
+type CreateInternalMarkdownLinkContextParams = {
+    tasks: Task[];
+    projects: Project[];
+    restoreTask: TaskStoreSnapshot['restoreTask'];
+    restoreProject: TaskStoreSnapshot['restoreProject'];
+    setHighlightTask: TaskStoreSnapshot['setHighlightTask'];
+    setProjectView: UiStoreSnapshot['setProjectView'];
+};
+
+export function createInternalMarkdownLinkContext({
+    tasks,
+    projects,
+    restoreTask,
+    restoreProject,
+    setHighlightTask,
+    setProjectView,
+}: CreateInternalMarkdownLinkContextParams): InternalMarkdownLinkContext {
+    const tasksById = new Map<string, Task>();
+    const deletedTasksById = new Map<string, Task>();
+    const projectsById = new Map<string, Project>();
+    const deletedProjectsById = new Map<string, Project>();
+
+    tasks.forEach((task) => {
+        if (task.deletedAt) {
+            deletedTasksById.set(task.id, task);
+        } else {
+            tasksById.set(task.id, task);
+        }
+    });
+    projects.forEach((project) => {
+        if (project.deletedAt) {
+            deletedProjectsById.set(project.id, project);
+        } else {
+            projectsById.set(project.id, project);
+        }
+    });
+
+    return {
+        tasksById,
+        deletedTasksById,
+        projectsById,
+        deletedProjectsById,
+        restoreTask,
+        restoreProject,
+        setHighlightTask,
+        setProjectView,
+    };
 }
 
-export function InternalMarkdownLink({ href, className, children }: InternalMarkdownLinkProps) {
-    const { t } = useLanguage();
+export function useInternalMarkdownLinkContext(): InternalMarkdownLinkContext {
     const { tasks, projects, restoreTask, restoreProject, setHighlightTask } = useTaskStore((state) => ({
         tasks: state._allTasks,
         projects: state._allProjects,
@@ -32,6 +88,58 @@ export function InternalMarkdownLink({ href, className, children }: InternalMark
         setHighlightTask: state.setHighlightTask,
     }), shallow);
     const setProjectView = useUiStore((state) => state.setProjectView);
+
+    return React.useMemo(() => createInternalMarkdownLinkContext({
+        tasks,
+        projects,
+        restoreTask,
+        restoreProject,
+        setHighlightTask,
+        setProjectView,
+    }), [tasks, projects, restoreTask, restoreProject, setHighlightTask, setProjectView]);
+}
+
+function isSafeExternalHref(href: string): boolean {
+    try {
+        const url = new URL(href);
+        return ['http:', 'https:', 'mailto:', 'tel:', 'mid:'].includes(url.protocol);
+    } catch {
+        return false;
+    }
+}
+
+async function openExternalHref(href: string): Promise<void> {
+    const nextHref = href.trim();
+    let openError: unknown = null;
+
+    if (isTauriRuntime()) {
+        try {
+            const { open } = await import('@tauri-apps/plugin-shell');
+            await open(nextHref);
+            return;
+        } catch (error) {
+            openError = error;
+        }
+    }
+
+    const opened = window.open(nextHref, '_blank', 'noopener,noreferrer');
+    if (!opened) {
+        reportError('Failed to open markdown link', openError ?? new Error('Popup blocked'));
+    }
+}
+
+export function InternalMarkdownLink({ href, className, children, linkContext }: InternalMarkdownLinkProps) {
+    const { t } = useLanguage();
+    const {
+        tasksById,
+        deletedTasksById,
+        projectsById,
+        deletedProjectsById,
+        restoreTask,
+        restoreProject,
+        setHighlightTask,
+        setProjectView,
+    } = linkContext;
 
     if (!href) {
         return <>{children}</>;
@@ -49,7 +157,9 @@ export function InternalMarkdownLink({ href, className, children }: InternalMark
                 rel="noreferrer"
                 className={cn('text-primary underline underline-offset-2 hover:opacity-90', className)}
                 onClick={(event) => {
+                    event.preventDefault();
                     event.stopPropagation();
+                    void openExternalHref(href);
                 }}
             >
                 {children}
@@ -57,30 +167,15 @@ export function InternalMarkdownLink({ href, className, children }: InternalMark
         );
     }
 
-    const taskLabel = (() => {
-        const translated = t('taskEdit.tab.task');
-        return translated === 'taskEdit.tab.task' ? 'Task' : translated;
-    })();
-    const projectLabel = (() => {
-        const translated = t('taskEdit.projectLabel');
-        return translated === 'taskEdit.projectLabel' ? 'Project' : translated;
-    })();
-    const deletedTaskLabel = (() => {
-        const translated = t('markdown.referenceDeletedTask');
-        return translated === 'markdown.referenceDeletedTask' ? 'deleted task' : translated;
-    })();
-    const deletedProjectLabel = (() => {
-        const translated = t('markdown.referenceDeletedProject');
-        return translated === 'markdown.referenceDeletedProject' ? 'deleted project' : translated;
-    })();
-    const restoreLabel = (() => {
-        const translated = t('markdown.referenceRestore');
-        return translated === 'markdown.referenceRestore' ? 'Restore' : translated;
-    })();
+    const taskLabel = tFallback(t, 'taskEdit.tab.task', 'Task');
+    const projectLabel = tFallback(t, 'taskEdit.projectLabel', 'Project');
+    const deletedTaskLabel = tFallback(t, 'markdown.referenceDeletedTask', 'deleted task');
+    const deletedProjectLabel = tFallback(t, 'markdown.referenceDeletedProject', 'deleted project');
+    const restoreLabel = tFallback(t, 'markdown.referenceRestore', 'Restore');
 
     if (reference.entityType === 'project') {
-        const project = projects.find((candidate) => candidate.id === reference.id && !candidate.deletedAt);
-        const deletedProject = project ? null : projects.find((candidate) => candidate.id === reference.id && !!candidate.deletedAt);
+        const project = projectsById.get(reference.id);
+        const deletedProject = project ? null : deletedProjectsById.get(reference.id);
         if (!project) {
             return (
                 <span className={cn('text-muted-foreground', className)}>
@@ -107,8 +202,7 @@ export function InternalMarkdownLink({ href, className, children }: InternalMark
         }
         const statusLabel = (() => {
             const key = `status.${project.status}` as const;
-            const translated = t(key);
-            return translated === key ? project.status : translated;
+            return tFallback(t, key, project.status);
         })();
         return (
             <button
@@ -126,8 +220,8 @@ export function InternalMarkdownLink({ href, className, children }: InternalMark
         );
     }
 
-    const task = tasks.find((candidate) => candidate.id === reference.id && !candidate.deletedAt);
-    const deletedTask = task ? null : tasks.find((candidate) => candidate.id === reference.id && !!candidate.deletedAt);
+    const task = tasksById.get(reference.id);
+    const deletedTask = task ? null : deletedTasksById.get(reference.id);
     if (!task) {
         return (
             <span className={cn('text-muted-foreground', className)}>
@@ -164,8 +258,7 @@ export function InternalMarkdownLink({ href, className, children }: InternalMark
 
     const statusLabel = (() => {
         const key = `status.${task.status}` as const;
-        const translated = t(key);
-        return translated === key ? task.status : translated;
+        return tFallback(t, key, task.status);
     })();
     const currentTitle = task.title?.trim();
 

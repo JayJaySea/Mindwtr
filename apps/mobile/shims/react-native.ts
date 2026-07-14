@@ -10,6 +10,13 @@ const renderHostChild = (child: any, key: string) => {
 
 export const StyleSheet = {
   create: <T extends Record<string, unknown>>(styles: T) => styles,
+  absoluteFillObject: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
 };
 
 export const View = createHostComponent('View');
@@ -67,6 +74,7 @@ export const SectionList = ({
 export const Modal = createHostComponent('Modal');
 export const TouchableOpacity = createHostComponent('TouchableOpacity');
 export const Pressable = createHostComponent('Pressable');
+export const Switch = createHostComponent('Switch');
 export const KeyboardAvoidingView = createHostComponent('KeyboardAvoidingView');
 export const Image = createHostComponent('Image');
 export const ActivityIndicator = createHostComponent('ActivityIndicator');
@@ -90,12 +98,28 @@ export const Animated = {
     constructor(value: number) {
       this._value = value;
     }
+    setValue(value: number) {
+      this._value = value;
+    }
   },
   event: () => () => {},
-  timing: () => ({ start: (cb?: () => void) => cb?.() }),
+  timing: (value: any, config: any) => ({
+    start: (cb?: () => void) => {
+      value?.setValue?.(config?.toValue ?? value?._value ?? 0);
+      cb?.();
+    },
+  }),
 };
 
 export const Platform = { OS: 'web', select: (options: any) => options?.web ?? options?.default };
+
+export const AppRegistry = {
+  registerHeadlessTask: () => undefined,
+};
+
+export const NativeModules = {
+  EXDevLauncher: null,
+};
 
 export const Dimensions = {
   get: () => ({ width: 390, height: 844 }),
@@ -104,6 +128,24 @@ export const Dimensions = {
 export const Keyboard = {
   addListener: () => ({ remove: () => {} }),
   dismiss: () => {},
+  isVisible: () => false,
+};
+
+export const PanResponder = {
+  create: (config: any) => ({
+    panHandlers: {
+      onStartShouldSetResponder: (event: any, gestureState: any) =>
+        config.onStartShouldSetPanResponder?.(event, gestureState) ?? false,
+      onMoveShouldSetResponder: (event: any, gestureState: any) =>
+        config.onMoveShouldSetPanResponder?.(event, gestureState) ?? false,
+      onResponderMove: (event: any, gestureState: any) =>
+        config.onPanResponderMove?.(event, gestureState),
+      onResponderRelease: (event: any, gestureState: any) =>
+        config.onPanResponderRelease?.(event, gestureState),
+      onResponderTerminate: (event: any, gestureState: any) =>
+        config.onPanResponderTerminate?.(event, gestureState),
+    },
+  }),
 };
 
 export const TurboModuleRegistry = {

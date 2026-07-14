@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useTaskStore } from '@mindwtr/core';
+import { tFallback, useTaskStore } from '@mindwtr/core';
 
 import { useLanguage } from '../contexts/language-context';
 import { useThemeColors } from '../hooks/use-theme-colors';
@@ -12,8 +12,10 @@ export function SyncActivityIndicator() {
     const router = useRouter();
     const insets = useSafeAreaInsets();
     const tc = useThemeColors();
-    const { language } = useLanguage();
+    const { t } = useLanguage();
     const pendingRemoteWriteAt = useTaskStore((state) => state.settings?.pendingRemoteWriteAt);
+    const lastSyncStatus = useTaskStore((state) => state.settings?.lastSyncStatus);
+    const lastSyncError = useTaskStore((state) => state.settings?.lastSyncError);
     const [activityState, setActivityState] = useState(getMobileSyncActivityState());
 
     useEffect(() => {
@@ -21,16 +23,28 @@ export function SyncActivityIndicator() {
     }, []);
 
     const copy = useMemo(() => {
-        const isChinese = language === 'zh' || language === 'zh-Hant';
+        if (lastSyncStatus === 'error') {
+            return {
+                label: tFallback(t, 'settings.lastSyncError', 'Sync failed'),
+                accessibilityLabel: tFallback(
+                    t,
+                    'settings.syncIssueAccessibility',
+                    'Sync needs attention. Tap to open settings for sync details.'
+                ),
+            };
+        }
         return {
-            label: isChinese ? '同步中' : 'Syncing',
-            accessibilityLabel: isChinese
-                ? '同步进行中。点按可打开设置查看同步详情。'
-                : 'Sync in progress. Tap to open settings for sync details.',
+            label: tFallback(t, 'settings.syncing', 'Syncing'),
+            accessibilityLabel: tFallback(
+                t,
+                'settings.syncingAccessibility',
+                'Sync in progress. Tap to open settings for sync details.'
+            ),
         };
-    }, [language]);
+    }, [lastSyncStatus, t]);
 
-    if (activityState !== 'syncing' && !pendingRemoteWriteAt) {
+    const hasSyncError = lastSyncStatus === 'error';
+    if (activityState !== 'syncing' && !pendingRemoteWriteAt && !hasSyncError) {
         return null;
     }
 
@@ -39,18 +53,23 @@ export function SyncActivityIndicator() {
             accessibilityLabel={copy.accessibilityLabel}
             accessibilityRole="button"
             hitSlop={8}
-            onPress={() => router.push('/settings')}
+            onPress={() => router.push({ pathname: '/settings', params: { settingsScreen: 'sync' } })}
             style={[
                 styles.badge,
                 {
                     top: insets.top + 10,
                     backgroundColor: tc.cardBg,
-                    borderColor: tc.border,
+                    borderColor: hasSyncError ? tc.danger : tc.border,
                 },
             ]}
         >
-            <ActivityIndicator color={tc.tint} size="small" />
+            {hasSyncError ? null : <ActivityIndicator color={tc.tint} size="small" />}
             <Text style={[styles.label, { color: tc.text }]}>{copy.label}</Text>
+            {hasSyncError && lastSyncError ? (
+                <Text numberOfLines={1} style={[styles.detail, { color: tc.secondaryText }]}>
+                    {lastSyncError}
+                </Text>
+            ) : null}
         </Pressable>
     );
 }
@@ -76,5 +95,10 @@ const styles = StyleSheet.create({
     label: {
         fontSize: 13,
         fontWeight: '700',
+    },
+    detail: {
+        maxWidth: 180,
+        fontSize: 11,
+        fontWeight: '600',
     },
 });

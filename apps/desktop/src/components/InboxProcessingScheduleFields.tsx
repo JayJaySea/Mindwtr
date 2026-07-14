@@ -1,14 +1,18 @@
 import { X } from 'lucide-react';
+import { safeFormatDate, safeParseDate, tFallback } from '@mindwtr/core';
 
 import { cn } from '../lib/utils';
+import { QuickDateChips } from './QuickDateChips';
 
 export type InboxProcessingScheduleFieldControl = {
     date: string;
     timeDraft: string;
+    hasTime: boolean;
     onDateChange: (value: string) => void;
     onTimeDraftChange: (value: string) => void;
     onTimeCommit: () => void;
     onClear: () => void;
+    onDateOnly: () => void;
 };
 
 export type InboxProcessingScheduleFieldsControls = {
@@ -17,9 +21,12 @@ export type InboxProcessingScheduleFieldsControls = {
     review: InboxProcessingScheduleFieldControl;
 };
 
+export type InboxProcessingScheduleFieldKey = keyof InboxProcessingScheduleFieldsControls;
+
 type InboxProcessingScheduleFieldsProps = {
     t: (key: string) => string;
     fields: InboxProcessingScheduleFieldsControls;
+    visibleFieldKeys?: InboxProcessingScheduleFieldKey[];
     variant?: 'quick' | 'guided';
 };
 
@@ -44,14 +51,19 @@ const FIELD_CONFIG = [
 export function InboxProcessingScheduleFields({
     t,
     fields,
+    visibleFieldKeys,
     variant = 'quick',
 }: InboxProcessingScheduleFieldsProps) {
     const compact = variant === 'quick';
-    const clearText = t('common.clear') === 'common.clear' ? 'Clear' : t('common.clear');
+    const clearText = tFallback(t, 'common.clear', 'Clear');
+    const dateOnlyText = t('taskEdit.dateOnly');
+    const renderedFieldConfig = visibleFieldKeys?.length
+        ? FIELD_CONFIG.filter(({ key }) => visibleFieldKeys.includes(key))
+        : FIELD_CONFIG;
 
     return (
         <div className="space-y-3">
-            {FIELD_CONFIG.map(({ key, labelKey, timeAriaKey }) => {
+            {renderedFieldConfig.map(({ key, labelKey, timeAriaKey }) => {
                 const field = fields[key];
                 const label = t(labelKey);
                 const showClear = Boolean(field.date || field.timeDraft);
@@ -88,6 +100,19 @@ export function InboxProcessingScheduleFields({
                                     compact ? 'px-3 py-2 text-sm' : 'px-2 py-1 text-xs'
                                 )}
                             />
+                            {field.hasTime ? (
+                                <button
+                                    type="button"
+                                    onClick={field.onDateOnly}
+                                    className={cn(
+                                        'shrink-0 whitespace-nowrap rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
+                                        compact ? 'px-2 py-2 text-xs' : 'px-1.5 py-1 text-[11px]'
+                                    )}
+                                    aria-label={`${dateOnlyText}: ${label}`}
+                                >
+                                    {dateOnlyText}
+                                </button>
+                            ) : null}
                             {showClear ? (
                                 <button
                                     type="button"
@@ -104,6 +129,17 @@ export function InboxProcessingScheduleFields({
                                 <span aria-hidden="true" className="h-8 w-8 shrink-0" />
                             )}
                         </div>
+                        <QuickDateChips
+                            t={t}
+                            selectedDate={safeParseDate(field.date)}
+                            onSelect={(date) => {
+                                if (!date) {
+                                    field.onClear();
+                                    return;
+                                }
+                                field.onDateChange(safeFormatDate(date, 'yyyy-MM-dd'));
+                            }}
+                        />
                     </div>
                 );
             })}

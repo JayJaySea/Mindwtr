@@ -1,15 +1,41 @@
 import React, { memo, useState, useMemo, useDeferredValue, useEffect, useRef, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { shallow, useTaskStore, TaskPriority, TimeEstimate, DEFAULT_AREA_COLOR, sortTasksBy, parseQuickAdd, matchesHierarchicalToken, safeParseDate, isTaskInActiveProject, getWaitingPerson } from '@mindwtr/core';
-import type { Task, TaskStatus } from '@mindwtr/core';
+import { HelpCircle } from 'lucide-react';
+import {
+    buildBulkOrganizeTaskUpdates,
+    createTaskFilterPredicate,
+    DEFAULT_AREA_COLOR,
+    formatTimeEstimateLabel,
+    getQuickAddProjectInitialProps,
+    getTaskMetadataFilterVisibility,
+    getWaitingPerson,
+    hasActiveFilterCriteria,
+    isTaskInActiveProject,
+    parseQuickAdd,
+    normalizeClockTimeInput,
+    getDefaultTaskAreaMode,
+    getPersonOptionNames,
+    resolveDefaultNewTaskAreaId,
+    safeParseDate,
+    selectionsFromCriteria,
+    shallow,
+    sortTasksBy,
+    TaskPriority,
+    TimeEstimate,
+    translateWithFallback as translateTextWithFallback,
+    useTaskStore,
+} from '@mindwtr/core';
+import type { FilterCriteria, Task, TaskStatus } from '@mindwtr/core';
+import type { BulkOrganizeTaskUpdateInput } from '@mindwtr/core';
 import type { TaskSortBy } from '@mindwtr/core';
-import { TaskItem } from '../TaskItem';
 import { ConfirmModal } from '../ConfirmModal';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { ListEmptyState } from './list/ListEmptyState';
 import { ListControlsPanel } from './list/ListControlsPanel';
 import { PromptModal } from '../PromptModal';
 import { InboxProcessor } from './InboxProcessor';
+import { MindSweepLauncher } from '../MindSweepModal';
+import { TaskBulkOrganizeModal } from './list/TaskBulkOrganizeModal';
 import { useLanguage } from '../../contexts/language-context';
 import { useKeybindings } from '../../contexts/keybinding-context';
 import { useListCopilot } from './list/useListCopilot';
@@ -17,13 +43,17 @@ import { useUiStore } from '../../store/ui-store';
 import { usePerformanceMonitor } from '../../hooks/usePerformanceMonitor';
 import { checkBudget } from '../../config/performanceBudgets';
 import { useListViewOptimizations } from '../../hooks/useListViewOptimizations';
+import { usePersistedViewState } from '../../hooks/usePersistedViewState';
 import { dispatchNavigateEvent } from '../../lib/navigation-events';
 import { reportError } from '../../lib/report-error';
-import { AREA_FILTER_ALL, AREA_FILTER_NONE, projectMatchesAreaFilter, resolveAreaFilter, taskMatchesAreaFilter } from '../../lib/area-filter';
+import { AREA_FILTER_ALL, AREA_FILTER_NONE, projectMatchesAreaFilter, resolveAreaFilter, taskMatchesAreaFilter } from '@mindwtr/core';
 import { cn } from '../../lib/utils';
 import { sortDoneTasksForListView } from './list/done-sort';
-import { groupTasksByArea, groupTasksByContext, type NextGroupBy, type TaskGroup } from './list/next-grouping';
+import { groupTasks, type NextGroupBy, type ReferenceGroupBy, type TaskGroup, type TaskListGroupBy } from './list/next-grouping';
+import { GroupedTaskSections } from './list/GroupedTaskSections';
 import { useListSelection } from './list/useListSelection';
+import { StoreTaskItem } from './list/StoreTaskItem';
+import { LIST_VIRTUALIZATION_THRESHOLD, LIST_VIRTUAL_ROW_ESTIMATE, LIST_VIRTUAL_OVERSCAN } from './list/useVirtualList';
 
 
 interface ListViewProps {
@@ -33,16 +63,65 @@ interface ListViewProps {
 
 const EMPTY_PRIORITIES: TaskPriority[] = [];
 const EMPTY_ESTIMATES: TimeEstimate[] = [];
-const VIRTUALIZATION_THRESHOLD = 25;
-const VIRTUAL_ROW_ESTIMATE = 120;
-const VIRTUAL_OVERSCAN = 600;
-
+const REFERENCE_VIEW_STATE_STORAGE_KEY = 'mindwtr:view:reference:v1';
+type ReferenceGroupCollapseKey = Exclude<ReferenceGroupBy, 'none'>;
+type ReferencePersistedViewState = {
+    collapsedGroups: Partial<Record<ReferenceGroupCollapseKey, string[]>>;
+};
+const DEFAULT_REFERENCE_VIEW_STATE: ReferencePersistedViewState = {
+    collapsedGroups: {
+        context: [],
+        area: [],
+        project: [],
+        tag: [],
+    },
+};
 type ShowToast = (
     message: string,
     tone?: 'success' | 'error' | 'info',
     durationMs?: number,
     action?: { label: string; onClick: () => void }
 ) => void;
+
+function withListFilterValue<K extends keyof Pick<FilterCriteria, 'contexts' | 'tags' | 'priority' | 'timeEstimates'>>(
+    criteria: FilterCriteria,
+    key: K,
+    values: NonNullable<FilterCriteria[K]>,
+): FilterCriteria {
+    const next = { ...criteria };
+    if (values.length > 0) {
+        next[key] = values;
+    } else {
+        delete next[key];
+    }
+    return next;
+}
+
+function sanitizeReferenceViewState(value: unknown, fallback: ReferencePersistedViewState): ReferencePersistedViewState {
+    const parsed = value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Partial<ReferencePersistedViewState>
+        : {};
+    const collapsedGroups = parsed.collapsedGroups && typeof parsed.collapsedGroups === 'object' && !Array.isArray(parsed.collapsedGroups)
+        ? parsed.collapsedGroups as Partial<Record<ReferenceGroupCollapseKey, unknown>>
+        : {};
+    const sanitizeGroupIds = (ids: unknown, fallbackIds: string[] | undefined = []) => (
+        Array.isArray(ids)
+            ? Array.from(new Set(ids.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)))
+            : fallbackIds ?? []
+    );
+    return {
+        collapsedGroups: {
+            context: sanitizeGroupIds(collapsedGroups.context, fallback.collapsedGroups.context),
+            area: sanitizeGroupIds(collapsedGroups.area, fallback.collapsedGroups.area),
+            project: sanitizeGroupIds(collapsedGroups.project, fallback.collapsedGroups.project),
+            tag: sanitizeGroupIds(collapsedGroups.tag, fallback.collapsedGroups.tag),
+        },
+    };
+}
+
+function getListDomIdSegment(value: string): string {
+    return value.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'group';
+}
 
 export function reportArchivedTaskQueryFailure(error: unknown, showToast: ShowToast): void {
     reportError('Failed to load archived tasks', error);
@@ -55,7 +134,19 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         tasks,
         projects,
         areas,
-        settings,
+        people,
+        lastDataChangeAt,
+        highlightTaskId,
+    } = useTaskStore((state) => ({
+        tasks: state.tasks,
+        projects: state.projects,
+        areas: state.areas,
+        people: state.people,
+        lastDataChangeAt: state.lastDataChangeAt,
+        highlightTaskId: state.highlightTaskId,
+    }), shallow);
+    const settings = useTaskStore((state) => state.settings);
+    const {
         updateSettings,
         addTask,
         addProject,
@@ -68,14 +159,9 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         batchDeleteTasks,
         batchUpdateTasks,
         queryTasks,
-        lastDataChangeAt,
-        highlightTaskId,
+        getDerivedState,
         setHighlightTask,
     } = useTaskStore((state) => ({
-        tasks: state.tasks,
-        projects: state.projects,
-        areas: state.areas,
-        settings: state.settings,
         updateSettings: state.updateSettings,
         addTask: state.addTask,
         addProject: state.addProject,
@@ -88,8 +174,7 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         batchDeleteTasks: state.batchDeleteTasks,
         batchUpdateTasks: state.batchUpdateTasks,
         queryTasks: state.queryTasks,
-        lastDataChangeAt: state.lastDataChangeAt,
-        highlightTaskId: state.highlightTaskId,
+        getDerivedState: state.getDerivedState,
         setHighlightTask: state.setHighlightTask,
     }), shallow);
     const { t } = useLanguage();
@@ -97,34 +182,40 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
     const sortBy = (settings?.taskSortBy ?? 'default') as TaskSortBy;
     const isCompact = settings?.appearance?.density === 'compact';
     const densityMode = isCompact ? 'compact' : 'comfortable';
-    const resolvedAreaFilter = useMemo(
-        () => resolveAreaFilter(settings?.filters?.areaId, areas),
-        [settings?.filters?.areaId, areas],
-    );
+    const resolvedAreaFilter = resolveAreaFilter(settings?.filters?.areaId, areas);
     const [newTaskTitle, setNewTaskTitle] = useState('');
+    const [quickAddSyntaxOpen, setQuickAddSyntaxOpen] = useState(false);
     const listFilters = useUiStore((state) => state.listFilters);
     const setListFilters = useUiStore((state) => state.setListFilters);
     const resetListFilters = useUiStore((state) => state.resetListFilters);
     const showToast = useUiStore((state) => state.showToast);
     const translateWithFallback = useCallback((key: string, fallback: string) => {
-        const value = t(key);
-        return value === key ? fallback : value;
+        return translateTextWithFallback(t, key, fallback);
     }, [t]);
     const showListDetails = useUiStore((state) => state.listOptions.showDetails);
     const nextGroupBy = useUiStore((state) => state.listOptions.nextGroupBy);
+    const referenceGroupBy = useUiStore((state) => state.listOptions.referenceGroupBy);
     const setListOptions = useUiStore((state) => state.setListOptions);
+    const collapseAllTaskDetails = useUiStore((state) => state.collapseAllTaskDetails);
     const setProjectView = useUiStore((state) => state.setProjectView);
     const [baseTasks, setBaseTasks] = useState<Task[]>(() => (statusFilter === 'archived' ? [] : tasks));
     const queryCacheRef = useRef<Map<string, Task[]>>(new Map());
-    const selectedTokens = listFilters.tokens;
-    const selectedPriorities = listFilters.priorities;
-    const selectedTimeEstimates = listFilters.estimates;
+    const listFilterCriteria = listFilters.criteria;
+    const listFilterSelections = useMemo(() => selectionsFromCriteria(listFilterCriteria), [listFilterCriteria]);
+    const selectedTokens = listFilterSelections.tokens;
+    const selectedPriorities = listFilterSelections.priorities;
+    const selectedTimeEstimates = listFilterCriteria.timeEstimates ?? EMPTY_ESTIMATES;
     const filtersOpen = listFilters.open;
     const [selectedWaitingPerson, setSelectedWaitingPerson] = useState('');
     const [searchQuery, setSearchQuery] = useState('');
     const addInputRef = useRef<HTMLInputElement>(null);
     const viewFilterInputRef = useRef<HTMLInputElement>(null);
     const listScrollRef = useRef<HTMLDivElement>(null);
+    const [referenceViewState, setReferenceViewState] = usePersistedViewState(
+        REFERENCE_VIEW_STATE_STORAGE_KEY,
+        DEFAULT_REFERENCE_VIEW_STATE,
+        sanitizeReferenceViewState,
+    );
     const prioritiesEnabled = settings?.features?.priorities !== false;
     const timeEstimatesEnabled = settings?.features?.timeEstimates !== false;
     const undoNotificationsEnabled = settings?.undoNotificationsEnabled !== false;
@@ -132,14 +223,45 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
     const readOnly = statusFilter === 'done';
     const showViewFilterInput = statusFilter !== 'inbox';
     const normalizedSearchQuery = searchQuery.trim().toLowerCase();
-    const activePriorities = useMemo(
-        () => (prioritiesEnabled ? selectedPriorities : EMPTY_PRIORITIES),
-        [prioritiesEnabled, selectedPriorities]
-    );
-    const activeTimeEstimates = useMemo(
-        () => (timeEstimatesEnabled ? selectedTimeEstimates : EMPTY_ESTIMATES),
-        [timeEstimatesEnabled, selectedTimeEstimates]
-    );
+    const metadataProjectMap = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
+    const metadataAreaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
+    const listFilterableTasks = useMemo(() => {
+        const allowDeferredProjectTasks = statusFilter === 'done' || statusFilter === 'archived';
+        return baseTasks.filter((task) => {
+            if (task.deletedAt) return false;
+            if (statusFilter !== 'all' && task.status !== statusFilter) return false;
+            if (!allowDeferredProjectTasks && !isTaskInActiveProject(task, metadataProjectMap)) return false;
+            if (!taskMatchesAreaFilter(task, resolvedAreaFilter, metadataProjectMap, metadataAreaById)) return false;
+            return true;
+        });
+    }, [baseTasks, metadataAreaById, metadataProjectMap, resolvedAreaFilter, statusFilter]);
+    const metadataFilterVisibility = useMemo(() => getTaskMetadataFilterVisibility(listFilterableTasks, {
+        prioritiesEnabled,
+        timeEstimatesEnabled,
+    }), [listFilterableTasks, prioritiesEnabled, timeEstimatesEnabled]);
+    const showPriorityFilters = metadataFilterVisibility.priority;
+    const showTimeEstimateFilters = metadataFilterVisibility.timeEstimate;
+    const activePriorities = showPriorityFilters ? selectedPriorities : EMPTY_PRIORITIES;
+    const activeTimeEstimates = showTimeEstimateFilters ? selectedTimeEstimates : EMPTY_ESTIMATES;
+    const activeListFilterCriteria = useMemo<FilterCriteria>(() => ({
+        ...listFilterCriteria,
+        priority: showPriorityFilters ? activePriorities : undefined,
+        timeEstimates: showTimeEstimateFilters ? activeTimeEstimates : undefined,
+        timeEstimateRange: showTimeEstimateFilters ? listFilterCriteria.timeEstimateRange : undefined,
+    }), [
+        activePriorities,
+        activeTimeEstimates,
+        listFilterCriteria,
+        showPriorityFilters,
+        showTimeEstimateFilters,
+    ]);
+    const defaultAreaMode = getDefaultTaskAreaMode(settings);
+    const activeNewTaskAreaId = resolvedAreaFilter !== AREA_FILTER_ALL && resolvedAreaFilter !== AREA_FILTER_NONE
+        ? resolvedAreaFilter
+        : undefined;
+    const defaultNewTaskAreaId = defaultAreaMode === 'active'
+        ? activeNewTaskAreaId
+        : resolveDefaultNewTaskAreaId(settings, areas);
 
     useEffect(() => {
         if (!perf.enabled) return;
@@ -150,6 +272,8 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
     }, [perf.enabled]);
 
     const [isProcessing, setIsProcessing] = useState(false);
+    const [bulkOrganizeOpen, setBulkOrganizeOpen] = useState(false);
+    const [isBulkOrganizing, setIsBulkOrganizing] = useState(false);
     const {
         allContexts,
         allTags,
@@ -159,9 +283,21 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         tokenCounts,
         nextCount,
     } = useListViewOptimizations(tasks, baseTasks, statusFilter, perf);
-    const allTokens = useMemo(() => {
-        return Array.from(new Set([...allContexts, ...allTags])).sort();
-    }, [allContexts, allTags]);
+    const allTokens = Array.from(new Set([...allContexts, ...allTags])).sort();
+    const personOptionNames = useMemo(
+        () => getPersonOptionNames(people, tasks),
+        [people, tasks],
+    );
+    const quickAddParseOptions = useMemo(
+        () => ({
+            knownContexts: allContexts,
+            knownTags: allTags,
+            knownPeople: personOptionNames,
+            defaultScheduleTime: normalizeClockTimeInput(settings.gtd?.defaultScheduleTime) || undefined,
+            preserveText: settings.quickAddAutoClean !== true,
+        }),
+        [allContexts, allTags, personOptionNames, settings.gtd?.defaultScheduleTime, settings.quickAddAutoClean],
+    );
 
     const {
         aiEnabled,
@@ -223,8 +359,12 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         const cacheKey = `${statusFilter}-${lastDataChangeAt}`;
         const cached = queryCacheRef.current.get(cacheKey);
         if (statusFilter !== 'archived') {
-            setBaseTasks(tasks);
-            queryCacheRef.current.set(cacheKey, tasks);
+            const { activeTasksByStatus } = getDerivedState();
+            const indexedTasks = statusFilter === 'all'
+                ? tasks
+                : activeTasksByStatus.get(statusFilter) ?? [];
+            setBaseTasks(indexedTasks);
+            queryCacheRef.current.set(cacheKey, indexedTasks);
             if (queryCacheRef.current.size > 10) {
                 const firstKey = queryCacheRef.current.keys().next().value;
                 if (firstKey) queryCacheRef.current.delete(firstKey);
@@ -256,7 +396,7 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         return () => {
             cancelled = true;
         };
-    }, [statusFilter, queryTasks, lastDataChangeAt, showToast, tasks]);
+    }, [statusFilter, queryTasks, getDerivedState, lastDataChangeAt, showToast, tasks]);
 
     useEffect(() => {
         setSearchQuery('');
@@ -293,17 +433,13 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
     // Background task refreshes can still be deferred without shifting the list UI.
     const filterFeedbackInputs = useMemo(() => ({
         statusFilter,
-        selectedTokens,
-        activePriorities,
-        activeTimeEstimates,
+        filterCriteria: activeListFilterCriteria,
         resolvedAreaFilter,
         selectedWaitingPerson,
         normalizedSearchQuery,
     }), [
         statusFilter,
-        selectedTokens,
-        activePriorities,
-        activeTimeEstimates,
+        activeListFilterCriteria,
         resolvedAreaFilter,
         selectedWaitingPerson,
         normalizedSearchQuery,
@@ -314,11 +450,10 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
     const filterInputs = useMemo(() => ({
         baseTasks,
         statusFilter,
-        selectedTokens,
-        activePriorities,
-        activeTimeEstimates,
+        filterCriteria: activeListFilterCriteria,
         sequentialProjectFirstTasks,
         projectMap,
+        projects,
         sortBy,
         sortByProjectOrder,
         resolvedAreaFilter,
@@ -327,11 +462,10 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
     }), [
         baseTasks,
         statusFilter,
-        selectedTokens,
-        activePriorities,
-        activeTimeEstimates,
+        activeListFilterCriteria,
         sequentialProjectFirstTasks,
         projectMap,
+        projects,
         sortBy,
         sortByProjectOrder,
         resolvedAreaFilter,
@@ -347,6 +481,12 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
             const allowDeferredProjectTasks =
                 deferredFilterInputs.statusFilter === 'done'
                 || deferredFilterInputs.statusFilter === 'archived';
+            const criteriaPredicate = hasActiveFilterCriteria(deferredFilterInputs.filterCriteria)
+                ? createTaskFilterPredicate(deferredFilterInputs.filterCriteria, {
+                    projects: deferredFilterInputs.projects,
+                    tokenMatchMode: 'all',
+                })
+                : null;
             const filtered = deferredFilterInputs.baseTasks.filter(t => {
                 // Always filter out soft-deleted tasks
                 if (t.deletedAt) return false;
@@ -361,10 +501,6 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                     deferredFilterInputs.areaById
                 )) return false;
 
-                if (deferredFilterInputs.statusFilter === 'inbox') {
-                    const start = safeParseDate(t.startTime);
-                    if (start && start > now) return false;
-                }
                 if (deferredFilterInputs.statusFilter === 'next') {
                     const start = safeParseDate(t.startTime);
                     if (start && start > now) return false;
@@ -380,21 +516,7 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                 }
 
 
-                const taskTokens = [...(t.contexts || []), ...(t.tags || [])];
-                if (deferredFilterInputs.selectedTokens.length > 0) {
-                    const matchesAll = deferredFilterInputs.selectedTokens.every((token) =>
-                        taskTokens.some((taskToken) => matchesHierarchicalToken(token, taskToken))
-                    );
-                    if (!matchesAll) return false;
-                }
-                if (
-                    deferredFilterInputs.activePriorities.length > 0
-                    && (!t.priority || !deferredFilterInputs.activePriorities.includes(t.priority))
-                ) return false;
-                if (
-                    deferredFilterInputs.activeTimeEstimates.length > 0
-                    && (!t.timeEstimate || !deferredFilterInputs.activeTimeEstimates.includes(t.timeEstimate))
-                ) return false;
+                if (criteriaPredicate && !criteriaPredicate(t)) return false;
                 if (deferredFilterInputs.statusFilter === 'waiting' && deferredFilterInputs.selectedWaitingPerson) {
                     const person = getWaitingPerson(t);
                     if (!person || person.toLowerCase() !== deferredFilterInputs.selectedWaitingPerson.toLowerCase()) return false;
@@ -416,37 +538,46 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         });
     }, [deferredFilterInputs, normalizedSearchQuery, showViewFilterInput]);
     const resolveText = useCallback((key: string, fallback: string) => {
-        const value = t(key);
-        return value === key ? fallback : value;
+        return translateTextWithFallback(t, key, fallback);
     }, [t]);
-    const activeNextGroupBy: NextGroupBy = statusFilter === 'next' ? nextGroupBy : 'none';
-    const isReferenceAreaGrouping = statusFilter === 'reference';
-    const isNextGrouping = statusFilter === 'next' && activeNextGroupBy !== 'none';
-    const referenceAreaGroups = useMemo(() => {
-        if (!isReferenceAreaGrouping) return [] as TaskGroup[];
-        return groupTasksByArea({
-            areas,
-            tasks: filteredTasks,
-            projectMap,
-            generalLabel: resolveText('settings.general', 'General'),
+    const activeNextGroupBy: NextGroupBy = statusFilter !== 'reference' ? nextGroupBy : 'none';
+    const activeReferenceGroupBy: ReferenceGroupBy = statusFilter === 'reference' ? (referenceGroupBy ?? 'area') : 'none';
+    const activeGroupBy: TaskListGroupBy = statusFilter === 'reference' ? activeReferenceGroupBy : activeNextGroupBy;
+    const groupByOptions: TaskListGroupBy[] = statusFilter === 'reference'
+        ? ['none', 'context', 'area', 'project', 'tag']
+        : ['none', 'context', 'area', 'project', 'tag', 'energy', 'priority', 'person'];
+    const isReferenceGrouping = statusFilter === 'reference' && activeReferenceGroupBy !== 'none';
+    const isListGrouping = activeGroupBy !== 'none';
+    const groupedTasks = useMemo(() => (
+        isListGrouping
+            ? groupTasks(activeGroupBy, { tasks: filteredTasks, areas, projectMap, t })
+            : [] as TaskGroup[]
+    ), [activeGroupBy, areas, filteredTasks, isListGrouping, projectMap, t]);
+    const activeReferenceCollapseKey: ReferenceGroupCollapseKey | null = isReferenceGrouping
+        ? activeReferenceGroupBy as ReferenceGroupCollapseKey
+        : null;
+    const collapsedReferenceGroupIds = useMemo(() => {
+        if (!activeReferenceCollapseKey) return new Set<string>();
+        return new Set(referenceViewState.collapsedGroups[activeReferenceCollapseKey] ?? []);
+    }, [activeReferenceCollapseKey, referenceViewState.collapsedGroups]);
+    const toggleReferenceGroup = useCallback((groupId: string) => {
+        if (!activeReferenceCollapseKey) return;
+        setReferenceViewState((current) => {
+            const currentIds = current.collapsedGroups[activeReferenceCollapseKey] ?? [];
+            const nextIds = new Set(currentIds);
+            if (nextIds.has(groupId)) {
+                nextIds.delete(groupId);
+            } else {
+                nextIds.add(groupId);
+            }
+            return {
+                collapsedGroups: {
+                    ...current.collapsedGroups,
+                    [activeReferenceCollapseKey]: Array.from(nextIds),
+                },
+            };
         });
-    }, [areas, filteredTasks, isReferenceAreaGrouping, projectMap, resolveText]);
-    const nextGroups = useMemo(() => {
-        if (!isNextGrouping) return [] as TaskGroup[];
-        if (activeNextGroupBy === 'area') {
-            return groupTasksByArea({
-                areas,
-                tasks: filteredTasks,
-                projectMap,
-                generalLabel: resolveText('settings.general', 'General'),
-            });
-        }
-        return groupTasksByContext({
-            tasks: filteredTasks,
-            noContextLabel: resolveText('contexts.none', 'No context'),
-        });
-    }, [activeNextGroupBy, areas, filteredTasks, isNextGrouping, projectMap, resolveText]);
-    const groupedTasks = isReferenceAreaGrouping ? referenceAreaGroups : nextGroups;
+    }, [activeReferenceCollapseKey, setReferenceViewState]);
     const taskIndexById = useMemo(() => {
         const map = new Map<string, number>();
         filteredTasks.forEach((task, index) => map.set(task.id, index));
@@ -474,12 +605,12 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
             });
     }, [showToast, t, updateProject]);
 
-    const shouldVirtualize = !isReferenceAreaGrouping && !isNextGrouping && filteredTasks.length > VIRTUALIZATION_THRESHOLD;
+    const shouldVirtualize = !isListGrouping && filteredTasks.length > LIST_VIRTUALIZATION_THRESHOLD;
     const rowVirtualizer = useVirtualizer({
         count: shouldVirtualize ? filteredTasks.length : 0,
         getScrollElement: () => listScrollRef.current,
-        estimateSize: () => (isCompact ? 90 : VIRTUAL_ROW_ESTIMATE),
-        overscan: Math.max(2, Math.ceil(VIRTUAL_OVERSCAN / VIRTUAL_ROW_ESTIMATE)),
+        estimateSize: () => (isCompact ? 90 : LIST_VIRTUAL_ROW_ESTIMATE),
+        overscan: Math.max(2, Math.ceil(LIST_VIRTUAL_OVERSCAN / LIST_VIRTUAL_ROW_ESTIMATE)),
         getItemKey: (index) => filteredTasks[index]?.id ?? index,
     });
     const virtualRows = shouldVirtualize ? rowVirtualizer.getVirtualItems() : [];
@@ -489,6 +620,7 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         confirmSingleDelete,
         contextPromptMode,
         contextPromptOpen,
+        exitSelectionMode,
         handleBatchAddContext,
         handleBatchAddTag,
         handleBatchAssignArea,
@@ -499,11 +631,14 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         handleConfirmTagPrompt,
         handleSelectIndex,
         isBatchDeleting,
+        allVisibleTasksSelected,
+        clearTaskSelection,
         multiSelectedIds,
         pendingBatchDeleteIds,
         pendingDeleteTask,
         selectedIdsArray,
         selectedIndex,
+        selectAllVisibleTasks,
         selectionMode,
         setContextPromptOpen,
         setPendingBatchDeleteIds,
@@ -543,31 +678,73 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         undoNotificationsEnabled,
         viewFilterInputRef,
     });
-    const bulkAreaOptions = useMemo(
-        () => [...areas]
-            .sort((a, b) => a.name.localeCompare(b.name))
-            .map((area) => ({ id: area.id, name: area.name })),
-        [areas]
-    );
+    const bulkAreaOptions = [...areas]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((area) => ({ id: area.id, name: area.name }));
+    const handleApplyTaskBulkOrganize = useCallback(async (input: BulkOrganizeTaskUpdateInput) => {
+        if (selectedIdsArray.length === 0 || isBulkOrganizing) return;
+        const updates = buildBulkOrganizeTaskUpdates(selectedIdsArray, tasksById, input);
+        if (updates.length === 0) return;
+        setIsBulkOrganizing(true);
+        try {
+            await batchUpdateTasks(updates);
+            setBulkOrganizeOpen(false);
+            exitSelectionMode();
+            const message = translateWithFallback(
+                'bulk.organizeApplied',
+                '{{count}} selected tasks organized',
+            ).replace('{{count}}', String(updates.length));
+            showToast(message, 'success');
+        } catch (error) {
+            reportError('Failed to bulk organize selected tasks', error);
+            showToast(translateWithFallback('bulk.organizeFailed', 'Failed to organize selected tasks'), 'error');
+        } finally {
+            setIsBulkOrganizing(false);
+        }
+    }, [
+        batchUpdateTasks,
+        exitSelectionMode,
+        isBulkOrganizing,
+        selectedIdsArray,
+        showToast,
+        tasksById,
+        translateWithFallback,
+    ]);
 
     const handleAddTask = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!newTaskTitle.trim()) return;
         try {
-            const { title: parsedTitle, props, projectTitle, invalidDateCommands } = parseQuickAdd(newTaskTitle, projects, new Date(), areas);
+            const { title: parsedTitle, props, projectTitle, invalidDateCommands, detectedDate } = parseQuickAdd(
+                newTaskTitle,
+                projects,
+                new Date(),
+                areas,
+                quickAddParseOptions,
+            );
             if (invalidDateCommands && invalidDateCommands.length > 0) {
                 showToast(`${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`, 'error');
                 return;
             }
-            const finalTitle = parsedTitle || newTaskTitle;
             const initialProps: Partial<Task> = { ...props };
+            const shouldApplyDetectedDate = Boolean(detectedDate?.date && !initialProps.dueDate);
+            if (shouldApplyDetectedDate && detectedDate) {
+                initialProps.dueDate = detectedDate.date;
+            }
+            const finalTitle = shouldApplyDetectedDate && detectedDate
+                ? detectedDate.titleWithoutDate
+                : (parsedTitle || newTaskTitle);
             if (!initialProps.projectId && projectTitle) {
-                const created = await addProject(projectTitle, DEFAULT_AREA_COLOR);
+                const created = await addProject(
+                    projectTitle,
+                    DEFAULT_AREA_COLOR,
+                    getQuickAddProjectInitialProps(initialProps, defaultNewTaskAreaId),
+                );
                 if (!created) return;
                 initialProps.projectId = created.id;
             }
-            if (!initialProps.projectId && !initialProps.areaId && resolvedAreaFilter !== AREA_FILTER_ALL && resolvedAreaFilter !== AREA_FILTER_NONE) {
-                initialProps.areaId = resolvedAreaFilter;
+            if (!initialProps.projectId && !initialProps.areaId && defaultNewTaskAreaId) {
+                initialProps.areaId = defaultNewTaskAreaId;
             }
             // Only set status if we have an explicit filter and parser didn't set one
             if (!initialProps.status && statusFilter !== 'all') {
@@ -594,57 +771,58 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
     const isInbox = statusFilter === 'inbox';
     const isNextView = statusFilter === 'next';
     const isWaitingView = statusFilter === 'waiting';
+    const showQuickAdd = isInbox;
     const priorityOptions: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
     const timeEstimateOptions: TimeEstimate[] = ['5min', '10min', '15min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
-    const formatEstimate = (estimate: TimeEstimate) => {
-        if (estimate.endsWith('min')) return estimate.replace('min', 'm');
-        if (estimate.endsWith('hr+')) return estimate.replace('hr+', 'h+');
-        if (estimate.endsWith('hr')) return estimate.replace('hr', 'h');
-        return estimate;
-    };
-    const filterSummary = useMemo(() => {
-        return [
-            ...(normalizedSearchQuery ? [`${t('common.search')}: ${searchQuery.trim()}`] : []),
-            ...selectedTokens,
-            ...(prioritiesEnabled ? selectedPriorities.map((priority) => t(`priority.${priority}`)) : []),
-            ...(timeEstimatesEnabled ? selectedTimeEstimates.map(formatEstimate) : []),
-            ...(selectedWaitingPerson ? [`${t('process.delegateWhoLabel')}: ${selectedWaitingPerson}`] : []),
-        ];
-    }, [normalizedSearchQuery, prioritiesEnabled, searchQuery, selectedPriorities, selectedTimeEstimates, selectedTokens, selectedWaitingPerson, t, timeEstimatesEnabled]);
+    const formatEstimate = formatTimeEstimateLabel;
+    const filterSummary = [
+        ...(normalizedSearchQuery ? [`${t('common.search')}: ${searchQuery.trim()}`] : []),
+        ...selectedTokens,
+        ...(showPriorityFilters ? selectedPriorities.map((priority) => t(`priority.${priority}`)) : []),
+        ...(showTimeEstimateFilters ? selectedTimeEstimates.map(formatEstimate) : []),
+        ...(selectedWaitingPerson ? [`${t('process.delegateWhoLabel')}: ${selectedWaitingPerson}`] : []),
+    ];
     const hasFilters = filterSummary.length > 0;
     const filterSummaryLabel = filterSummary.slice(0, 3).join(', ');
     const filterSummarySuffix = filterSummary.length > 3 ? ` +${filterSummary.length - 3}` : '';
-    const showFiltersPanel = filtersOpen || hasFilters;
+    const showFiltersPanel = filtersOpen;
     const toggleTokenFilter = useCallback((token: string) => {
-        const nextTokens = selectedTokens.includes(token)
-            ? selectedTokens.filter((item) => item !== token)
-            : [...selectedTokens, token];
-        setListFilters({ tokens: nextTokens });
-    }, [selectedTokens, setListFilters]);
+        const key = token.trim().startsWith('#') ? 'tags' : 'contexts';
+        const current = listFilterCriteria[key] ?? [];
+        const nextValues = current.includes(token)
+            ? current.filter((item) => item !== token)
+            : [...current, token];
+        setListFilters({ criteria: withListFilterValue(listFilterCriteria, key, nextValues) });
+    }, [listFilterCriteria, setListFilters]);
     const togglePriorityFilter = useCallback((priority: TaskPriority) => {
         const nextPriorities = selectedPriorities.includes(priority)
             ? selectedPriorities.filter((item) => item !== priority)
             : [...selectedPriorities, priority];
-        setListFilters({ priorities: nextPriorities });
-    }, [selectedPriorities, setListFilters]);
+        setListFilters({ criteria: withListFilterValue(listFilterCriteria, 'priority', nextPriorities) });
+    }, [listFilterCriteria, selectedPriorities, setListFilters]);
     const toggleTimeFilter = useCallback((estimate: TimeEstimate) => {
         const nextEstimates = selectedTimeEstimates.includes(estimate)
             ? selectedTimeEstimates.filter((item) => item !== estimate)
             : [...selectedTimeEstimates, estimate];
-        setListFilters({ estimates: nextEstimates });
-    }, [selectedTimeEstimates, setListFilters]);
+        setListFilters({ criteria: withListFilterValue(listFilterCriteria, 'timeEstimates', nextEstimates) });
+    }, [listFilterCriteria, selectedTimeEstimates, setListFilters]);
     const clearFilters = () => {
         resetListFilters();
     };
 
     useEffect(() => {
-        if (!prioritiesEnabled && selectedPriorities.length > 0) {
-            setListFilters({ priorities: [] });
+        let nextCriteria: FilterCriteria | null = null;
+        if (!showPriorityFilters && selectedPriorities.length > 0) {
+            nextCriteria = { ...(nextCriteria ?? listFilterCriteria) };
+            delete nextCriteria.priority;
         }
-        if (!timeEstimatesEnabled && selectedTimeEstimates.length > 0) {
-            setListFilters({ estimates: [] });
+        if (!showTimeEstimateFilters && selectedTimeEstimates.length > 0) {
+            nextCriteria = { ...(nextCriteria ?? listFilterCriteria) };
+            delete nextCriteria.timeEstimates;
+            delete nextCriteria.timeEstimateRange;
         }
-    }, [prioritiesEnabled, timeEstimatesEnabled, selectedPriorities.length, selectedTimeEstimates.length, setListFilters]);
+        if (nextCriteria) setListFilters({ criteria: nextCriteria });
+    }, [listFilterCriteria, selectedPriorities.length, selectedTimeEstimates.length, setListFilters, showPriorityFilters, showTimeEstimateFilters]);
 
     const openQuickAdd = useCallback((status: TaskStatus | 'all', captureMode?: 'text' | 'audio') => {
         const initialStatus = status === 'all' ? 'inbox' : status;
@@ -653,7 +831,7 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
         }));
     }, []);
 
-    const emptyState = useMemo(() => {
+    const emptyState = (() => {
         switch (statusFilter) {
             case 'inbox':
                 return {
@@ -665,25 +843,21 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                 return {
                     title: t('list.next') || 'Next Actions',
                     body: resolveText('list.noTasks', 'No next actions yet.'),
-                    action: t('nav.addTask') || 'Add task',
                 };
             case 'waiting':
                 return {
                     title: resolveText('waiting.empty', t('list.waiting') || 'Waiting'),
                     body: resolveText('waiting.emptyHint', 'Track delegated or pending items.'),
-                    action: t('nav.addTask') || 'Add task',
                 };
             case 'someday':
                 return {
                     title: resolveText('someday.empty', t('list.someday') || 'Someday'),
                     body: resolveText('someday.emptyHint', 'Store ideas for later.'),
-                    action: t('nav.addTask') || 'Add task',
                 };
             case 'reference':
                 return {
                     title: resolveText('reference.empty', t('list.reference') || 'Reference'),
                     body: resolveText('reference.emptyHint', 'Reference holds info you might want later — no action required.'),
-                    action: t('nav.addTask') || 'Add task',
                 };
             case 'done':
                 return {
@@ -694,10 +868,17 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                 return {
                     title: t('list.tasks') || 'Tasks',
                     body: resolveText('list.noTasks', 'No tasks yet.'),
-                    action: t('nav.addTask') || 'Add task',
                 };
         }
-    }, [resolveText, statusFilter, t]);
+    })();
+    const handleToggleDetails = useCallback(() => {
+        if (showListDetails) {
+            collapseAllTaskDetails();
+            setListOptions({ showDetails: false });
+            return;
+        }
+        setListOptions({ showDetails: true });
+    }, [collapseAllTaskDetails, setListOptions, showListDetails]);
 
     return (
         <ErrorBoundary>
@@ -712,12 +893,20 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                     filterSummarySuffix={filterSummarySuffix}
                     sortBy={sortBy}
                     onChangeSortBy={(value) => updateSettings({ taskSortBy: value })}
-                    activeNextGroupBy={activeNextGroupBy}
-                    onChangeGroupBy={(value) => setListOptions({ nextGroupBy: value })}
+                    activeGroupBy={activeGroupBy}
+                    groupByOptions={groupByOptions}
+                    showGroupBy
+                    onChangeGroupBy={(value) => {
+                        if (statusFilter === 'reference') {
+                            setListOptions({ referenceGroupBy: value as ReferenceGroupBy });
+                            return;
+                        }
+                        setListOptions({ nextGroupBy: value as NextGroupBy });
+                    }}
                     selectionMode={selectionMode}
                     onToggleSelection={toggleSelectionMode}
                     showListDetails={showListDetails}
-                    onToggleDetails={() => setListOptions({ showDetails: !showListDetails })}
+                    onToggleDetails={handleToggleDetails}
                     densityMode={densityMode}
                     onToggleDensity={() => {
                         void updateSettings({
@@ -729,9 +918,13 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                     isProcessing={isProcessing}
                     isBatchDeleting={isBatchDeleting}
                     selectedCount={selectedIdsArray.length}
+                    allVisibleTasksSelected={allVisibleTasksSelected}
+                    onSelectAllVisible={selectAllVisibleTasks}
+                    onClearSelection={clearTaskSelection}
                     onMoveToStatus={handleBatchMove}
                     onAssignArea={handleBatchAssignArea}
                     areaOptions={bulkAreaOptions}
+                    onBulkOrganize={() => setBulkOrganizeOpen(true)}
                     onAddTag={handleBatchAddTag}
                     onAddContext={handleBatchAddContext}
                     onRemoveContext={handleBatchRemoveContext}
@@ -750,10 +943,12 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                             projects={projects}
                             areas={areas}
                             settings={settings}
+                            addTask={addTask}
                             addProject={addProject}
                             updateTask={updateTask}
                             deleteTask={deleteTask}
                             allContexts={allContexts}
+                            allTags={allTags}
                             isProcessing={isProcessing}
                             setIsProcessing={setIsProcessing}
                         />
@@ -774,22 +969,27 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                     selectedTokens={selectedTokens}
                     tokenCounts={tokenCounts}
                     onToggleToken={toggleTokenFilter}
-                    prioritiesEnabled={prioritiesEnabled}
+                    showPriorityFilters={showPriorityFilters}
                     priorityOptions={priorityOptions}
                     selectedPriorities={selectedPriorities}
                     onTogglePriority={togglePriorityFilter}
-                    timeEstimatesEnabled={timeEstimatesEnabled}
+                    showTimeEstimateFilters={showTimeEstimateFilters}
                     timeEstimateOptions={timeEstimateOptions}
                     selectedTimeEstimates={selectedTimeEstimates}
                     onToggleEstimate={toggleTimeFilter}
                     formatEstimate={formatEstimate}
-                    showQuickAdd={['inbox', 'next'].includes(statusFilter)}
+                    showQuickAdd={showQuickAdd}
                     quickAddValue={newTaskTitle}
                     addInputRef={addInputRef}
                     projects={projects}
                     areas={areas}
+                    people={personOptionNames}
                     onCreateProject={async (title) => {
-                        const created = await addProject(title, DEFAULT_AREA_COLOR);
+                        const created = await addProject(
+                            title,
+                            DEFAULT_AREA_COLOR,
+                            getQuickAddProjectInitialProps({}, defaultNewTaskAreaId),
+                        );
                         return created?.id ?? null;
                     }}
                     onChangeQuickAdd={setNewTaskTitle}
@@ -818,9 +1018,28 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                                 </div>
                             )}
                             {!isProcessing && (
-                                <p className="text-xs text-muted-foreground">
-                                    {t('quickAdd.help')}
-                                </p>
+                                <div className="mt-1 space-y-1 text-xs text-muted-foreground">
+                                    <div className="flex min-w-0 items-center gap-1.5">
+                                        <span className="min-w-0 truncate">
+                                            {t('quickAdd.inlineHint')}
+                                        </span>
+                                        <button
+                                            type="button"
+                                            onClick={() => setQuickAddSyntaxOpen((open) => !open)}
+                                            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+                                            aria-label={t('quickAdd.syntaxHelp')}
+                                            aria-expanded={quickAddSyntaxOpen}
+                                            title={t('quickAdd.help')}
+                                        >
+                                            <HelpCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                                        </button>
+                                    </div>
+                                    {quickAddSyntaxOpen && (
+                                        <p className="rounded border border-border bg-muted/30 px-2 py-1 leading-relaxed text-muted-foreground">
+                                            {t('quickAdd.help')}
+                                        </p>
+                                    )}
+                                </div>
                             )}
                         </>
                     )}
@@ -841,6 +1060,9 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                         hasFilters={hasFilters}
                         emptyState={emptyState}
                         onAddTask={() => openQuickAdd(statusFilter)}
+                        primaryAction={isInbox && !hasFilters
+                            ? <MindSweepLauncher t={t} addTask={addTask} variant="primary" />
+                            : undefined}
                         t={t}
                     />
                 ) : shouldVirtualize ? (
@@ -862,15 +1084,14 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                                     }}
                                 >
                                     <div className={cn(isCompact ? "pb-1" : "pb-1.5")}>
-                                        <TaskItem
-                                            key={task.id}
-                                            task={task}
-                                            project={task.projectId ? projectMap.get(task.projectId) : undefined}
+                                        <StoreTaskItem
+                                            taskId={task.id}
                                             isSelected={virtualRow.index === selectedIndex}
-                                            onSelect={() => handleSelectIndex(virtualRow.index)}
+                                            index={virtualRow.index}
+                                            onSelectIndex={handleSelectIndex}
                                             selectionMode={selectionMode}
                                             isMultiSelected={multiSelectedIds.has(task.id)}
-                                            onToggleSelect={() => toggleMultiSelect(task.id)}
+                                            onToggleSelectId={toggleMultiSelect}
                                             showQuickDone={showQuickDone}
                                             readOnly={readOnly}
                                             compactMetaEnabled={showListDetails}
@@ -882,58 +1103,46 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
                             );
                         })}
                     </div>
-                ) : isReferenceAreaGrouping || isNextGrouping ? (
-                    <div className="space-y-2">
-                        {groupedTasks.map((group) => (
-                            <div key={group.id} className="rounded-md border border-border/40 bg-card/30">
-                                <div className={cn(
-                                    'px-3 py-2 text-xs font-semibold uppercase tracking-wide border-b border-border/30',
-                                    group.muted ? 'text-muted-foreground' : 'text-foreground/90',
-                                )}>
-                                    <span className="inline-flex items-center gap-1.5">
-                                        {group.dotColor && (
-                                            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: group.dotColor }} aria-hidden="true" />
-                                        )}
-                                        <span>{group.title}</span>
-                                    </span>
-                                    <span className="ml-2 text-muted-foreground">{group.tasks.length}</span>
-                                </div>
-                                <div className="divide-y divide-border/30">
-                                    {group.tasks.map((task) => {
-                                        const index = taskIndexById.get(task.id) ?? 0;
-                                        return (
-                                            <TaskItem
-                                                key={task.id}
-                                                task={task}
-                                                project={task.projectId ? projectMap.get(task.projectId) : undefined}
-                                                isSelected={index === selectedIndex}
-                                                onSelect={() => handleSelectIndex(index)}
-                                                selectionMode={selectionMode}
-                                                isMultiSelected={multiSelectedIds.has(task.id)}
-                                                onToggleSelect={() => toggleMultiSelect(task.id)}
-                                                showQuickDone={showQuickDone}
-                                                readOnly={readOnly}
-                                                compactMetaEnabled={showListDetails}
-                                                showProjectBadgeInActions={false}
-                                            />
-                                        );
-                                    })}
-                                </div>
-                            </div>
-                        ))}
-                    </div>
+                ) : isListGrouping ? (
+                    <GroupedTaskSections
+                        groups={groupedTasks}
+                        onToggleGroup={isReferenceGrouping ? toggleReferenceGroup : undefined}
+                        collapsedGroupIds={collapsedReferenceGroupIds}
+                        getSectionDomId={(group, groupIndex) => (
+                            `reference-group-${getListDomIdSegment(activeReferenceGroupBy)}-${groupIndex}-${getListDomIdSegment(group.id)}`
+                        )}
+                        renderTask={(task) => {
+                            const index = taskIndexById.get(task.id) ?? 0;
+                            return (
+                                <StoreTaskItem
+                                    key={task.id}
+                                    taskId={task.id}
+                                    isSelected={index === selectedIndex}
+                                    index={index}
+                                    onSelectIndex={handleSelectIndex}
+                                    selectionMode={selectionMode}
+                                    isMultiSelected={multiSelectedIds.has(task.id)}
+                                    onToggleSelectId={toggleMultiSelect}
+                                    showQuickDone={showQuickDone}
+                                    readOnly={readOnly}
+                                    compactMetaEnabled={showListDetails}
+                                    showProjectBadgeInActions={false}
+                                />
+                            );
+                        }}
+                    />
                 ) : (
                     <div className="divide-y divide-border/30">
                         {filteredTasks.map((task, index) => (
-                            <TaskItem
+                            <StoreTaskItem
                                 key={task.id}
-                                task={task}
-                                project={task.projectId ? projectMap.get(task.projectId) : undefined}
+                                taskId={task.id}
                                 isSelected={index === selectedIndex}
-                                onSelect={() => handleSelectIndex(index)}
+                                index={index}
+                                onSelectIndex={handleSelectIndex}
                                 selectionMode={selectionMode}
                                 isMultiSelected={multiSelectedIds.has(task.id)}
-                                onToggleSelect={() => toggleMultiSelect(task.id)}
+                                onToggleSelectId={toggleMultiSelect}
                                 showQuickDone={showQuickDone}
                                 readOnly={readOnly}
                                 compactMetaEnabled={showListDetails}
@@ -948,7 +1157,7 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
             isOpen={tagPromptOpen}
             title={t('bulk.addTag')}
             description={t('bulk.addTag')}
-            placeholder="#tag"
+            placeholder={t('bulk.tagPlaceholder')}
             defaultValue=""
             confirmLabel={t('common.save')}
             cancelLabel={t('common.cancel')}
@@ -959,7 +1168,7 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
             isOpen={contextPromptOpen}
             title={contextPromptMode === 'add' ? t('bulk.addContext') : t('bulk.removeContext')}
             description={contextPromptMode === 'add' ? t('bulk.addContext') : t('bulk.removeContext')}
-            placeholder="@context"
+            placeholder={t('bulk.contextPlaceholder')}
             defaultValue=""
             confirmLabel={t('common.save')}
             cancelLabel={t('common.cancel')}
@@ -983,6 +1192,18 @@ export const ListView = memo(function ListView({ title, statusFilter }: ListView
             cancelLabel={t('common.cancel')}
             onCancel={() => setPendingBatchDeleteIds([])}
             onConfirm={confirmBatchDelete}
+        />
+        <TaskBulkOrganizeModal
+            isOpen={bulkOrganizeOpen}
+            selectedCount={selectedIdsArray.length}
+            projects={projects}
+            areas={areas}
+            isApplying={isBulkOrganizing}
+            t={t}
+            titleKey={isInbox ? 'bulk.organizeInbox' : 'bulk.organizeTasks'}
+            titleFallback={isInbox ? 'Bulk organize Inbox' : 'Bulk organize tasks'}
+            onCancel={() => setBulkOrganizeOpen(false)}
+            onApply={handleApplyTaskBulkOrganize}
         />
         </ErrorBoundary>
     );

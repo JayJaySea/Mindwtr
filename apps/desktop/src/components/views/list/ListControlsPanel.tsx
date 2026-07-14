@@ -11,15 +11,16 @@ import { DEFAULT_AREA_COLOR } from '@mindwtr/core';
 import { AlertTriangle, Folder } from 'lucide-react';
 
 import { ListBulkActions } from './ListBulkActions';
+import { BulkSelectionToolbar } from './BulkSelectionToolbar';
 import { ListFiltersPanel } from './ListFiltersPanel';
 import { ListHeader } from './ListHeader';
 import { ListQuickAdd } from './ListQuickAdd';
-import type { NextGroupBy } from './next-grouping';
+import type { TaskListGroupBy } from './next-grouping';
 
 const NEXT_WARNING_THRESHOLD = 15;
 
 type ListControlsPanelProps = {
-    activeNextGroupBy: NextGroupBy;
+    activeGroupBy: TaskListGroupBy;
     addInputRef: RefObject<HTMLInputElement | null>;
     allTokens: string[];
     areaById: Map<string, Area>;
@@ -32,18 +33,22 @@ type ListControlsPanelProps = {
     hasFilters: boolean;
     inboxProcessor: ReactNode;
     isBatchDeleting: boolean;
+    showGroupBy: boolean;
     isNextView: boolean;
     isProcessing: boolean;
     isWaitingView: boolean;
     onAddContext: () => void;
     onAddTag: () => void;
     onAssignArea: (areaId: string | null) => Promise<void>;
-    onChangeGroupBy: (value: NextGroupBy) => void;
+    onBulkOrganize?: () => void;
+    groupByOptions: TaskListGroupBy[];
+    onChangeGroupBy: (value: TaskListGroupBy) => void;
     onChangeQuickAdd: (value: string) => void;
     onChangeSearch: (value: string) => void;
     onChangeSelectedWaitingPerson: (value: string) => void;
     onChangeSortBy: (value: TaskSortBy) => void;
     onClearFilters: () => void;
+    onClearSelection: () => void;
     onClearSelectedWaitingPerson: () => void;
     onCreateProject: (title: string) => Promise<string | null>;
     onDeleteSelection: () => Promise<void>;
@@ -54,6 +59,7 @@ type ListControlsPanelProps = {
     onRemoveContext: () => void;
     onResetCopilot: () => void;
     onSubmitQuickAdd: (event: FormEvent) => void;
+    onSelectAllVisible: () => void;
     onToggleDetails: () => void;
     onToggleEstimate: (estimate: TimeEstimate) => void;
     onToggleFiltersOpen: () => void;
@@ -61,13 +67,14 @@ type ListControlsPanelProps = {
     onToggleSelection: () => void;
     onToggleToken: (token: string) => void;
     onToggleDensity: () => void;
-    prioritiesEnabled: boolean;
+    showPriorityFilters: boolean;
     priorityOptions: TaskPriority[];
     projects: Project[];
     quickAddFooter?: ReactNode;
     quickAddValue: string;
     searchQuery: string;
     selectedCount: number;
+    allVisibleTasksSelected: boolean;
     selectedPriorities: TaskPriority[];
     selectedTimeEstimates: TimeEstimate[];
     selectedTokens: string[];
@@ -83,16 +90,17 @@ type ListControlsPanelProps = {
     t: (key: string) => string;
     taskCount: number;
     timeEstimateOptions: TimeEstimate[];
-    timeEstimatesEnabled: boolean;
+    showTimeEstimateFilters: boolean;
     title: string;
     tokenCounts: Record<string, number>;
     waitingPeople: string[];
     areas: Area[];
+    people: readonly string[];
     nextCount: number;
 };
 
 export function ListControlsPanel({
-    activeNextGroupBy,
+    activeGroupBy,
     addInputRef,
     allTokens,
     areaById,
@@ -105,18 +113,22 @@ export function ListControlsPanel({
     hasFilters,
     inboxProcessor,
     isBatchDeleting,
+    showGroupBy,
     isNextView,
     isProcessing,
     isWaitingView,
     onAddContext,
     onAddTag,
     onAssignArea,
+    onBulkOrganize,
+    groupByOptions,
     onChangeGroupBy,
     onChangeQuickAdd,
     onChangeSearch,
     onChangeSelectedWaitingPerson,
     onChangeSortBy,
     onClearFilters,
+    onClearSelection,
     onClearSelectedWaitingPerson,
     onCreateProject,
     onDeleteSelection,
@@ -127,6 +139,7 @@ export function ListControlsPanel({
     onRemoveContext,
     onResetCopilot,
     onSubmitQuickAdd,
+    onSelectAllVisible,
     onToggleDetails,
     onToggleEstimate,
     onToggleFiltersOpen,
@@ -134,13 +147,14 @@ export function ListControlsPanel({
     onToggleSelection,
     onToggleToken,
     onToggleDensity,
-    prioritiesEnabled,
+    showPriorityFilters,
     priorityOptions,
     projects,
     quickAddFooter,
     quickAddValue,
     searchQuery,
     selectedCount,
+    allVisibleTasksSelected,
     selectedPriorities,
     selectedTimeEstimates,
     selectedTokens,
@@ -156,11 +170,12 @@ export function ListControlsPanel({
     t,
     taskCount,
     timeEstimateOptions,
-    timeEstimatesEnabled,
+    showTimeEstimateFilters,
     title,
     tokenCounts,
     waitingPeople,
     areas,
+    people,
     nextCount,
 }: ListControlsPanelProps) {
     return (
@@ -175,8 +190,9 @@ export function ListControlsPanel({
                 filterSummarySuffix={filterSummarySuffix}
                 sortBy={sortBy}
                 onChangeSortBy={onChangeSortBy}
-                showGroupBy={isNextView}
-                groupBy={activeNextGroupBy}
+                showGroupBy={showGroupBy}
+                groupBy={activeGroupBy}
+                groupByOptions={groupByOptions}
                 onChangeGroupBy={onChangeGroupBy}
                 selectionMode={selectionMode}
                 onToggleSelection={onToggleSelection}
@@ -187,27 +203,38 @@ export function ListControlsPanel({
                 t={t}
             />
 
-            {(isProcessing || isBatchDeleting) && (
+            {isBatchDeleting && (
                 <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                    {isBatchDeleting
-                        ? (t('bulk.deleting') || 'Deleting selected tasks...')
-                        : (t('common.loading') || 'Loading...')}
+                    {t('bulk.deleting') || 'Deleting selected tasks...'}
                 </div>
             )}
 
-            {selectionMode && selectedCount > 0 && (
-                <ListBulkActions
-                    selectionCount={selectedCount}
-                    onMoveToStatus={onMoveToStatus}
-                    onAssignArea={onAssignArea}
-                    areaOptions={areaOptions}
-                    onAddTag={onAddTag}
-                    onAddContext={onAddContext}
-                    onRemoveContext={onRemoveContext}
-                    onDelete={onDeleteSelection}
-                    isDeleting={isBatchDeleting}
-                    t={t}
-                />
+            {selectionMode && (
+                <div className="space-y-3">
+                    <BulkSelectionToolbar
+                        selectionCount={selectedCount}
+                        totalCount={taskCount}
+                        allSelected={allVisibleTasksSelected}
+                        onSelectAll={onSelectAllVisible}
+                        onClearSelection={onClearSelection}
+                        t={t}
+                    />
+                    {selectedCount > 0 && (
+                        <ListBulkActions
+                            selectionCount={selectedCount}
+                            onMoveToStatus={onMoveToStatus}
+                            onAssignArea={onAssignArea}
+                            areaOptions={areaOptions}
+                            onBulkOrganize={onBulkOrganize}
+                            onAddTag={onAddTag}
+                            onAddContext={onAddContext}
+                            onRemoveContext={onRemoveContext}
+                            onDelete={onDeleteSelection}
+                            isDeleting={isBatchDeleting}
+                            t={t}
+                        />
+                    )}
+                </div>
             )}
 
             {isNextView && nextCount > NEXT_WARNING_THRESHOLD && (
@@ -320,11 +347,11 @@ export function ListControlsPanel({
                     selectedTokens={selectedTokens}
                     tokenCounts={tokenCounts}
                     onToggleToken={onToggleToken}
-                    prioritiesEnabled={prioritiesEnabled}
+                    showPriorityFilters={showPriorityFilters}
                     priorityOptions={priorityOptions}
                     selectedPriorities={selectedPriorities}
                     onTogglePriority={onTogglePriority}
-                    timeEstimatesEnabled={timeEstimatesEnabled}
+                    showTimeEstimateFilters={showTimeEstimateFilters}
                     timeEstimateOptions={timeEstimateOptions}
                     selectedTimeEstimates={selectedTimeEstimates}
                     onToggleEstimate={onToggleEstimate}
@@ -340,6 +367,7 @@ export function ListControlsPanel({
                         projects={projects}
                         areas={areas}
                         contexts={allTokens}
+                        people={people}
                         t={t}
                         dense={densityMode === 'compact'}
                         onCreateProject={onCreateProject}

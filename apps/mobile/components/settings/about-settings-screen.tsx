@@ -1,11 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, Platform, ScrollView, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Linking, Platform, ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import Constants from 'expo-constants';
 import * as Application from 'expo-application';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { submitFeedbackSubmission } from '@mindwtr/core';
 import { useToast } from '@/contexts/toast-context';
+import { getDeviceLocale, resolveMobileAnalyticsVersion } from '@/lib/analytics-heartbeat';
+import { readRecentLogText } from '@/lib/app-log';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { getPlayStoreUpdateInfoAsync } from '@/lib/play-store-updates';
 import { compareVersions, logSettingsError, logSettingsWarn } from '@/lib/settings-utils';
@@ -17,9 +20,15 @@ import {
     UPDATE_BADGE_LAST_CHECK_KEY,
     UPDATE_BADGE_LATEST_KEY,
 } from './settings.constants';
+import { FeedbackSettingsModal, type FeedbackSubmitInput } from './feedback-settings-modal';
 import { useSettingsLocalization, useSettingsScrollContent } from './settings.hooks';
-import { SettingsTopBar, SubHeader } from './settings.shell';
+import { SettingsTopBar } from './settings.shell';
 import { styles } from './settings.styles';
+
+const appIconSource = require('../../assets/images/icon.png');
+
+const parseExtraBool = (value: unknown): boolean =>
+    value === true || value === 1 || value === '1' || value === 'true';
 
 export function AboutSettingsScreen({
     onUpdateBadgeChange,
@@ -28,13 +37,17 @@ export function AboutSettingsScreen({
 }) {
     const tc = useThemeColors();
     const { showToast } = useToast();
-    const { localize, t } = useSettingsLocalization();
+    const { tr, t } = useSettingsLocalization();
     const scrollContentStyle = useSettingsScrollContent();
     const extraConfig = Constants.expoConfig?.extra as MobileExtraConfig | undefined;
-    const isFossBuild = extraConfig?.isFossBuild === true || extraConfig?.isFossBuild === 'true';
+    const isFossBuild = parseExtraBool(extraConfig?.isFossBuild);
     const isExpoGo = Constants.appOwnership === 'expo';
     const currentVersion = Constants.expoConfig?.version || '0.0.0';
+    const displayVersion = resolveMobileAnalyticsVersion(currentVersion, extraConfig?.analyticsReleaseVersion);
+    const feedbackEndpointUrl = String(extraConfig?.feedbackEndpointUrl ?? '').trim();
+    const appName = Constants.expoConfig?.name || Application.applicationName || 'Mindwtr';
     const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+    const [feedbackOpen, setFeedbackOpen] = useState(false);
     const [androidInstallerSource, setAndroidInstallerSource] = useState<'play-store' | 'sideload' | 'unknown'>(
         Platform.OS === 'android' ? 'unknown' : 'play-store'
     );
@@ -67,13 +80,16 @@ export function AboutSettingsScreen({
     }, [isFossBuild]);
 
     const openLink = (url: string) => Linking.openURL(url);
+    const GITHUB_ISSUES_URL = 'https://github.com/dongdongbh/Mindwtr/issues/new/choose';
     const GITHUB_RELEASES_API = 'https://api.github.com/repos/dongdongbh/Mindwtr/releases/latest';
     const GITHUB_RELEASES_URL = 'https://github.com/dongdongbh/Mindwtr/releases/latest';
-    const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=tech.dongdongbh.mindwtr';
-    const PLAY_STORE_MARKET_URL = 'market://details?id=tech.dongdongbh.mindwtr';
-    const APP_STORE_BUNDLE_ID = Constants.expoConfig?.ios?.bundleIdentifier || 'tech.dongdongbh.mindwtr';
+    const ANDROID_PACKAGE_NAME = Constants.expoConfig?.android?.package || Application.applicationId || 'tech.dongdongbh.mindwtr';
+    const PLAY_STORE_URL = `https://play.google.com/store/apps/details?id=${ANDROID_PACKAGE_NAME}`;
+    const PLAY_STORE_MARKET_URL = `market://details?id=${ANDROID_PACKAGE_NAME}`;
+    const APP_STORE_BUNDLE_ID = Constants.expoConfig?.ios?.bundleIdentifier || Application.applicationId || 'tech.dongdongbh.mindwtr';
     const APP_STORE_LOOKUP_URL = `https://itunes.apple.com/lookup?bundleId=${encodeURIComponent(APP_STORE_BUNDLE_ID)}&country=US`;
     const APP_STORE_LOOKUP_FALLBACK_URL = `https://itunes.apple.com/lookup?bundleId=${encodeURIComponent(APP_STORE_BUNDLE_ID)}`;
+    const canRateInStore = !isFossBuild && (Platform.OS === 'android' || Platform.OS === 'ios');
 
     type AndroidComparableVersionResult =
         | { source: 'play-store'; updateAvailable: boolean; availableVersionCode: number | null }
@@ -212,11 +228,8 @@ export function AboutSettingsScreen({
     const handleCheckUpdates = async () => {
         if (isFossBuild) {
             showToast({
-                title: localize('Updates are managed by your distribution source', '更新由发行渠道管理'),
-                message: localize(
-                    'In-app update checks are disabled in this FOSS build. Please update from your repository or package source.',
-                    '此 FOSS 版本已禁用应用内更新检查。请通过你的软件源或包管理渠道更新。'
-                ),
+                title: tr('settings.aboutMobile.updatesAreManagedByYourDistributionSource'),
+                message: tr('settings.aboutMobile.inAppUpdateChecksAreDisabledInThisFossBuild'),
                 tone: 'info',
                 durationMs: 4800,
             });
@@ -236,28 +249,19 @@ export function AboutSettingsScreen({
                     : compareVersions(result.version, currentVersion) > 0;
                 if (hasUpdate) {
                     const updateMessage = result.source === 'play-store'
-                        ? localize(
-                            'Update is available on Google Play. Open app listing now?',
-                            'Google Play 已提供更新，是否立即打开应用页面？'
-                        )
-                        : localize(
-                            `v${currentVersion} → v${result.version}\n\nGoogle Play check was unavailable, but a newer GitHub release is available. Play rollout may lag. Open app listing now?`,
-                            `v${currentVersion} → v${result.version}\n\nGoogle Play 检查暂时不可用，但 GitHub 已有更新，Play 商店可能会延迟推送。是否立即打开应用页面？`
-                        );
-                    Alert.alert(localize('Update Available', '有可用更新'), updateMessage, [
-                        { text: localize('Later', '稍后'), style: 'cancel' },
-                        { text: localize('Open', '打开'), onPress: () => Linking.openURL(targetUrl) },
+                        ? tr('settings.aboutMobile.updateIsAvailableOnGooglePlayOpenAppListingNow')
+                        : tr('settings.aboutMobile.googlePlayUpdateAvailableWithVersions', { currentVersion: displayVersion, latestVersion: result.version });
+                    Alert.alert(tr('settings.updateAvailable'), updateMessage, [
+                        { text: tr('settings.later'), style: 'cancel' },
+                        { text: tr('attachments.open'), onPress: () => Linking.openURL(targetUrl) },
                     ]);
                     await persistUpdateBadge(true, result.source === 'github-release' ? result.version : undefined);
                 } else {
                     const upToDateMessage = result.source === 'play-store'
-                        ? localize('You are using the latest Google Play version!', '您正在使用 Google Play 最新版本！')
-                        : localize(
-                            'Google Play check was unavailable, but your version matches the latest GitHub release.',
-                            'Google Play 检查暂时不可用，但当前版本与 GitHub 最新发布一致。'
-                        );
+                        ? tr('settings.aboutMobile.youAreUsingTheLatestGooglePlayVersion')
+                        : tr('settings.aboutMobile.googlePlayCheckWasUnavailableButYourVersionMatchesThe');
                     showToast({
-                        title: localize('Up to Date', '已是最新'),
+                        title: tr('settings.aboutMobile.upToDate'),
                         message: upToDateMessage,
                         tone: 'success',
                     });
@@ -276,21 +280,18 @@ export function AboutSettingsScreen({
 
                 if (hasUpdate) {
                     Alert.alert(
-                        localize('Update Available', '有可用更新'),
-                        localize(
-                            `v${currentVersion} → v${latestVersion}\n\nUpdate is available on the App Store. Open app listing now?`,
-                            `v${currentVersion} → v${latestVersion}\n\nApp Store 已提供更新，是否立即打开应用页面？`
-                        ),
+                        tr('settings.updateAvailable'),
+                        tr('settings.aboutMobile.appStoreUpdateAvailableWithVersions', { currentVersion: displayVersion, latestVersion }),
                         [
-                            { text: localize('Later', '稍后'), style: 'cancel' },
-                            ...(targetUrl ? [{ text: localize('Open', '打开'), onPress: () => Linking.openURL(targetUrl) }] : []),
+                            { text: tr('settings.later'), style: 'cancel' },
+                            ...(targetUrl ? [{ text: tr('attachments.open'), onPress: () => Linking.openURL(targetUrl) }] : []),
                         ]
                     );
                     await persistUpdateBadge(true, latestVersion);
                 } else {
                     showToast({
-                        title: localize('Up to Date', '已是最新'),
-                        message: localize('You are using the latest App Store version!', '您正在使用 App Store 最新版本！'),
+                        title: tr('settings.aboutMobile.upToDate'),
+                        message: tr('settings.aboutMobile.youAreUsingTheLatestAppStoreVersion'),
                         tone: 'success',
                     });
                     await persistUpdateBadge(false);
@@ -304,20 +305,20 @@ export function AboutSettingsScreen({
 
             if (hasUpdate) {
                 const downloadUrl = release.html_url || GITHUB_RELEASES_URL;
-                const changelog = release.body || localize('No changelog available', '暂无更新日志');
+                const changelog = release.body || tr('settings.noChangelog');
                 Alert.alert(
-                    localize('Update Available', '有可用更新'),
-                    `v${currentVersion} → v${latestVersion}\n\n${localize('Changelog', '更新日志')}:\n${changelog.substring(0, 500)}${changelog.length > 500 ? '...' : ''}`,
+                    tr('settings.updateAvailable'),
+                    `v${displayVersion} → v${latestVersion}\n\n${tr('settings.changelog')}:\n${changelog.substring(0, 500)}${changelog.length > 500 ? '...' : ''}`,
                     [
-                        { text: localize('Later', '稍后'), style: 'cancel' },
-                        { text: localize('Download', '下载'), onPress: () => Linking.openURL(downloadUrl) },
+                        { text: tr('settings.later'), style: 'cancel' },
+                        { text: tr('attachments.download'), onPress: () => Linking.openURL(downloadUrl) },
                     ]
                 );
                 await persistUpdateBadge(true, latestVersion);
             } else {
                 showToast({
-                    title: localize('Up to Date', '已是最新'),
-                    message: localize('You are using the latest version!', '您正在使用最新版本！'),
+                    title: tr('settings.aboutMobile.upToDate'),
+                    message: tr('settings.upToDate'),
                     tone: 'success',
                 });
                 await persistUpdateBadge(false);
@@ -325,8 +326,8 @@ export function AboutSettingsScreen({
         } catch (error) {
             logSettingsError('Update check failed:', error);
             showToast({
-                title: localize('Error', '错误'),
-                message: localize('Failed to check for updates', '检查更新失败'),
+                title: tr('settings.syncMobile.error'),
+                message: tr('settings.checkFailed'),
                 tone: 'warning',
             });
         } finally {
@@ -334,31 +335,115 @@ export function AboutSettingsScreen({
         }
     };
 
+    const handleRateApp = async () => {
+        try {
+            if (Platform.OS === 'android') {
+                try {
+                    await Linking.openURL(PLAY_STORE_MARKET_URL);
+                } catch {
+                    await Linking.openURL(PLAY_STORE_URL);
+                }
+                return;
+            }
+
+            if (Platform.OS === 'ios') {
+                const { trackViewUrl } = await fetchLatestAppStoreInfo();
+                const trackIdMatch = trackViewUrl?.match(/\/id(\d+)/i);
+                const reviewDeepLink = trackIdMatch?.[1]
+                    ? `itms-apps://itunes.apple.com/app/id${trackIdMatch[1]}?action=write-review`
+                    : null;
+                const canOpenReview = reviewDeepLink ? await Linking.canOpenURL(reviewDeepLink) : false;
+                const targetUrl = canOpenReview ? reviewDeepLink : trackViewUrl;
+                if (!targetUrl) throw new Error('App Store listing unavailable');
+                await Linking.openURL(targetUrl);
+            }
+        } catch (error) {
+            logSettingsWarn('Failed to open app store rating page', error);
+            showToast({
+                title: tr('settings.aboutMobile.storeUnavailable'),
+                message: tr('settings.aboutMobile.couldNotOpenTheAppStoreRatingPagePleaseTry'),
+                tone: 'warning',
+            });
+        }
+    };
+
+    const getInstallChannel = () => {
+        if (isFossBuild) return 'fdroid';
+        if (Platform.OS === 'ios') return 'app-store';
+        if (Platform.OS === 'android') return androidInstallerSource;
+        return Platform.OS || 'mobile';
+    };
+
+    const handleSubmitFeedback = async (input: FeedbackSubmitInput) => {
+        const diagnosticsLogs = input.includeDiagnostics && input.category === 'bug'
+            ? await readRecentLogText()
+            : null;
+        await submitFeedbackSubmission(feedbackEndpointUrl, {
+            category: input.category,
+            email: input.email,
+            message: input.message,
+            metadata: {
+                appVersion: displayVersion,
+                build: Application.nativeBuildVersion ?? undefined,
+                installChannel: getInstallChannel(),
+                locale: getDeviceLocale(),
+                os: `${Platform.OS} ${String(Platform.Version ?? '')}`.trim(),
+                platform: Platform.OS,
+            },
+            diagnostics: diagnosticsLogs ? { logs: diagnosticsLogs } : undefined,
+        });
+    };
+
     return (
         <SafeAreaView style={[styles.container, { backgroundColor: tc.bg }]} edges={['bottom']}>
-            <SettingsTopBar />
-            <SubHeader title={t('settings.about')} />
+            <SettingsTopBar title={t('settings.about')} />
             <ScrollView style={styles.scrollView} contentContainerStyle={scrollContentStyle}>
                 <View style={[styles.settingCard, { backgroundColor: tc.cardBg }]}>
-                    <View style={styles.settingRow}>
-                        <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.version')}</Text>
-                        <Text style={[styles.settingValue, { color: tc.secondaryText }]}>
-                            {Constants.expoConfig?.version ?? '0.1.0'}
+                    <View style={[styles.aboutAppHeader, { borderBottomColor: tc.border }]}>
+                        <Image source={appIconSource} style={styles.aboutAppIcon} resizeMode="cover" />
+                        <Text style={[styles.aboutAppName, { color: tc.text }]} numberOfLines={2}>
+                            {appName}
+                        </Text>
+                        <Text style={[styles.aboutAppVersion, { color: tc.secondaryText }]} numberOfLines={2}>
+                            v{displayVersion}
                         </Text>
                     </View>
+                    {!isFossBuild && (
+                        <TouchableOpacity
+                            style={styles.settingRow}
+                            onPress={() => void handleCheckUpdates()}
+                            disabled={isCheckingUpdate}
+                        >
+                            <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.checkForUpdates')}</Text>
+                            {isCheckingUpdate ? (
+                                <ActivityIndicator size="small" color="#3B82F6" />
+                            ) : (
+                                <Text style={styles.linkText}>{tr('settings.aboutMobile.tapToCheck')}</Text>
+                            )}
+                        </TouchableOpacity>
+                    )}
+                    {canRateInStore && (
+                        <TouchableOpacity
+                            style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
+                            onPress={() => void handleRateApp()}
+                        >
+                            <Text style={[styles.settingLabel, { color: tc.text }]}>{tr('settings.aboutMobile.rateOurApp')}</Text>
+                            <Text style={styles.linkText}>{Platform.OS === 'ios' ? 'App Store' : 'Google Play'}</Text>
+                        </TouchableOpacity>
+                    )}
                     <TouchableOpacity
                         style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
-                        onPress={() => openLink('https://github.com/dongdongbh/Mindwtr/wiki')}
+                        onPress={() => setFeedbackOpen(true)}
                     >
-                        <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.documentation')}</Text>
-                        <Text style={styles.linkText}>GitHub Wiki</Text>
+                        <Text style={[styles.settingLabel, { color: tc.text }]}>{tr('settings.feedback')}</Text>
+                        <Text style={styles.linkText}>{tr('settings.feedbackSubmit')}</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                         style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
-                        onPress={() => openLink('https://ko-fi.com/dongdongbh')}
+                        onPress={() => openLink('https://docs.mindwtr.app')}
                     >
-                        <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.sponsorProject')}</Text>
-                        <Text style={styles.linkText}>Ko-fi</Text>
+                        <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.documentation')}</Text>
+                        <Text style={styles.linkText}>{tr('settings.documentationLinkValue')}</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                         style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
@@ -369,31 +454,25 @@ export function AboutSettingsScreen({
                     </TouchableOpacity>
                     <TouchableOpacity
                         style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
-                        onPress={() => openLink('https://dongdongbh.tech')}
+                        onPress={() => openLink('https://mindwtr.app/donate?src=app_about')}
                     >
-                        <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.website')}</Text>
-                        <Text style={styles.linkText}>dongdongbh.tech</Text>
+                        <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.sponsorProject')}</Text>
+                        <Text style={styles.linkText}>{tr('settings.donateLinkValue')}</Text>
                     </TouchableOpacity>
                     <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
                         <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.license')}</Text>
                         <Text style={[styles.settingValue, { color: tc.secondaryText }]}>AGPL-3.0</Text>
                     </View>
-                    {!isFossBuild && (
-                        <TouchableOpacity
-                            style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
-                            onPress={() => void handleCheckUpdates()}
-                            disabled={isCheckingUpdate}
-                        >
-                            <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.checkForUpdates')}</Text>
-                            {isCheckingUpdate ? (
-                                <ActivityIndicator size="small" color="#3B82F6" />
-                            ) : (
-                                <Text style={styles.linkText}>{localize('Tap to check', '点击检查')}</Text>
-                            )}
-                        </TouchableOpacity>
-                    )}
                 </View>
             </ScrollView>
+            <FeedbackSettingsModal
+                visible={feedbackOpen}
+                isConfigured={Boolean(feedbackEndpointUrl)}
+                tr={tr}
+                onClose={() => setFeedbackOpen(false)}
+                onOpenIssue={() => openLink(GITHUB_ISSUES_URL)}
+                onSubmit={handleSubmitFeedback}
+            />
         </SafeAreaView>
     );
 }

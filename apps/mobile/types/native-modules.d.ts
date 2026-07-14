@@ -111,6 +111,21 @@ declare module 'expo-calendar' {
     title?: string;
     name?: string;
     color?: string;
+    sourceId?: string;
+    source?: Source;
+    entityType?: string;
+    allowsModifications?: boolean;
+    ownerAccount?: string;
+    accessLevel?: CalendarAccessLevel;
+    isVisible?: boolean;
+    isSynced?: boolean;
+  }
+
+  export interface Source {
+    id?: string;
+    type?: string;
+    name: string;
+    isLocalAccount?: boolean;
   }
 
   export interface Event {
@@ -124,14 +139,90 @@ declare module 'expo-calendar' {
     location?: string;
   }
 
+  export interface Reminder {
+    id?: string;
+    calendarId?: string;
+    title?: string;
+    notes?: string;
+    completed?: boolean;
+    completionDate?: string | Date;
+    creationDate?: string | Date;
+    dueDate?: string | Date;
+    lastModifiedDate?: string | Date;
+    startDate?: string | Date;
+    timeZone?: string;
+    url?: string;
+  }
+
+  export type CalendarDialogParams = {
+    id: string;
+    instanceStartDate?: string | Date;
+  };
+
+  export type PresentationOptions = {
+    startNewActivityTask?: boolean;
+  };
+
+  export type OpenEventPresentationOptions = PresentationOptions & {
+    allowsEditing?: boolean;
+    allowsCalendarPreview?: boolean;
+  };
+
+  export type DialogEventResult = {
+    action: string;
+    id: string | null;
+  };
+
+  export type OpenEventDialogResult = {
+    action: string;
+  };
+
   export const EntityTypes: {
     EVENT: string;
+    REMINDER: string;
   };
+
+  export enum SourceType {
+    LOCAL = 'local',
+    EXCHANGE = 'exchange',
+    CALDAV = 'caldav',
+    MOBILEME = 'mobileme',
+    SUBSCRIBED = 'subscribed',
+    BIRTHDAYS = 'birthdays',
+  }
+
+  export enum CalendarAccessLevel {
+    CONTRIBUTOR = 'contributor',
+    EDITOR = 'editor',
+    FREEBUSY = 'freebusy',
+    NONE = 'none',
+    OWNER = 'owner',
+    READ = 'read',
+    RESPOND = 'respond',
+    ROOT = 'root',
+    OVERRIDE = 'override',
+    UNKNOWN = 'unknown',
+  }
 
   export function getCalendarPermissionsAsync(): Promise<{ status: PermissionStatus }>;
   export function requestCalendarPermissionsAsync(): Promise<{ status: PermissionStatus }>;
-  export function getCalendarsAsync(entityType: string): Promise<Calendar[]>;
+  export function getRemindersPermissionsAsync(): Promise<{ status: PermissionStatus }>;
+  export function requestRemindersPermissionsAsync(): Promise<{ status: PermissionStatus }>;
+  export function getCalendarsAsync(entityType?: string): Promise<Calendar[]>;
   export function getEventsAsync(calendarIds: string[], startDate: Date, endDate: Date): Promise<Event[]>;
+  export function getRemindersAsync(calendarIds: (string | null)[], status: string | null, startDate: Date | null, endDate: Date | null): Promise<Reminder[]>;
+  export function getSourcesAsync(): Promise<Source[]>;
+
+  // Write APIs
+  export function createCalendarAsync(details?: Partial<Calendar>): Promise<string>;
+  export function updateCalendarAsync(id: string, details?: Partial<Calendar>): Promise<string>;
+  export function deleteCalendarAsync(id: string): Promise<void>;
+  export function createEventAsync(calendarId: string, eventData?: Partial<Omit<Event, 'id'>>): Promise<string>;
+  export function updateEventAsync(id: string, details?: Partial<Omit<Event, 'id'>>): Promise<string>;
+  export function deleteEventAsync(id: string): Promise<void>;
+  export function deleteReminderAsync(id: string): Promise<void>;
+  export function editEventInCalendarAsync(params: CalendarDialogParams, options?: PresentationOptions): Promise<DialogEventResult>;
+  export function openEventInCalendarAsync(params: CalendarDialogParams, options?: OpenEventPresentationOptions): Promise<OpenEventDialogResult>;
 }
 
 declare module 'expo-network' {
@@ -148,10 +239,33 @@ declare module 'expo-network' {
 }
 
 declare module 'react-native-fs' {
+  export type DownloadFileOptions = {
+    fromUrl: string;
+    toFile: string;
+    headers?: Record<string, string>;
+    background?: boolean;
+    discretionary?: boolean;
+    cacheable?: boolean;
+    progressInterval?: number;
+    progressDivider?: number;
+    begin?: (res: { jobId: number; statusCode: number; contentLength: number; headers: Record<string, string> }) => void;
+    progress?: (res: { jobId: number; contentLength: number; bytesWritten: number }) => void;
+    resumable?: () => void;
+    connectionTimeout?: number;
+    readTimeout?: number;
+    backgroundTimeout?: number;
+  };
+  export type DownloadResult = {
+    jobId: number;
+    statusCode: number;
+    bytesWritten: number;
+  };
+  export function downloadFile(options: DownloadFileOptions): { jobId: number; promise: Promise<DownloadResult> };
   export function writeFile(path: string, contents: string, encoding?: string): Promise<void>;
   export function appendFile(path: string, contents: string, encoding?: string): Promise<void>;
   export function readFile(path: string, encoding?: string): Promise<string>;
   export function exists(path: string): Promise<boolean>;
+  export function hash(path: string, algorithm: 'md5' | 'sha1' | 'sha224' | 'sha256' | 'sha384' | 'sha512'): Promise<string>;
   export function unlink(path: string): Promise<void>;
 
   declare const ReactNativeFS: {
@@ -159,7 +273,9 @@ declare module 'react-native-fs' {
     appendFile: typeof appendFile;
     readFile: typeof readFile;
     exists: typeof exists;
+    hash: typeof hash;
     unlink: typeof unlink;
+    downloadFile: typeof downloadFile;
   };
 
   export default ReactNativeFS;

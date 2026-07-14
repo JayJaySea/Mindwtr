@@ -17,6 +17,7 @@ type ShortcutOption = {
 };
 
 type GlobalQuickAddShortcutPlatform = {
+    isFlatpak?: boolean;
     isMac?: boolean;
     isWindows?: boolean;
 };
@@ -32,7 +33,7 @@ const ALLOWED_SHORTCUTS = new Set<GlobalQuickAddShortcutSetting>([
 export function getDefaultGlobalQuickAddShortcut(
     platform: GlobalQuickAddShortcutPlatform = {}
 ): GlobalQuickAddShortcutSetting {
-    if (platform.isWindows) {
+    if (platform.isWindows || platform.isFlatpak) {
         return GLOBAL_QUICK_ADD_SHORTCUT_DISABLED;
     }
     return GLOBAL_QUICK_ADD_SHORTCUT_DEFAULT;
@@ -51,17 +52,20 @@ export function normalizeGlobalQuickAddShortcut(
 }
 
 export function getGlobalQuickAddShortcutOptions(platform: GlobalQuickAddShortcutPlatform = {}): ShortcutOption[] {
+    const isFlatpak = platform.isFlatpak === true;
     const isMac = platform.isMac === true;
     const isWindows = platform.isWindows === true;
     const defaultShortcut = getDefaultGlobalQuickAddShortcut(platform);
     const legacyLabel = isMac ? 'Cmd+Shift+A' : 'Ctrl+Shift+A';
-    const legacySuffix = isWindows
+    // Never recommend the legacy combo: Chrome (tab search), Word, and Excel
+    // all use Ctrl/Cmd+Shift+A, and a global hotkey steals it from them.
+    const legacySuffix = defaultShortcut === GLOBAL_QUICK_ADD_SHORTCUT_LEGACY
         ? ' (recommended)'
-        : defaultShortcut === GLOBAL_QUICK_ADD_SHORTCUT_LEGACY
-            ? ' (recommended)'
-            : ' (legacy)';
+        : ' (legacy)';
     const disabledLabel = isWindows
         ? 'Disabled (default)'
+        : isFlatpak
+            ? 'Disabled (Flatpak default)'
         : defaultShortcut === GLOBAL_QUICK_ADD_SHORTCUT_DISABLED
             ? 'Disabled (recommended)'
             : 'Disabled';
@@ -69,9 +73,13 @@ export function getGlobalQuickAddShortcutOptions(platform: GlobalQuickAddShortcu
     return [
         {
             value: GLOBAL_QUICK_ADD_SHORTCUT_DEFAULT,
+            // On Windows the default is disabled, but Ctrl+Alt+M is still the
+            // pick to recommend when enabling one (least layout/app conflicts).
             label:
                 (isMac ? 'Ctrl+Option+M' : 'Ctrl+Alt+M')
-                + (defaultShortcut === GLOBAL_QUICK_ADD_SHORTCUT_DEFAULT ? ' (recommended)' : ''),
+                + (defaultShortcut === GLOBAL_QUICK_ADD_SHORTCUT_DEFAULT || isWindows
+                    ? ' (recommended)'
+                    : ''),
         },
         {
             value: GLOBAL_QUICK_ADD_SHORTCUT_ALTERNATE_N,

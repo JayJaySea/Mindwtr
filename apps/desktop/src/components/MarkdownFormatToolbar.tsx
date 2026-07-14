@@ -1,7 +1,8 @@
 import { useCallback, type RefObject } from 'react';
-import { CheckSquare, List, ListOrdered, Quote, Undo2 } from 'lucide-react';
+import { CheckSquare, Code, Code2, Link, List, ListOrdered, Minus, Quote, Strikethrough, Undo2 } from 'lucide-react';
 import {
     MARKDOWN_TOOLBAR_ACTIONS,
+    translateWithFallback,
     type MarkdownSelection,
     type MarkdownToolbarActionId,
     type MarkdownToolbarResult,
@@ -18,11 +19,6 @@ type MarkdownFormatToolbarProps = {
     onApplyAction: (actionId: MarkdownToolbarActionId, selection: MarkdownSelection) => MarkdownToolbarResult | void;
 };
 
-const translateWithFallback = (t: (key: string) => string, key: string, fallback: string) => {
-    const translated = t(key);
-    return translated === key ? fallback : translated;
-};
-
 const renderActionLabel = (actionId: MarkdownToolbarActionId, shortLabel: string) => {
     switch (actionId) {
         case 'bulletList':
@@ -31,8 +27,18 @@ const renderActionLabel = (actionId: MarkdownToolbarActionId, shortLabel: string
             return <ListOrdered className="h-3.5 w-3.5" />;
         case 'taskList':
             return <CheckSquare className="h-3.5 w-3.5" />;
+        case 'horizontalRule':
+            return <Minus className="h-3.5 w-3.5" />;
         case 'quote':
             return <Quote className="h-3.5 w-3.5" />;
+        case 'link':
+            return <Link className="h-3.5 w-3.5" />;
+        case 'code':
+            return <Code className="h-3.5 w-3.5" />;
+        case 'codeBlock':
+            return <Code2 className="h-3.5 w-3.5" />;
+        case 'strikethrough':
+            return <Strikethrough className="h-3.5 w-3.5" />;
         default:
             return <span>{shortLabel}</span>;
     }

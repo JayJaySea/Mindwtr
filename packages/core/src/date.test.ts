@@ -1,9 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import {
     configureDateFormatting,
+    formatCalendarInputDate,
+    getQuickDate,
+    getWeekStartsOnIndex,
     isDueForReview,
+    isQuickDatePresetSelected,
+    normalizeClockTimeInput,
+    normalizeCalendarSystemSetting,
     normalizeDateFormatSetting,
     normalizeTimeFormatSetting,
+    getSystemWeekStart,
+    normalizeWeekStartPreference,
+    normalizeWeekStartSetting,
+    parseCalendarInputDate,
+    resolveCalendarSystemSetting,
     resolveDateLocaleTag,
     safeFormatDate,
     safeParseDate,
@@ -53,10 +64,63 @@ describe('date utils', () => {
         expect(normalizeDateFormatSetting('unknown')).toBe('system');
     });
 
+    it('gates Jalali calendar support to Persian locales', () => {
+        expect(normalizeCalendarSystemSetting('solar-hijri')).toBe('jalali');
+        expect(resolveCalendarSystemSetting('jalali', { language: 'en', systemLocale: 'en-US' })).toBe('gregorian');
+        expect(resolveCalendarSystemSetting('jalali', { language: 'en', systemLocale: 'fa-IR' })).toBe('jalali');
+        expect(resolveDateLocaleTag({
+            language: 'en',
+            dateFormat: 'system',
+            calendarSystem: 'jalali',
+            systemLocale: 'fa-IR',
+        })).toBe('fa-IR-u-ca-persian');
+    });
+
     it('normalizes time format settings safely', () => {
         expect(normalizeTimeFormatSetting('12h')).toBe('12h');
         expect(normalizeTimeFormatSetting('24-hour')).toBe('24h');
         expect(normalizeTimeFormatSetting('unknown')).toBe('system');
+    });
+
+    it('normalizes week start settings safely', () => {
+        expect(normalizeWeekStartSetting('monday')).toBe('monday');
+        expect(normalizeWeekStartSetting('saturday')).toBe('saturday');
+        expect(normalizeWeekStartSetting('sunday')).toBe('sunday');
+        // Absent, 'system', and invalid values follow the device locale.
+        expect(normalizeWeekStartSetting('friday')).toBe(getSystemWeekStart());
+        expect(normalizeWeekStartSetting('system')).toBe(getSystemWeekStart());
+        expect(normalizeWeekStartSetting(undefined)).toBe(getSystemWeekStart());
+        expect(getWeekStartsOnIndex('monday')).toBe(1);
+        expect(getWeekStartsOnIndex('saturday')).toBe(6);
+    });
+
+    it('keeps the stored week start preference distinct from the resolved value', () => {
+        expect(normalizeWeekStartPreference('monday')).toBe('monday');
+        expect(normalizeWeekStartPreference('sunday')).toBe('sunday');
+        expect(normalizeWeekStartPreference('system')).toBe('system');
+        expect(normalizeWeekStartPreference(undefined)).toBe('system');
+        expect(normalizeWeekStartPreference('friday')).toBe('system');
+    });
+
+    it('infers the week start from the locale', () => {
+        expect(getSystemWeekStart('de-DE')).toBe('monday');
+        expect(getSystemWeekStart('fr-FR')).toBe('monday');
+        expect(getSystemWeekStart('en-US')).toBe('sunday');
+        expect(getSystemWeekStart('ja-JP')).toBe('sunday');
+        expect(getSystemWeekStart('pt-BR')).toBe('sunday');
+        expect(getSystemWeekStart('ar-EG')).toBe('saturday');
+        expect(getSystemWeekStart('fa-IR')).toBe('saturday');
+        // No region and no week info still lands on a sane default.
+        expect(['monday', 'sunday', 'saturday']).toContain(getSystemWeekStart('en'));
+    });
+
+    it('normalizes clock time inputs for stored schedule defaults', () => {
+        expect(normalizeClockTimeInput('9:05')).toBe('09:05');
+        expect(normalizeClockTimeInput('905')).toBe('09:05');
+        expect(normalizeClockTimeInput(' 1730 ')).toBe('17:30');
+        expect(normalizeClockTimeInput('')).toBe('');
+        expect(normalizeClockTimeInput('24:00')).toBeNull();
+        expect(normalizeClockTimeInput('9am')).toBeNull();
     });
 
     it('resolves locale tags from language + format preferences', () => {
@@ -79,9 +143,47 @@ describe('date utils', () => {
         expect(safeFormatDate('2025-01-02T15:04:00', 'Pp')).toBe('2025-01-02 15:04');
     });
 
+    it('formats Jalali localized dates without changing stored ISO date output', () => {
+        configureDateFormatting({
+            language: 'en',
+            dateFormat: 'system',
+            calendarSystem: 'jalali',
+            timeFormat: 'system',
+            systemLocale: 'fa-IR',
+        });
+        expect(safeFormatDate('2025-03-21', 'P')).toBe('1404/01/01');
+        expect(safeFormatDate('2025-03-21', 'yyyy-MM-dd')).toBe('2025-03-21');
+        expect(formatCalendarInputDate('2025-03-21', 'jalali')).toBe('1404-01-01');
+        expect(parseCalendarInputDate('1404-01-01', 'jalali')).toBe('2025-03-21');
+
+        configureDateFormatting({ language: 'en', dateFormat: 'system', timeFormat: 'system', systemLocale: 'en-US' });
+    });
+
     it('detects when a review date is due', () => {
         const now = new Date('2025-01-10T10:00:00Z');
         expect(isDueForReview('2025-01-10T09:00:00Z', now)).toBe(true);
         expect(isDueForReview('2025-01-10T11:00:00Z', now)).toBe(false);
+    });
+
+    it('resolves quick date presets from the local start of today', () => {
+        const now = new Date(2026, 4, 12, 15, 30);
+        expect(getQuickDate('today', now)).toEqual(new Date(2026, 4, 12));
+        expect(getQuickDate('tomorrow', now)).toEqual(new Date(2026, 4, 13));
+        expect(getQuickDate('in_3_days', now)).toEqual(new Date(2026, 4, 15));
+        expect(getQuickDate('next_week', now)).toEqual(new Date(2026, 4, 18));
+        expect(getQuickDate('next_month', now)).toEqual(new Date(2026, 5, 1));
+        expect(getQuickDate('no_date', now)).toBeNull();
+    });
+
+    it('treats next week as the next Monday even when today is Monday', () => {
+        const monday = new Date(2026, 4, 11, 8, 0);
+        expect(getQuickDate('next_week', monday)).toEqual(new Date(2026, 4, 18));
+    });
+
+    it('matches selected dates against quick date presets', () => {
+        const now = new Date(2026, 4, 12, 15, 30);
+        expect(isQuickDatePresetSelected('tomorrow', new Date(2026, 4, 13, 21, 45), now)).toBe(true);
+        expect(isQuickDatePresetSelected('tomorrow', new Date(2026, 4, 14), now)).toBe(false);
+        expect(isQuickDatePresetSelected('no_date', null, now)).toBe(false);
     });
 });

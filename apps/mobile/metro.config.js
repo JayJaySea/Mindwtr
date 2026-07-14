@@ -4,15 +4,20 @@ const fs = require('fs');
 
 const projectRoot = __dirname;
 const workspaceRoot = path.resolve(projectRoot, '../..');
+const isFossBuild = process.env.FOSS_BUILD === '1' || process.env.FOSS_BUILD === 'true';
 const projectNodeModulesRoot = path.resolve(projectRoot, 'node_modules');
 const coreNodeModulesRoot = path.resolve(workspaceRoot, 'packages/core/node_modules');
 const workspaceNodeModulesRoot = path.resolve(workspaceRoot, 'node_modules');
 const workspaceBabelRuntimeRoot = path.resolve(workspaceRoot, 'node_modules/@babel/runtime');
+const fossStoreReviewShim = path.resolve(projectRoot, 'shims/expo-store-review-foss.js');
 const projectReactRoot = path.resolve(projectNodeModulesRoot, 'react');
 const projectReactNativeRoot = path.resolve(projectNodeModulesRoot, 'react-native');
 const zustandRoot = fs.existsSync(path.resolve(projectNodeModulesRoot, 'zustand'))
     ? path.resolve(projectNodeModulesRoot, 'zustand')
     : path.resolve(coreNodeModulesRoot, 'zustand');
+const whisperRnRoot = fs.existsSync(path.resolve(projectNodeModulesRoot, 'whisper.rn'))
+    ? path.resolve(projectNodeModulesRoot, 'whisper.rn')
+    : path.resolve(workspaceNodeModulesRoot, 'whisper.rn');
 const resolveFromProjectNodeModules = (moduleName) => {
     try {
         return require.resolve(moduleName, {
@@ -21,6 +26,11 @@ const resolveFromProjectNodeModules = (moduleName) => {
     } catch {
         return null;
     }
+};
+
+const resolveWhisperRnPath = (relativePath) => {
+    const fullPath = path.resolve(whisperRnRoot, relativePath);
+    return fs.existsSync(fullPath) ? fullPath : null;
 };
 
 const config = getDefaultConfig(projectRoot);
@@ -41,6 +51,8 @@ config.watchFolders = Array.from(new Set([...defaultWatchFolders, workspaceRoot]
 // 1.1 CRITICAL: Exclude build output directories that cause Metro to crash
 config.resolver.blockList = [
     /apps\/desktop\/src-tauri\/target\/.*/,
+    /apps\/mobile\/app\/.*\.(?:test|spec)\.[jt]sx?$/,
+    /(^|\/)\.worktrees\/.*/,
     /\.git\/.*/,
     /node_modules\/.*\/\.git\/.*/,
 ];
@@ -66,6 +78,13 @@ config.resolver.resolverMainFields = ['react-native', 'browser', 'main'];
 
 // 4. Custom resolver to handle workspace packages and problematic modules
 config.resolver.resolveRequest = (context, moduleName, platform) => {
+    if (isFossBuild && moduleName === 'expo-store-review') {
+        return {
+            filePath: fossStoreReviewShim,
+            type: 'sourceFile',
+        };
+    }
+
     // Ensure relative Babel helper imports always resolve from the helper directory.
     // This avoids sporadic Expo Go resolution failures for helpers like arrayWithHoles.js.
     if (
@@ -77,6 +96,48 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
         if (fs.existsSync(helperRelativePath)) {
             return {
                 filePath: helperRelativePath,
+                type: 'sourceFile',
+            };
+        }
+    }
+
+    if (
+        moduleName === 'whisper.rn'
+        || moduleName === 'whisper.rn/index'
+        || moduleName === 'whisper.rn/src/index'
+    ) {
+        const resolved = resolveWhisperRnPath('src/index.ts')
+            || resolveWhisperRnPath('lib/commonjs/index.js');
+        if (resolved) {
+            return {
+                filePath: resolved,
+                type: 'sourceFile',
+            };
+        }
+    }
+
+    if (
+        moduleName === 'whisper.rn/realtime-transcription'
+        || moduleName === 'whisper.rn/realtime-transcription/index'
+        || moduleName === 'whisper.rn/realtime-transcription/index.js'
+    ) {
+        const resolved = resolveWhisperRnPath('lib/commonjs/realtime-transcription/index.js');
+        if (resolved) {
+            return {
+                filePath: resolved,
+                type: 'sourceFile',
+            };
+        }
+    }
+
+    if (
+        moduleName === 'whisper.rn/realtime-transcription/adapters/AudioPcmStreamAdapter'
+        || moduleName === 'whisper.rn/realtime-transcription/adapters/AudioPcmStreamAdapter.js'
+    ) {
+        const resolved = resolveWhisperRnPath('lib/commonjs/realtime-transcription/adapters/AudioPcmStreamAdapter.js');
+        if (resolved) {
+            return {
+                filePath: resolved,
                 type: 'sourceFile',
             };
         }

@@ -1,19 +1,27 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { shallow, useTaskStore } from '@mindwtr/core';
+import { shallow, translateWithFallback, useTaskStore } from '@mindwtr/core';
 import { useLanguage } from './language-context';
 import { KeybindingHelpModal } from '../components/KeybindingHelpModal';
-import { isTauriRuntime } from '../lib/runtime';
+import { isFlatpakRuntime, isTauriRuntime } from '../lib/runtime';
 import { reportError } from '../lib/report-error';
+import { registerUndoableAction, takeUndoableAction } from '../lib/undo-registry';
+import { undoTaskCompletion } from '../lib/undo-task-completion';
 import { logWarn } from '../lib/app-log';
 import { useUiStore } from '../store/ui-store';
+import { saveStoredFullscreen } from '../lib/window-state';
 import {
     type GlobalQuickAddShortcutSetting,
     matchesGlobalQuickAddShortcut,
     normalizeGlobalQuickAddShortcut,
 } from '../lib/global-quick-add-shortcut';
-import { AREA_FILTER_ALL } from '../lib/area-filter';
+import { AREA_FILTER_ALL } from '@mindwtr/core';
+import type { TaskStatus } from '@mindwtr/core';
 
-export type KeybindingStyle = 'vim' | 'emacs';
+export type KeybindingStyle = 'vim' | 'emacs' | 'standard';
+
+function isKeybindingStyle(value: unknown): value is KeybindingStyle {
+    return value === 'vim' || value === 'emacs' || value === 'standard';
+}
 
 export interface TaskListScope {
     kind: 'taskList';
@@ -22,10 +30,25 @@ export interface TaskListScope {
     selectFirst: () => void;
     selectLast: () => void;
     editSelected: () => void;
+    openSelected?: () => void;
+    openQuickActions?: () => void;
     toggleDoneSelected: () => void;
+    toggleSelectSelected?: () => void;
     deleteSelected: () => void;
+    setStatusSelected?: (status: TaskStatus) => void;
     focusAddInput?: () => void;
 }
+
+// Status chord: `s` then a letter sets the selected task's status (#860).
+// Letters mirror the g-navigation chords (gi/gn/gw/gs/gd/ga).
+const STATUS_CHORD_MAP: Record<string, TaskStatus> = {
+    i: 'inbox',
+    n: 'next',
+    w: 'waiting',
+    s: 'someday',
+    d: 'done',
+    a: 'archived',
+};
 
 interface KeybindingContextType {
     style: KeybindingStyle;
@@ -47,6 +70,25 @@ function isEditableTarget(target: EventTarget | null): boolean {
     if (!(target instanceof HTMLElement)) return false;
     const tag = target.tagName.toLowerCase();
     return tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable;
+}
+
+// An open modal dialog (global search, quick add, prompts) owns the keyboard:
+// list shortcuts must never act on the view behind it. Without this, a stray
+// Enter or 'e' with focus outside the dialog's input completed a task in the
+// background Focus list from inside search (same class as the #848 menu fix).
+function hasModalDialogOpen(): boolean {
+    return document.querySelector('[role="dialog"][aria-modal="true"]') !== null;
+}
+
+// Enter must keep activating whatever control actually has focus (buttons,
+// menu items, links); the list-level Enter binding only fires when nothing
+// interactive is focused.
+function hasInteractiveFocus(): boolean {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return false;
+    return Boolean(active.closest(
+        'button, a[href], input, select, textarea, [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="option"], [role="link"], [contenteditable="true"]'
+    ));
 }
 
 function moveSidebarFocus(target: EventTarget | null, direction: 'next' | 'prev'): boolean {
@@ -99,6 +141,12 @@ function triggerQuickAdd() {
     window.dispatchEvent(new Event('mindwtr:quick-add'));
 }
 
+function getAppScopedShortcutKey(event: KeyboardEvent): string {
+    if (event.key.length !== 1) return event.key;
+    if (event.shiftKey && event.key.toLowerCase() === 'a') return 'A';
+    return event.key;
+}
+
 function triggerTaskEditCancel(taskId: string) {
     const CancelEvent = typeof window.CustomEvent === 'function' ? window.CustomEvent : CustomEvent;
     window.dispatchEvent(new CancelEvent('mindwtr:cancel-task-edit', { detail: { taskId } }));
@@ -129,22 +177,37 @@ export function KeybindingProvider({
     const showToast = useUiStore((state) => state.showToast);
     const listOptions = useUiStore((state) => state.listOptions);
     const setListOptions = useUiStore((state) => state.setListOptions);
+    const collapseAllTaskDetails = useUiStore((state) => state.collapseAllTaskDetails);
     const editingTaskId = useUiStore((state) => state.editingTaskId);
     const editingTaskIdRef = useRef<string | null>(editingTaskId);
 
-    const initialStyle: KeybindingStyle =
-        settings.keybindingStyle === 'vim' || settings.keybindingStyle === 'emacs'
-            ? settings.keybindingStyle
-            : 'vim';
+    const initialStyle: KeybindingStyle = isKeybindingStyle(settings.keybindingStyle)
+        ? settings.keybindingStyle
+        : 'vim';
     const [style, setStyleState] = useState<KeybindingStyle>(initialStyle);
     const [isHelpOpen, setIsHelpOpen] = useState(false);
     const quickAddShortcut = useMemo(
         () => normalizeGlobalQuickAddShortcut(settings.globalQuickAddShortcut, {
+            isFlatpak: isFlatpakRuntime(),
             isMac,
             isWindows,
         }),
         [isMac, isWindows, settings.globalQuickAddShortcut]
     );
+    const undoLabel = useMemo(() => {
+        const value = t('common.undo');
+        return value && value !== 'common.undo' ? value : 'Undo';
+    }, [t]);
+    const formatTaskMarkedDoneMessage = useCallback((title: string) => {
+        return translateWithFallback(t, 'task.markedDone', '{title} marked Done')
+            .replace('{title}', title);
+    }, [t]);
+    const formatTaskMovedMessage = useCallback((title: string, status: TaskStatus) => {
+        const statusLabel = translateWithFallback(t, `status.${status}`, status);
+        return translateWithFallback(t, 'task.movedToStatus', '{{title}} moved to {{status}}')
+            .replace('{{title}}', title)
+            .replace('{{status}}', statusLabel);
+    }, [t]);
     const sortedAreas = useMemo(
         () => [...areas].sort((a, b) => a.order - b.order),
         [areas],
@@ -155,8 +218,13 @@ export function KeybindingProvider({
         updateSettings({ sidebarCollapsed: !isSidebarCollapsed }).catch((error) => reportError('Failed to update settings', error));
     }, [updateSettings, isSidebarCollapsed]);
     const toggleListDetails = useCallback(() => {
-        setListOptions({ showDetails: !listOptions.showDetails });
-    }, [listOptions.showDetails, setListOptions]);
+        if (listOptions.showDetails) {
+            collapseAllTaskDetails();
+            setListOptions({ showDetails: false });
+            return;
+        }
+        setListOptions({ showDetails: true });
+    }, [collapseAllTaskDetails, listOptions.showDetails, setListOptions]);
     const toggleDensity = useCallback(() => {
         const nextDensity = settings.appearance?.density === 'compact' ? 'comfortable' : 'compact';
         updateSettings({ appearance: { density: nextDensity } })
@@ -195,7 +263,7 @@ export function KeybindingProvider({
     useEffect(() => {
         if (isTest) return;
         const nextStyle = settings.keybindingStyle;
-        if (nextStyle === 'vim' || nextStyle === 'emacs') {
+        if (isKeybindingStyle(nextStyle)) {
             setStyleState((prev) => (prev === nextStyle ? prev : nextStyle));
         }
     }, [isTest, settings.keybindingStyle]);
@@ -214,21 +282,6 @@ export function KeybindingProvider({
 
     const registerTaskListScope = useCallback((scope: TaskListScope | null) => {
         scopeRef.current = scope;
-    }, []);
-
-    const focusFallbackFilterInput = useCallback(() => {
-        const root = document.querySelector<HTMLElement>('[data-main-content]') ?? document.body;
-        const input = Array.from(root.querySelectorAll<HTMLElement>('[data-view-filter-input]'))
-            .find((element) => {
-                const tagName = element.tagName.toLowerCase();
-                if (tagName !== 'input' && tagName !== 'textarea') return false;
-                if ('disabled' in element && Boolean((element as HTMLInputElement | HTMLTextAreaElement).disabled)) return false;
-                const rect = element.getBoundingClientRect();
-                if (rect.width <= 0 || rect.height <= 0) return false;
-                const style = window.getComputedStyle(element);
-                return style.display !== 'none' && style.visibility !== 'hidden';
-            });
-        input?.focus();
     }, []);
 
     const getFallbackTaskElements = useCallback((): HTMLElement[] => {
@@ -257,9 +310,11 @@ export function KeybindingProvider({
             taskElement.scrollIntoView({ block: 'nearest' });
         }
         taskElement.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        const focusTarget = taskElement.querySelector<HTMLElement>(
-            'button[aria-expanded], button[data-task-edit-trigger], button, [tabindex]:not([tabindex="-1"])'
-        );
+        // A comma selector returns the first match in document order, which is
+        // the done/next button — Enter would then complete the task (#847).
+        // Prefer the title toggle so Enter opens the task instead.
+        const focusTarget = taskElement.querySelector<HTMLElement>('[data-task-view-toggle]')
+            ?? taskElement.querySelector<HTMLElement>('button, [tabindex]:not([tabindex="-1"])');
         focusTarget?.focus();
     }, []);
 
@@ -340,6 +395,22 @@ export function KeybindingProvider({
         editTrigger.click();
     }, [pickFallbackTaskElement]);
 
+    const fallbackOpenSelected = useCallback(() => {
+        const selectedElement = pickFallbackTaskElement();
+        if (!selectedElement) return;
+        const toggle = selectedElement.querySelector<HTMLElement>('[data-task-view-toggle]');
+        toggle?.click();
+    }, [pickFallbackTaskElement]);
+
+    const fallbackOpenQuickActionsSelected = useCallback(() => {
+        const selectedElement = pickFallbackTaskElement();
+        if (!selectedElement) return;
+        const trigger = selectedElement.querySelector<HTMLElement>('[data-task-quick-actions-trigger]');
+        if (!trigger) return;
+        trigger.focus();
+        trigger.click();
+    }, [pickFallbackTaskElement]);
+
     const fallbackToggleDoneSelected = useCallback(() => {
         const selectedElement = pickFallbackTaskElement();
         const selectedTaskId = selectedElement?.dataset.taskId;
@@ -348,19 +419,106 @@ export function KeybindingProvider({
         const task = state.tasks.find((item) => item.id === selectedTaskId);
         if (!task) return;
         const nextStatus = task.status === 'done' ? 'inbox' : 'done';
-        void state.moveTask(task.id, nextStatus);
-    }, [pickFallbackTaskElement]);
+        const previousStatus = task.status;
+        const wasFocusedToday = task.isFocusedToday === true;
+        void state.moveTask(task.id, nextStatus)
+            .then((result) => {
+                if (!result.success) {
+                    throw new Error(result.error || 'Failed to change task status');
+                }
+                if (nextStatus !== 'done' || previousStatus === 'done') return;
+                const undo = registerUndoableAction(() => {
+                    void undoTaskCompletion(task.id, previousStatus, wasFocusedToday)
+                        .catch((error) => reportError('Failed to undo task completion', error));
+                });
+                if (settings.undoNotificationsEnabled === false) return;
+                showToast(
+                    formatTaskMarkedDoneMessage(task.title),
+                    'info',
+                    5000,
+                    {
+                        label: undoLabel,
+                        onClick: undo,
+                    }
+                );
+            })
+            .catch((error) => reportError('Failed to change task status', error));
+    }, [formatTaskMarkedDoneMessage, pickFallbackTaskElement, settings.undoNotificationsEnabled, showToast, undoLabel]);
+
+    const fallbackSetStatusSelected = useCallback((status: TaskStatus) => {
+        const selectedElement = pickFallbackTaskElement();
+        const selectedTaskId = selectedElement?.dataset.taskId;
+        if (!selectedTaskId) return;
+        const state = useTaskStore.getState();
+        const task = state.tasks.find((item) => item.id === selectedTaskId);
+        if (!task || task.status === status) return;
+        const previousStatus = task.status;
+        const wasFocusedToday = task.isFocusedToday === true;
+        void state.moveTask(task.id, status)
+            .then((result) => {
+                if (!result.success) {
+                    throw new Error(result.error || 'Failed to change task status');
+                }
+                const undo = registerUndoableAction(() => {
+                    // Completion has side effects (Today star, completedAt), so
+                    // undoing into/out of done goes through the shared core rule.
+                    if (status === 'done') {
+                        void undoTaskCompletion(task.id, previousStatus, wasFocusedToday)
+                            .catch((error) => reportError('Failed to undo task status change', error));
+                        return;
+                    }
+                    void useTaskStore.getState().moveTask(task.id, previousStatus)
+                        .catch((error) => reportError('Failed to undo task status change', error));
+                });
+                if (settings.undoNotificationsEnabled === false) return;
+                showToast(
+                    status === 'done'
+                        ? formatTaskMarkedDoneMessage(task.title)
+                        : formatTaskMovedMessage(task.title, status),
+                    'info',
+                    5000,
+                    {
+                        label: undoLabel,
+                        onClick: undo,
+                    }
+                );
+            })
+            .catch((error) => reportError('Failed to change task status', error));
+    }, [formatTaskMarkedDoneMessage, formatTaskMovedMessage, pickFallbackTaskElement, settings.undoNotificationsEnabled, showToast, undoLabel]);
 
     const fallbackDeleteSelected = useCallback(() => {
         const selectedElement = pickFallbackTaskElement();
         const selectedTaskId = selectedElement?.dataset.taskId;
         if (!selectedTaskId) return;
         const state = useTaskStore.getState();
-        void state.deleteTask(selectedTaskId);
+        void state.deleteTask(selectedTaskId)
+            .then((result) => {
+                if (!result.success) {
+                    throw new Error(result.error || 'Failed to delete task');
+                }
+                const undo = registerUndoableAction(() => {
+                    void state.restoreTask(selectedTaskId);
+                });
+                if (settings.undoNotificationsEnabled === false) return;
+                const deletedMessageRaw = t('list.taskDeleted');
+                const deletedMessage = deletedMessageRaw && deletedMessageRaw !== 'list.taskDeleted'
+                    ? deletedMessageRaw
+                    : 'Task deleted';
+                showToast(
+                    deletedMessage,
+                    'info',
+                    5000,
+                    {
+                        label: undoLabel,
+                        onClick: undo,
+                    }
+                );
+            })
+            .catch((error) => reportError('Failed to delete task', error));
         if (fallbackSelectedTaskIdRef.current === selectedTaskId) {
             fallbackSelectedTaskIdRef.current = null;
         }
-    }, [pickFallbackTaskElement]);
+    }, [pickFallbackTaskElement, settings.undoNotificationsEnabled, showToast, t, undoLabel]);
 
     const fallbackTaskListScope = useMemo<TaskListScope>(() => ({
         kind: 'taskList',
@@ -369,18 +527,22 @@ export function KeybindingProvider({
         selectFirst: fallbackSelectFirst,
         selectLast: fallbackSelectLast,
         editSelected: fallbackEditSelected,
+        openSelected: fallbackOpenSelected,
+        openQuickActions: fallbackOpenQuickActionsSelected,
         toggleDoneSelected: fallbackToggleDoneSelected,
         deleteSelected: fallbackDeleteSelected,
-        focusAddInput: focusFallbackFilterInput,
+        setStatusSelected: fallbackSetStatusSelected,
     }), [
         fallbackDeleteSelected,
         fallbackEditSelected,
+        fallbackOpenQuickActionsSelected,
+        fallbackOpenSelected,
         fallbackSelectFirst,
         fallbackSelectLast,
         fallbackSelectNext,
         fallbackSelectPrev,
+        fallbackSetStatusSelected,
         fallbackToggleDoneSelected,
-        focusFallbackFilterInput,
     ]);
 
     const getActiveScope = useCallback((): TaskListScope => {
@@ -398,7 +560,9 @@ export function KeybindingProvider({
             const { getCurrentWindow } = await import('@tauri-apps/api/window');
             const current = getCurrentWindow();
             const isFullscreen = await current.isFullscreen();
-            await current.setFullscreen(!isFullscreen);
+            const nextFullscreen = !isFullscreen;
+            await current.setFullscreen(nextFullscreen);
+            saveStoredFullscreen(nextFullscreen, localStorage);
         } catch (error) {
             void logWarn('Failed to toggle fullscreen', {
                 scope: 'keybinding',
@@ -451,6 +615,7 @@ export function KeybindingProvider({
             }
             if (editingTaskIdRef.current) return;
             if (isEditableTarget(e.target)) return;
+            if (hasModalDialogOpen()) return;
 
             const scope = getActiveScope();
             const now = Date.now();
@@ -467,7 +632,7 @@ export function KeybindingProvider({
                     } else if (vimGoMap[e.key]) {
                         onNavigate(vimGoMap[e.key]);
                     }
-                } else if (pending === 'a') {
+                } else if (pending === 'A') {
                     applyAreaFilterShortcut(e.key);
                 } else if (pending === 'd') {
                     if (e.key === 'd') {
@@ -513,13 +678,18 @@ export function KeybindingProvider({
                     e.preventDefault();
                     scope?.editSelected();
                     break;
+                case '.':
+                    e.preventDefault();
+                    scope?.openQuickActions?.();
+                    break;
                 case 'x':
                     e.preventDefault();
                     scope?.toggleDoneSelected();
                     break;
-                case 'o':
+                case 'Enter':
+                    if (hasInteractiveFocus()) break;
                     e.preventDefault();
-                    scope?.focusAddInput?.();
+                    scope?.openSelected?.();
                     break;
                 case '/':
                     e.preventDefault();
@@ -530,8 +700,126 @@ export function KeybindingProvider({
                     setIsHelpOpen(true);
                     break;
                 case 'g':
-                case 'a':
                 case 'd':
+                    e.preventDefault();
+                    pendingRef.current = { key: e.key, timestamp: now };
+                    break;
+                default:
+                    break;
+            }
+        };
+
+        // Gmail/Superhuman/Todoist-style task-action cluster: e done, x select,
+        // Enter open, z undo, # delete. Navigation matches the Vim preset since
+        // Gmail uses j/k and g-chords too.
+        const handleStandard = (e: KeyboardEvent) => {
+            if (e.metaKey || e.ctrlKey || e.altKey) return;
+            if (e.key === 'F11') {
+                if (isTauriRuntime()) {
+                    e.preventDefault();
+                    void toggleFullscreen();
+                }
+                return;
+            }
+            if (editingTaskIdRef.current) return;
+            if (isEditableTarget(e.target)) return;
+            if (hasModalDialogOpen()) return;
+
+            const scope = getActiveScope();
+            const now = Date.now();
+            if (pendingRef.current.key && now - pendingRef.current.timestamp > 700) {
+                pendingRef.current.key = null;
+            }
+
+            const pending = pendingRef.current.key;
+            if (pending) {
+                e.preventDefault();
+                if (pending === 'g') {
+                    if (e.key === 'g') {
+                        scope?.selectFirst();
+                    } else if (vimGoMap[e.key]) {
+                        onNavigate(vimGoMap[e.key]);
+                    }
+                } else if (pending === 'A') {
+                    applyAreaFilterShortcut(e.key);
+                }
+                pendingRef.current.key = null;
+                return;
+            }
+
+            switch (e.key) {
+                case 'j':
+                    if (moveSidebarFocus(e.target, 'next')) {
+                        e.preventDefault();
+                        break;
+                    }
+                    e.preventDefault();
+                    scope?.selectNext();
+                    break;
+                case 'k':
+                    if (moveSidebarFocus(e.target, 'prev')) {
+                        e.preventDefault();
+                        break;
+                    }
+                    e.preventDefault();
+                    scope?.selectPrev();
+                    break;
+                case 'h':
+                    if (focusSidebarCurrentView(currentView)) {
+                        e.preventDefault();
+                    }
+                    break;
+                case 'l':
+                    if (focusMainContent()) {
+                        e.preventDefault();
+                    }
+                    break;
+                case 'G':
+                    e.preventDefault();
+                    scope?.selectLast();
+                    break;
+                case 'e':
+                    e.preventDefault();
+                    scope?.toggleDoneSelected();
+                    break;
+                case 'x':
+                    e.preventDefault();
+                    scope?.toggleSelectSelected?.();
+                    break;
+                case '#':
+                    e.preventDefault();
+                    scope?.deleteSelected();
+                    break;
+                case 'z': {
+                    const undo = takeUndoableAction();
+                    if (undo) {
+                        e.preventDefault();
+                        undo();
+                    }
+                    break;
+                }
+                case 'Enter':
+                    if (hasInteractiveFocus()) break;
+                    e.preventDefault();
+                    if (e.shiftKey) {
+                        scope?.editSelected();
+                    } else {
+                        scope?.openSelected?.();
+                    }
+                    break;
+                case '.':
+                    e.preventDefault();
+                    scope?.openQuickActions?.();
+                    break;
+                case '/':
+                    e.preventDefault();
+                    triggerGlobalSearch();
+                    break;
+                case '?':
+                    e.preventDefault();
+                    setIsHelpOpen(true);
+                    break;
+                case 'g':
                     e.preventDefault();
                     pendingRef.current = { key: e.key, timestamp: now };
                     break;
@@ -550,7 +838,15 @@ export function KeybindingProvider({
             }
             if (editingTaskIdRef.current) return;
             if (isEditableTarget(e.target)) return;
+            if (hasModalDialogOpen()) return;
             const scope = getActiveScope();
+
+            if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key === 'Enter') {
+                if (hasInteractiveFocus()) return;
+                e.preventDefault();
+                scope?.openSelected?.();
+                return;
+            }
 
             if (e.altKey && !e.ctrlKey && !e.metaKey) {
                 const view = emacsAltMap[e.key];
@@ -575,6 +871,10 @@ export function KeybindingProvider({
                         e.preventDefault();
                         scope?.editSelected();
                         break;
+                    case '.':
+                        e.preventDefault();
+                        scope?.openQuickActions?.();
+                        break;
                     case 't':
                         e.preventDefault();
                         scope?.toggleDoneSelected();
@@ -582,10 +882,6 @@ export function KeybindingProvider({
                     case 'd':
                         e.preventDefault();
                         scope?.deleteSelected();
-                        break;
-                    case 'o':
-                        e.preventDefault();
-                        scope?.focusAddInput?.();
                         break;
                     case 's':
                         e.preventDefault();
@@ -627,12 +923,71 @@ export function KeybindingProvider({
                 }
                 return;
             }
+            // An open menu owns the keyboard: don't fire list shortcuts (j/k,
+            // e, x, dd…) while focus sits on a menu item (#848).
+            if (e.target instanceof HTMLElement && e.target.closest('[role="menu"]')) return;
+            // Same for modal dialogs: arrows and app shortcuts must not reach
+            // the list behind global search / quick add / prompts.
+            if (hasModalDialogOpen()) return;
             if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.code === 'Comma') {
                 e.preventDefault();
                 onNavigate('settings');
                 return;
             }
+            if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'z' && !isEditableTarget(e.target)) {
+                const undo = takeUndoableAction();
+                if (undo) {
+                    e.preventDefault();
+                    undo();
+                }
+                return;
+            }
             if (!e.metaKey && !e.ctrlKey && !e.altKey && !isEditableTarget(e.target)) {
+                const appShortcutKey = getAppScopedShortcutKey(e);
+                const now = Date.now();
+                if ((pendingRef.current.key === 'A' || pendingRef.current.key === 's') && now - pendingRef.current.timestamp > 700) {
+                    pendingRef.current.key = null;
+                }
+                if (pendingRef.current.key === 'A') {
+                    e.preventDefault();
+                    applyAreaFilterShortcut(appShortcutKey);
+                    pendingRef.current.key = null;
+                    return;
+                }
+                if (pendingRef.current.key === 's') {
+                    e.preventDefault();
+                    const status = STATUS_CHORD_MAP[e.key];
+                    if (status) {
+                        getActiveScope().setStatusSelected?.(status);
+                    }
+                    pendingRef.current.key = null;
+                    return;
+                }
+                if (!pendingRef.current.key && appShortcutKey === 'A') {
+                    e.preventDefault();
+                    pendingRef.current = { key: 'A', timestamp: now };
+                    return;
+                }
+                if (!pendingRef.current.key && appShortcutKey === 'a') {
+                    e.preventDefault();
+                    triggerQuickAdd();
+                    return;
+                }
+                if (!pendingRef.current.key && appShortcutKey === 's') {
+                    e.preventDefault();
+                    pendingRef.current = { key: 's', timestamp: now };
+                    return;
+                }
+                if (e.key === 'Insert') {
+                    const scope = getActiveScope();
+                    e.preventDefault();
+                    if (scope.focusAddInput) {
+                        scope.focusAddInput();
+                    } else {
+                        triggerQuickAdd();
+                    }
+                    return;
+                }
                 if (e.key === 'ArrowDown') {
                     if (moveSidebarFocus(e.target, 'next')) {
                         e.preventDefault();
@@ -651,13 +1006,13 @@ export function KeybindingProvider({
                     getActiveScope().selectPrev();
                     return;
                 }
-                if (style === 'vim' && e.key === 'ArrowLeft') {
+                if (style !== 'emacs' && e.key === 'ArrowLeft') {
                     if (focusSidebarCurrentView(currentView)) {
                         e.preventDefault();
                         return;
                     }
                 }
-                if (style === 'vim' && e.key === 'ArrowRight') {
+                if (style !== 'emacs' && e.key === 'ArrowRight') {
                     if (focusMainContent()) {
                         e.preventDefault();
                         return;
@@ -698,6 +1053,8 @@ export function KeybindingProvider({
             }
             if (style === 'emacs') {
                 handleEmacs(e);
+            } else if (style === 'standard') {
+                handleStandard(e);
             } else {
                 handleVim(e);
             }
@@ -721,8 +1078,13 @@ export function KeybindingProvider({
         applyAreaFilterShortcut,
     ]);
 
+    // Only apply the shortcut once the settings document has loaded (deviceId is
+    // stamped on every load). Before that, `quickAddShortcut` is the platform
+    // default, and persisting the registration fallback into the not-yet-loaded
+    // store wiped the on-disk data on machines where registration fails (#852).
+    const isStoreHydrated = Boolean(settings.deviceId);
     useEffect(() => {
-        if (isTest || !isTauriRuntime()) return;
+        if (isTest || !isTauriRuntime() || !isStoreHydrated) return;
         let cancelled = false;
         import('@tauri-apps/api/core')
             .then(({ invoke }) =>
@@ -730,7 +1092,11 @@ export function KeybindingProvider({
             )
             .then((result) => {
                 if (cancelled) return;
-                const appliedShortcut = normalizeGlobalQuickAddShortcut(result?.shortcut, { isMac, isWindows });
+                const appliedShortcut = normalizeGlobalQuickAddShortcut(result?.shortcut, {
+                    isFlatpak: isFlatpakRuntime(),
+                    isMac,
+                    isWindows,
+                });
                 if (result?.warning) {
                     showToast(result.warning, 'info', 6000);
                 }
@@ -746,7 +1112,7 @@ export function KeybindingProvider({
         return () => {
             cancelled = true;
         };
-    }, [isTest, isMac, isWindows, quickAddShortcut, showToast, updateSettings]);
+    }, [isTest, isMac, isWindows, isStoreHydrated, quickAddShortcut, showToast, updateSettings]);
 
     const contextValue = useMemo<KeybindingContextType>(() => ({
         style,

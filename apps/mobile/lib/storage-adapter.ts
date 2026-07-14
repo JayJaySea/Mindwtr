@@ -1,18 +1,28 @@
-import { AppData, SqliteAdapter, searchAll, type SqliteClient, StorageAdapter } from '@mindwtr/core';
+import { AppData, SqliteAdapter, searchAll, type SqliteClient, type CalendarSyncEntry, StorageAdapter, type Task } from '@mindwtr/core';
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { WIDGET_DATA_KEY } from './widget-data';
 import { updateMobileWidgetFromData } from './widget-service';
-import { logError, logWarn } from './app-log';
+import { logError, logInfo, logWarn } from './app-log';
 import { markStartupPhase, measureStartupPhase } from './startup-profiler';
 
 const DATA_KEY = WIDGET_DATA_KEY;
+const STARTUP_BACKUP_VERSION_KEY = `${DATA_KEY}:startup-backup-version`;
+const STARTUP_BACKUP_UPDATED_AT_KEY = `${DATA_KEY}:startup-backup-updated-at`;
+const STARTUP_BACKUP_VERSION = '2';
 const LEGACY_DATA_KEYS = ['focus-gtd-data', 'gtd-todo-data', 'gtd-data'];
-const EMPTY_APP_DATA: AppData = { tasks: [], projects: [], sections: [], areas: [], settings: {} };
+const EMPTY_APP_DATA: AppData = { tasks: [], projects: [], sections: [], areas: [], people: [], settings: {} };
 const SQLITE_STARTUP_TIMEOUT_MS = 3_500;
 const SQLITE_QUERY_TIMEOUT_MS = 2_500;
 const SQLITE_RETRY_COOLDOWN_MS = 60_000;
+// Cap how long a read may block on in-flight writes so a stalled save (e.g. a
+// lost-promise native call) degrades to the existing fallback instead of hanging the UI.
+const SQLITE_WRITE_WAIT_TIMEOUT_MS = 3_000;
+// Diagnostics: only log waits/saves slow enough to matter, to keep the shared beta log readable.
+const SQLITE_WRITE_WAIT_LOG_THRESHOLD_MS = 50;
+const SQLITE_SLOW_WRITE_LOG_THRESHOLD_MS = 300;
 
 let saveQueue: Promise<void> = Promise.resolve();
 
@@ -21,10 +31,19 @@ const enqueueSave = async (work: () => Promise<void>): Promise<void> => {
     saveQueue = next.catch(() => undefined);
     return next;
 };
+
+const waitForQueuedSqliteWrites = async (): Promise<void> => {
+    while (true) {
+        const pendingSave = saveQueue;
+        await pendingSave.catch(() => undefined);
+        if (pendingSave === saveQueue) return;
+    }
+};
+
 const SQLITE_DB_NAME = 'mindwtr.db';
-const PREFER_LEGACY_SQLITE_OPEN = true;
-const sqliteSyncOpenEnv = String(process.env.EXPO_PUBLIC_SQLITE_SYNC_OPEN || '').trim().toLowerCase();
-const ENABLE_SYNC_SQLITE_OPEN = sqliteSyncOpenEnv === '1' || sqliteSyncOpenEnv === 'true';
+// expo-sqlite stored the database under <documentDirectory>/SQLite; op-sqlite must
+// open the exact same directory or existing installs would come up empty (ADR 0024).
+const SQLITE_DIRECTORY_NAME = 'SQLite';
 
 type SqliteState = {
     adapter: SqliteAdapter;
@@ -32,9 +51,19 @@ type SqliteState = {
 };
 
 let sqliteStatePromise: Promise<SqliteState> | null = null;
+let sqliteOpenMode = 'unknown';
+let sqliteDbPath: string | null = null;
+let sqliteJournalDiagnostics: Record<string, string> | null = null;
 let preferJsonBackup = false;
 let preferJsonBackupUntil = 0;
 let didWarnPreferJsonBackup = false;
+let latestQueuedWriteStartedAtMs = 0;
+
+const markQueuedWriteStarted = (): number => {
+    const startedAtMs = Math.max(Date.now(), latestQueuedWriteStartedAtMs + 1);
+    latestQueuedWriteStartedAtMs = startedAtMs;
+    return startedAtMs;
+};
 
 const formatError = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const buildStorageExtra = (message?: string, error?: unknown): Record<string, string> | undefined => {
@@ -49,8 +78,13 @@ const buildStorageExtra = (message?: string, error?: unknown): Record<string, st
     return Object.keys(extra).length ? extra : undefined;
 };
 
-const logStorageWarn = (message: string, error?: unknown) => {
-    void logWarn(message, { scope: 'storage', extra: buildStorageExtra(undefined, error) });
+const logStorageWarn = (message: string, error?: unknown, extra?: Record<string, string>) => {
+    void logWarn(message, { scope: 'storage', extra: { ...buildStorageExtra(undefined, error), ...extra } });
+};
+
+// Diagnostic breadcrumb for the shared beta log; only written when diagnostics logging is on.
+const logStorageInfo = (message: string, extra?: Record<string, string>) => {
+    void logInfo(message, { scope: 'storage', extra });
 };
 
 const logStorageError = (message: string, error?: unknown) => {
@@ -60,7 +94,7 @@ const logStorageError = (message: string, error?: unknown) => {
 
 const warnPreferJsonBackup = () => {
     if (didWarnPreferJsonBackup) return;
-    logStorageWarn('[Storage] SQLite unavailable; using JSON backup for reads until restart.');
+    logStorageWarn('[Storage] SQLite unavailable; using JSON backup for reads until SQLite recovers.');
     didWarnPreferJsonBackup = true;
 };
 
@@ -78,6 +112,33 @@ const withOperationTimeout = async <T>(promise: Promise<T>, timeoutMs: number, m
     }
 };
 
+// Wait for in-flight SQLite writes to finish before reading, but bounded: a save that
+// stalls must not strand reads (each read site falls back when this throws).
+const awaitQueuedSqliteWrites = async (phase: string): Promise<void> => {
+    const startedAt = Date.now();
+    try {
+        await withOperationTimeout(
+            waitForQueuedSqliteWrites(),
+            SQLITE_WRITE_WAIT_TIMEOUT_MS,
+            `Timed out waiting for queued SQLite writes before ${phase}`
+        );
+    } catch (error) {
+        logStorageWarn('[Storage] Gave up waiting for queued SQLite writes; falling back', error, {
+            phase,
+            waitedMs: String(Date.now() - startedAt),
+        });
+        throw error;
+    }
+    const waitedMs = Date.now() - startedAt;
+    if (waitedMs >= SQLITE_WRITE_WAIT_LOG_THRESHOLD_MS) {
+        logStorageInfo('[Storage] Read waited for queued SQLite writes', {
+            phase,
+            waitedMs: String(waitedMs),
+            ...(sqliteJournalDiagnostics ?? {}),
+        });
+    }
+};
+
 const shouldUseJsonBackupFastPath = () => preferJsonBackup && Date.now() < preferJsonBackupUntil;
 
 const markPreferJsonBackup = () => {
@@ -92,25 +153,19 @@ const clearPreferJsonBackup = () => {
     didWarnPreferJsonBackup = false;
 };
 
-const createLegacyClient = (db: any): SqliteClient => {
-    const execSql = (sql: string, params: unknown[] = []) =>
-        new Promise<any>((resolve, reject) => {
-            db.transaction(
-                (tx: any) => {
-                    tx.executeSql(
-                        sql,
-                        params,
-                        (_: any, result: any) => resolve(result),
-                        (_: any, error: any) => {
-                            reject(error);
-                            return true;
-                        }
-                    );
-                },
-                (error: any) => reject(error)
-            );
-        });
+const createOpSqliteClient = (db: any): SqliteClient => {
+    const execSql = (sql: string, params: unknown[] = []) => {
+        // op-sqlite rejects undefined bindings; the adapter's row builders emit null,
+        // so mapping here only guards stray callers.
+        const args = params.map((value) => (value === undefined ? null : value));
+        return db.execute(sql, args);
+    };
 
+    // op-sqlite prepares a single statement per execute call, so multi-statement
+    // schema strings are split and run one by one on the shared connection. Each
+    // statement executes directly (no wrapper transaction), so connection pragmas
+    // (journal_mode) apply for real and the adapter's explicit BEGIN IMMEDIATE…COMMIT
+    // stays intact instead of committing per statement (#766).
     const exec = async (sql: string) => {
         const statements = sql
             .split(';')
@@ -127,90 +182,78 @@ const createLegacyClient = (db: any): SqliteClient => {
         },
         all: async <T = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
             const result = await execSql(sql, params);
-            const rows = result?.rows;
-            if (!rows) return [] as T[];
-            if (Array.isArray(rows._array)) return rows._array as T[];
-            const collected: T[] = [];
-            for (let i = 0; i < rows.length; i += 1) {
-                collected.push(rows.item(i));
-            }
-            return collected;
+            return (result?.rows ?? []) as T[];
         },
         get: async <T = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
             const result = await execSql(sql, params);
             const rows = result?.rows;
             if (!rows || rows.length === 0) return undefined;
-            if (Array.isArray(rows._array)) return rows._array[0] as T;
-            return rows.item(0) as T;
+            return rows[0] as T;
         },
         exec,
     };
 };
 
+const stripFileUriScheme = (uri: string) => uri.replace(/^file:\/\//, '');
+
+const resolveSqliteDirectoryUri = (): string | null => {
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const FileSystem = require('expo-file-system');
+        const documentUri: string | undefined = FileSystem?.Paths?.document?.uri;
+        if (documentUri) {
+            return `${documentUri.replace(/\/+$/, '')}/${SQLITE_DIRECTORY_NAME}`;
+        }
+    } catch {
+        // fall through to the legacy API
+    }
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const LegacyFileSystem = require('expo-file-system/legacy');
+        const documentDirectory: string | null | undefined = LegacyFileSystem?.documentDirectory;
+        if (documentDirectory) {
+            return `${documentDirectory.replace(/\/+$/, '')}/${SQLITE_DIRECTORY_NAME}`;
+        }
+    } catch {
+        // resolved below as an error
+    }
+    return null;
+};
+
+// Fresh installs have no <documentDirectory>/SQLite yet; sqlite3_open does not
+// create missing parent directories.
+const ensureSqliteDirectoryExists = (directoryUri: string): void => {
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const FileSystem = require('expo-file-system');
+        if (typeof FileSystem?.Directory === 'function') {
+            const directory = new FileSystem.Directory(directoryUri);
+            if (!directory.exists) {
+                directory.create({ intermediates: true });
+            }
+        }
+    } catch (error) {
+        logStorageWarn('[Storage] Failed to ensure SQLite directory exists', error, { directoryUri });
+    }
+};
+
 const createSqliteClient = async (): Promise<SqliteClient> => {
     markStartupPhase('mobile.storage.sqlite_client.create:start');
     // Use require to avoid async bundle loading in dev client.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const SQLite = require('expo-sqlite');
-    if (PREFER_LEGACY_SQLITE_OPEN && typeof (SQLite as any).openDatabase === 'function') {
-        const legacyDb = (SQLite as any).openDatabase(SQLITE_DB_NAME);
-        markStartupPhase('mobile.storage.sqlite_client.create:end', { mode: 'legacy_preferred' });
-        return createLegacyClient(legacyDb);
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { open } = require('@op-engineering/op-sqlite');
+    const directoryUri = resolveSqliteDirectoryUri();
+    if (!directoryUri) {
+        // Opening at op-sqlite's default location would look like an empty database
+        // to existing installs; failing here routes callers to the JSON backup instead.
+        throw new Error('Could not resolve the SQLite directory');
     }
-    const openDatabaseSync = (SQLite as any).openDatabaseSync as ((name: string) => any) | undefined;
-    if (ENABLE_SYNC_SQLITE_OPEN && openDatabaseSync) {
-        try {
-            const db = openDatabaseSync(SQLITE_DB_NAME);
-            if (db?.runAsync && db?.getAllAsync && db?.getFirstAsync && db?.execAsync) {
-                markStartupPhase('mobile.storage.sqlite_client.create:end', { mode: 'sync' });
-                return {
-                    run: async (sql: string, params: unknown[] = []) => {
-                        await db.runAsync(sql, params);
-                    },
-                    all: async <T = Record<string, unknown>>(sql: string, params: unknown[] = []) =>
-                        db.getAllAsync(sql, params) as Promise<T[]>,
-                    get: async <T = Record<string, unknown>>(sql: string, params: unknown[] = []) =>
-                        (await db.getFirstAsync(sql, params)) as T | undefined,
-                    exec: async (sql: string) => {
-                        await db.execAsync(sql);
-                    },
-                };
-            }
-        } catch (error) {
-            if (__DEV__) {
-                logStorageWarn('[Storage] Sync SQLite open failed; falling back', error);
-            }
-        }
-    }
-    const openDatabaseAsync = (SQLite as any).openDatabaseAsync as ((name: string) => Promise<any>) | undefined;
-    if (openDatabaseAsync) {
-        try {
-            const db = await openDatabaseAsync(SQLITE_DB_NAME);
-            if (db?.runAsync && db?.getAllAsync && db?.getFirstAsync && db?.execAsync) {
-                markStartupPhase('mobile.storage.sqlite_client.create:end', { mode: 'async' });
-                return {
-                    run: async (sql: string, params: unknown[] = []) => {
-                        await db.runAsync(sql, params);
-                    },
-                    all: async <T = Record<string, unknown>>(sql: string, params: unknown[] = []) =>
-                        db.getAllAsync(sql, params) as Promise<T[]>,
-                    get: async <T = Record<string, unknown>>(sql: string, params: unknown[] = []) =>
-                        (await db.getFirstAsync(sql, params)) as T | undefined,
-                    exec: async (sql: string) => {
-                        await db.execAsync(sql);
-                    },
-                };
-            }
-        } catch (error) {
-            if (__DEV__) {
-                logStorageWarn('[Storage] Async SQLite open failed, falling back to legacy API', error);
-            }
-        }
-    }
-
-    const legacyDb = (SQLite as any).openDatabase(SQLITE_DB_NAME);
-    markStartupPhase('mobile.storage.sqlite_client.create:end', { mode: 'legacy' });
-    return createLegacyClient(legacyDb);
+    ensureSqliteDirectoryExists(directoryUri);
+    const db = open({ name: SQLITE_DB_NAME, location: stripFileUriScheme(directoryUri) });
+    sqliteDbPath = typeof db.getDbPath === 'function' ? String(db.getDbPath()) : null;
+    sqliteOpenMode = 'op-sqlite';
+    markStartupPhase('mobile.storage.sqlite_client.create:end', { mode: 'op-sqlite' });
+    return createOpSqliteClient(db);
 };
 
 const sqliteHasAnyData = async (client: SqliteClient): Promise<boolean> => {
@@ -240,24 +283,181 @@ const getLegacyJson = async (AsyncStorage: any): Promise<string | null> => {
     return null;
 };
 
+const normalizeStoredAppData = (data: AppData): AppData => ({
+    tasks: Array.isArray(data.tasks) ? data.tasks : [],
+    projects: Array.isArray(data.projects) ? data.projects : [],
+    sections: Array.isArray(data.sections) ? data.sections : [],
+    areas: Array.isArray(data.areas) ? data.areas : [],
+    people: Array.isArray(data.people) ? data.people : [],
+    settings: data.settings && typeof data.settings === 'object' ? data.settings : {},
+});
+
+const parseStoredAppDataJson = (jsonValue: string): AppData => (
+    normalizeStoredAppData(JSON.parse(jsonValue) as AppData)
+);
+
+const saveStartupJsonBackup = async (
+    AsyncStorage: any,
+    data: AppData,
+    phasePrefix: string,
+    minimumUpdatedAtMs = 0,
+): Promise<void> => {
+    const jsonValue = await measureStartupPhase(`${phasePrefix}.json_backup_stringify`, async () => JSON.stringify(data));
+    const updatedAtMs = Math.max(Date.now(), minimumUpdatedAtMs);
+    await measureStartupPhase(`${phasePrefix}.json_backup_set`, async () =>
+        AsyncStorage.setItem(DATA_KEY, jsonValue)
+    );
+    await measureStartupPhase(`${phasePrefix}.json_backup_version_set`, async () =>
+        AsyncStorage.setItem(STARTUP_BACKUP_VERSION_KEY, STARTUP_BACKUP_VERSION)
+    );
+    await measureStartupPhase(`${phasePrefix}.json_backup_updated_at_set`, async () =>
+        AsyncStorage.setItem(STARTUP_BACKUP_UPDATED_AT_KEY, String(updatedAtMs))
+    );
+};
+
+// The full-dataset JSON backup (stringify + AsyncStorage write) and the widget
+// render took multiple seconds per save on large libraries and ran inside the
+// save queue, so every read and every following tap waited on them (#766).
+// Saves whose SQLite write succeeded only *schedule* the backup here: a single
+// pending slot keeps the newest payload, a trailing timer coalesces bursts, and
+// one serialized writer preserves write order. Paths where the backup IS the
+// durable copy (SQLite failure) or where a fallback read is about to trust it
+// await flushPendingStartupJsonBackup() to keep the freshness invariant
+// (backupUpdatedAt >= latestQueuedWriteStartedAt) observable at read time.
+const JSON_BACKUP_COALESCE_MS = 1_000;
+
+type PendingJsonBackup = {
+    data: AppData;
+    phasePrefix: string;
+    minimumUpdatedAtMs: number;
+    coalescedSaves: number;
+};
+
+let pendingJsonBackup: PendingJsonBackup | null = null;
+let jsonBackupTimer: ReturnType<typeof setTimeout> | null = null;
+let jsonBackupWriter: Promise<void> = Promise.resolve();
+
+const writePendingJsonBackup = async (): Promise<void> => {
+    const pending = pendingJsonBackup;
+    if (!pending) return;
+    pendingJsonBackup = null;
+    const backupStartedAt = Date.now();
+    await saveStartupJsonBackup(AsyncStorage, pending.data, pending.phasePrefix, pending.minimumUpdatedAtMs);
+    const jsonBackupMs = Date.now() - backupStartedAt;
+    const widgetStartedAt = Date.now();
+    try {
+        await measureStartupPhase(`${pending.phasePrefix}.widget_update`, async () =>
+            updateMobileWidgetFromData(pending.data)
+        );
+    } catch (error) {
+        logStorageWarn('[Widgets] Failed to update mobile widget after backup', error);
+    }
+    const widgetMs = Date.now() - widgetStartedAt;
+    if (jsonBackupMs + widgetMs >= SQLITE_SLOW_WRITE_LOG_THRESHOLD_MS) {
+        logStorageInfo('[Storage] Slow post-save backup', {
+            jsonBackupMs: String(jsonBackupMs),
+            widgetMs: String(widgetMs),
+            coalescedSaves: String(pending.coalescedSaves),
+        });
+    }
+};
+
+const drainJsonBackupQueue = (): Promise<void> => {
+    jsonBackupWriter = jsonBackupWriter
+        .catch(() => undefined)
+        .then(async () => {
+            while (pendingJsonBackup) {
+                await writePendingJsonBackup();
+            }
+        });
+    return jsonBackupWriter;
+};
+
+const scheduleStartupJsonBackup = (
+    data: AppData,
+    phasePrefix: string,
+    minimumUpdatedAtMs = 0,
+): void => {
+    pendingJsonBackup = {
+        data,
+        phasePrefix,
+        minimumUpdatedAtMs: Math.max(pendingJsonBackup?.minimumUpdatedAtMs ?? 0, minimumUpdatedAtMs),
+        coalescedSaves: (pendingJsonBackup?.coalescedSaves ?? 0) + 1,
+    };
+    if (jsonBackupTimer) return;
+    jsonBackupTimer = setTimeout(() => {
+        jsonBackupTimer = null;
+        void drainJsonBackupQueue().catch((error) => {
+            logStorageWarn('[Storage] Deferred JSON backup failed', error);
+        });
+    }, JSON_BACKUP_COALESCE_MS);
+};
+
+const flushPendingStartupJsonBackup = async (): Promise<void> => {
+    if (jsonBackupTimer) {
+        clearTimeout(jsonBackupTimer);
+        jsonBackupTimer = null;
+    }
+    await drainJsonBackupQueue();
+};
+
+const readStartupJsonBackupUpdatedAt = async (AsyncStorage: any): Promise<number | null> => {
+    const raw = await AsyncStorage.getItem(STARTUP_BACKUP_UPDATED_AT_KEY);
+    if (raw == null) return null;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const assertJsonBackupFreshEnough = async (AsyncStorage: any, phase: string): Promise<void> => {
+    if (latestQueuedWriteStartedAtMs <= 0) return;
+    const backupUpdatedAtMs = await readStartupJsonBackupUpdatedAt(AsyncStorage);
+    if (backupUpdatedAtMs !== null && backupUpdatedAtMs >= latestQueuedWriteStartedAtMs) return;
+    logStorageWarn('[Storage] Refusing stale JSON backup fallback', undefined, {
+        phase,
+        backupUpdatedAtMs: backupUpdatedAtMs === null ? 'missing' : String(backupUpdatedAtMs),
+        latestQueuedWriteStartedAtMs: String(latestQueuedWriteStartedAtMs),
+    });
+    throw new Error('JSON backup is older than the latest queued SQLite write. Please wait for the save to finish and try again.');
+};
+
+export const getMobileStartupSnapshotFromBackup = async (): Promise<AppData | null> => {
+    const backupVersion = await AsyncStorage.getItem(STARTUP_BACKUP_VERSION_KEY);
+    if (backupVersion !== STARTUP_BACKUP_VERSION) {
+        return null;
+    }
+    const jsonValue = await getLegacyJson(AsyncStorage);
+    if (jsonValue == null) {
+        return null;
+    }
+    try {
+        return parseStoredAppDataJson(jsonValue);
+    } catch (error) {
+        logStorageWarn('[Storage] Failed to parse startup JSON backup snapshot', error);
+        return null;
+    }
+};
+
 const initSqliteState = async (): Promise<SqliteState> => {
     markStartupPhase('mobile.storage.sqlite_init.start');
-    const AsyncStorage = require('@react-native-async-storage/async-storage').default;
-    let client = await measureStartupPhase('mobile.storage.sqlite_init.create_client', async () => createSqliteClient());
-    let adapter = new SqliteAdapter(client);
+    const client = await measureStartupPhase('mobile.storage.sqlite_init.create_client', async () => createSqliteClient());
+    const adapter = new SqliteAdapter(client);
+    await measureStartupPhase('mobile.storage.sqlite_init.ensure_schema', async () => adapter.ensureSchema());
+    // Diagnostic: confirm whether WAL actually took effect on this device. Init runs
+    // during the getData that loads the settings which enable diagnostic logging, so a
+    // log line written here is dropped — capture the values and attach them to the
+    // slow-save/read-wait logs that fire later instead.
     try {
-        await measureStartupPhase('mobile.storage.sqlite_init.ensure_schema', async () => adapter.ensureSchema());
+        const journalRow = await client.get<{ journal_mode?: string }>('PRAGMA journal_mode');
+        const busyRow = await client.get<{ timeout?: number }>('PRAGMA busy_timeout');
+        sqliteJournalDiagnostics = {
+            journalMode: String(journalRow?.journal_mode ?? 'unknown'),
+            busyTimeoutMs: String(busyRow?.timeout ?? 'unknown'),
+            openMode: sqliteOpenMode,
+            ...(sqliteDbPath ? { dbPath: sqliteDbPath } : {}),
+        };
+        logStorageInfo('[Storage] SQLite journal mode ready', sqliteJournalDiagnostics);
     } catch (error) {
-        if (__DEV__) {
-            logStorageWarn('[Storage] SQLite schema init failed, retrying with legacy API', error);
-        }
-        // Use require to avoid async bundle loading in dev client.
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const SQLite = require('expo-sqlite');
-        const legacyDb = (SQLite as any).openDatabase(SQLITE_DB_NAME);
-        client = createLegacyClient(legacyDb);
-        adapter = new SqliteAdapter(client);
-        await measureStartupPhase('mobile.storage.sqlite_init.ensure_schema_legacy_retry', async () => adapter.ensureSchema());
+        logStorageWarn('[Storage] Failed to read SQLite journal mode', error);
     }
     let hasData = false;
     try {
@@ -275,9 +475,7 @@ const initSqliteState = async (): Promise<SqliteState> => {
                 const data = JSON.parse(jsonValue) as AppData;
                 data.areas = Array.isArray(data.areas) ? data.areas : [];
                 // Ensure JSON backup is updated before SQLite migration so fallback stays consistent.
-                await measureStartupPhase('mobile.storage.sqlite_init.migrate_json_backup_set', async () =>
-                    AsyncStorage.setItem(DATA_KEY, JSON.stringify(data))
-                );
+                await saveStartupJsonBackup(AsyncStorage, data, 'mobile.storage.sqlite_init.migrate');
                 await measureStartupPhase('mobile.storage.sqlite_init.migrate_json_to_sqlite', async () => adapter.saveData(data));
             } catch (error) {
                 logStorageWarn('[Storage] Failed to migrate JSON data to SQLite', error);
@@ -317,7 +515,7 @@ const createStorage = (): StorageAdapter => {
         return {
             getData: async (): Promise<AppData> => {
                 if (typeof window === 'undefined') {
-                    return { tasks: [], projects: [], sections: [], areas: [], settings: {} };
+                    return { tasks: [], projects: [], sections: [], areas: [], people: [], settings: {} };
                 }
                 let jsonValue = localStorage.getItem(DATA_KEY);
                 if (jsonValue == null) {
@@ -331,12 +529,10 @@ const createStorage = (): StorageAdapter => {
                     }
                 }
                 if (jsonValue == null) {
-                    return { tasks: [], projects: [], sections: [], areas: [], settings: {} };
+                    return { tasks: [], projects: [], sections: [], areas: [], people: [], settings: {} };
                 }
                 try {
-                    const data = JSON.parse(jsonValue) as AppData;
-                    data.areas = Array.isArray(data.areas) ? data.areas : [];
-                    data.sections = Array.isArray(data.sections) ? data.sections : [];
+                    const data = parseStoredAppDataJson(jsonValue);
                     return data;
                 } catch (e) {
                     // JSON parse error - data corrupted, throw so user is notified
@@ -359,21 +555,23 @@ const createStorage = (): StorageAdapter => {
     }
 
     // Native platforms - use SQLite with AsyncStorage backup for widgets/rollback.
-    const AsyncStorage = require('@react-native-async-storage/async-storage').default;
     const shouldUseSqlite = Constants.appOwnership !== 'expo';
 
     return {
         getData: async (): Promise<AppData> => {
             markStartupPhase('mobile.storage.get_data.start');
-            const loadJsonBackup = async () => {
+            const loadJsonBackup = async (phase = 'get_data') => {
+                // A deferred backup may still be pending; land it before trusting
+                // the stored copy (and before the freshness assert reads its stamp).
+                await flushPendingStartupJsonBackup();
+                await assertJsonBackupFreshEnough(AsyncStorage, phase);
                 const jsonValue = await getLegacyJson(AsyncStorage);
                 if (jsonValue == null) {
                     return { ...EMPTY_APP_DATA };
                 }
                 if (jsonValue != null) {
                     try {
-                        const data = JSON.parse(jsonValue) as AppData;
-                        data.areas = Array.isArray(data.areas) ? data.areas : [];
+                        const data = parseStoredAppDataJson(jsonValue);
                         updateMobileWidgetFromData(data).catch((error) => {
                             logStorageWarn('[Widgets] Failed to update mobile widget from backup', error);
                         });
@@ -387,11 +585,11 @@ const createStorage = (): StorageAdapter => {
 
             if (shouldUseJsonBackupFastPath()) {
                 warnPreferJsonBackup();
-                return loadJsonBackup();
+                return loadJsonBackup('json_fast_path');
             }
             if (preferJsonBackup && !shouldUseSqlite) {
                 warnPreferJsonBackup();
-                return loadJsonBackup();
+                return loadJsonBackup('json_preferred_sqlite_disabled');
             }
             if (preferJsonBackup) {
                 warnPreferJsonBackup();
@@ -400,6 +598,10 @@ const createStorage = (): StorageAdapter => {
                 if (!shouldUseSqlite) {
                     throw new Error('SQLite disabled in Expo Go');
                 }
+                await measureStartupPhase(
+                    'mobile.storage.get_data.await_sqlite_writes',
+                    async () => awaitQueuedSqliteWrites('get_data')
+                );
                 const { adapter } = await measureStartupPhase('mobile.storage.get_data.sqlite_get_state', async () =>
                     withOperationTimeout(
                         getSqliteState(),
@@ -407,6 +609,7 @@ const createStorage = (): StorageAdapter => {
                         'SQLite initialization timed out'
                     )
                 );
+                const readStartedAt = Date.now();
                 const data = await measureStartupPhase('mobile.storage.get_data.sqlite_read', async () =>
                     withOperationTimeout(
                         adapter.getData(),
@@ -414,10 +617,12 @@ const createStorage = (): StorageAdapter => {
                         'SQLite read timed out'
                     )
                 );
+                const readMs = Date.now() - readStartedAt;
+                if (readMs >= SQLITE_SLOW_WRITE_LOG_THRESHOLD_MS) {
+                    logStorageInfo('[Storage] Slow SQLite load', { readMs: String(readMs), ...(sqliteJournalDiagnostics ?? {}) });
+                }
                 data.areas = Array.isArray(data.areas) ? data.areas : [];
-                updateMobileWidgetFromData(data).catch((error) => {
-                    logStorageWarn('[Widgets] Failed to update mobile widget from storage load', error);
-                });
+                scheduleStartupJsonBackup(data, 'mobile.storage.get_data', latestQueuedWriteStartedAtMs);
                 markStartupPhase('mobile.storage.get_data.widget_update_dispatched');
                 clearPreferJsonBackup();
                 markStartupPhase('mobile.storage.get_data.end');
@@ -429,21 +634,63 @@ const createStorage = (): StorageAdapter => {
                     logStorageWarn('[Storage] SQLite load failed, falling back to JSON backup', e);
                 }
                 markPreferJsonBackup();
-                const fallbackData = await measureStartupPhase('mobile.storage.get_data.json_fallback_read', async () => loadJsonBackup());
+                const fallbackData = await measureStartupPhase('mobile.storage.get_data.json_fallback_read', async () => loadJsonBackup('get_data_fallback'));
                 markStartupPhase('mobile.storage.get_data.end');
                 return fallbackData;
             }
         },
         saveData: async (data: AppData): Promise<void> => {
+            const enqueuedAtMs = Date.now();
             return enqueueSave(async () => {
                 markStartupPhase('mobile.storage.save_data.start');
+                const queueWaitMs = Date.now() - enqueuedAtMs;
+                const queuedWriteStartedAtMs = markQueuedWriteStarted();
                 try {
                     if (!shouldUseSqlite) {
                         throw new Error('SQLite disabled in Expo Go');
                     }
                     const { adapter } = await measureStartupPhase('mobile.storage.save_data.sqlite_get_state', async () => getSqliteState());
+                    // Sample JS-thread congestion alongside the write: a setTimeout(0)
+                    // that resolves late means the thread is starved, which inflates every
+                    // awaited SQL statement (large beginMs) without SQLite being at fault.
+                    // Not awaited, so it never delays the write; it has always resolved by
+                    // the time a save is slow enough to hit the log threshold.
+                    let eventLoopLagMs = -1;
+                    const lagProbeStartedAt = Date.now();
+                    setTimeout(() => {
+                        eventLoopLagMs = Date.now() - lagProbeStartedAt;
+                    }, 0);
+                    const writeStartedAt = Date.now();
                     await measureStartupPhase('mobile.storage.save_data.sqlite_write', async () => adapter.saveData(data));
+                    const writeMs = Date.now() - writeStartedAt;
+                    if (writeMs >= SQLITE_SLOW_WRITE_LOG_THRESHOLD_MS) {
+                        const stats = adapter.getLastSaveDataStats?.();
+                        logStorageInfo('[Storage] Slow SQLite save', {
+                            writeMs: String(writeMs),
+                            queueWaitMs: String(queueWaitMs),
+                            eventLoopLagMs: String(eventLoopLagMs),
+                            ...(stats
+                                ? {
+                                    rowsWritten: String(stats.writtenRows),
+                                    rowsRemoved: String(stats.removedRows),
+                                    rowsTotal: String(stats.totalRows),
+                                    incremental: String(stats.incremental),
+                                    settingsWritten: String(stats.settingsWritten),
+                                    sqlMs: String(stats.sqlMs),
+                                    sqlCount: String(stats.sqlCount),
+                                    beginMs: String(stats.beginMs),
+                                    commitMs: String(stats.commitMs),
+                                }
+                                : {}),
+                            ...(sqliteJournalDiagnostics ?? {}),
+                        });
+                    }
                     clearPreferJsonBackup();
+                    // SQLite is the durable copy; the JSON backup and widget render
+                    // land coalesced off the save queue so reads and following taps
+                    // never wait on them (#766).
+                    scheduleStartupJsonBackup(data, 'mobile.storage.save_data', queuedWriteStartedAtMs);
+                    markStartupPhase('mobile.storage.save_data.end');
                 } catch (error) {
                     markPreferJsonBackup();
                     if (__DEV__ && !shouldUseSqlite && String(error).includes('Expo Go')) {
@@ -451,18 +698,56 @@ const createStorage = (): StorageAdapter => {
                     } else {
                         logStorageWarn('[Storage] SQLite save failed, keeping JSON backup', error);
                     }
+                    try {
+                        // With SQLite down the JSON backup IS the durable copy; it
+                        // must land before this save reports success.
+                        scheduleStartupJsonBackup(data, 'mobile.storage.save_data.json_fallback', queuedWriteStartedAtMs);
+                        await flushPendingStartupJsonBackup();
+                        markStartupPhase('mobile.storage.save_data.end');
+                    } catch (e) {
+                        markStartupPhase('mobile.storage.save_data.error');
+                        logStorageError('Failed to save data', e);
+                        throw new Error('Failed to save data: ' + (e as Error).message);
+                    }
                 }
+            });
+        },
+        saveTask: async (task: Task, snapshot?: AppData): Promise<void> => {
+            return enqueueSave(async () => {
+                const queuedWriteStartedAtMs = markQueuedWriteStarted();
                 try {
-                    const jsonValue = await measureStartupPhase('mobile.storage.save_data.json_stringify', async () => JSON.stringify(data));
-                    await measureStartupPhase('mobile.storage.save_data.asyncstorage_set', async () =>
-                        AsyncStorage.setItem(DATA_KEY, jsonValue)
-                    );
-                    await measureStartupPhase('mobile.storage.save_data.widget_update', async () => updateMobileWidgetFromData(data));
-                    markStartupPhase('mobile.storage.save_data.end');
-                } catch (e) {
-                    markStartupPhase('mobile.storage.save_data.error');
-                    logStorageError('Failed to save data', e);
-                    throw new Error('Failed to save data: ' + (e as Error).message);
+                    if (!shouldUseSqlite) {
+                        throw new Error('SQLite disabled in Expo Go');
+                    }
+                    const { adapter } = await measureStartupPhase('mobile.storage.save_task.sqlite_get_state', async () => getSqliteState());
+                    const writeStartedAt = Date.now();
+                    await measureStartupPhase('mobile.storage.save_task.sqlite_write', async () => adapter.saveTask(task));
+                    const writeMs = Date.now() - writeStartedAt;
+                    clearPreferJsonBackup();
+                    if (snapshot) {
+                        scheduleStartupJsonBackup(snapshot, 'mobile.storage.save_task', queuedWriteStartedAtMs);
+                    }
+                    if (writeMs >= SQLITE_SLOW_WRITE_LOG_THRESHOLD_MS) {
+                        logStorageInfo('[Storage] Slow task save', {
+                            writeMs: String(writeMs),
+                        });
+                    }
+                } catch (error) {
+                    markPreferJsonBackup();
+                    logStorageWarn('[Storage] SQLite task save failed', error);
+                    if (!snapshot) {
+                        throw error;
+                    }
+
+                    try {
+                        // With SQLite down the JSON backup IS the durable copy; it
+                        // must land before this save reports success.
+                        scheduleStartupJsonBackup(snapshot, 'mobile.storage.save_task.json_fallback', queuedWriteStartedAtMs);
+                        await flushPendingStartupJsonBackup();
+                    } catch (fallbackError) {
+                        logStorageError('Failed to save task fallback data', fallbackError);
+                        throw new Error('Failed to save task: ' + (fallbackError as Error).message);
+                    }
                 }
             });
         },
@@ -484,6 +769,7 @@ const createStorage = (): StorageAdapter => {
                 });
             }
             try {
+                await awaitQueuedSqliteWrites('query_tasks');
                 const { adapter } = await withOperationTimeout(
                     getSqliteState(),
                     SQLITE_QUERY_TIMEOUT_MS,
@@ -521,6 +807,7 @@ const createStorage = (): StorageAdapter => {
                 return searchAll(data.tasks, data.projects, query);
             }
             try {
+                await awaitQueuedSqliteWrites('search_all');
                 const { adapter } = await withOperationTimeout(
                     getSqliteState(),
                     SQLITE_QUERY_TIMEOUT_MS,
@@ -544,3 +831,46 @@ const createStorage = (): StorageAdapter => {
 };
 
 export const mobileStorage = createStorage();
+
+export const __mobileStorageTestUtils = {
+    createOpSqliteClientForTests: createOpSqliteClient,
+    flushPendingStartupJsonBackup,
+    reset: () => {
+        saveQueue = Promise.resolve();
+        sqliteStatePromise = null;
+        latestQueuedWriteStartedAtMs = 0;
+        if (jsonBackupTimer) {
+            clearTimeout(jsonBackupTimer);
+            jsonBackupTimer = null;
+        }
+        pendingJsonBackup = null;
+        jsonBackupWriter = Promise.resolve();
+        clearPreferJsonBackup();
+    },
+    setSqliteStateForTests: (state: { adapter: Pick<SqliteAdapter, 'saveTask'>; client: Partial<SqliteClient> }) => {
+        sqliteStatePromise = Promise.resolve(state as SqliteState);
+        clearPreferJsonBackup();
+    },
+};
+
+// MARK: - Calendar Sync SQLite helpers
+
+export const getCalendarSyncEntry = async (taskId: string, platform: string) => {
+    const { adapter } = await getSqliteState();
+    return adapter.getCalendarSyncEntry(taskId, platform);
+};
+
+export const upsertCalendarSyncEntry = async (entry: CalendarSyncEntry) => {
+    const { adapter } = await getSqliteState();
+    return adapter.upsertCalendarSyncEntry(entry);
+};
+
+export const deleteCalendarSyncEntry = async (taskId: string, platform: string) => {
+    const { adapter } = await getSqliteState();
+    return adapter.deleteCalendarSyncEntry(taskId, platform);
+};
+
+export const getAllCalendarSyncEntries = async (platform: string) => {
+    const { adapter } = await getSqliteState();
+    return adapter.getAllCalendarSyncEntries(platform);
+};

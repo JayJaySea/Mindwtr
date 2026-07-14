@@ -1,5 +1,7 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useState, type MouseEvent } from 'react';
 import { useLanguage } from '../contexts/language-context';
+import { ModalPortal } from './ModalPortal';
+import { AutocompleteTextInput } from './ui/AutocompleteTextInput';
 import { Button } from './ui/Button';
 
 interface PromptModalProps {
@@ -8,7 +10,11 @@ interface PromptModalProps {
     description?: string;
     placeholder?: string;
     defaultValue?: string;
+    suggestions?: readonly string[];
     inputType?: 'text' | 'date' | 'datetime-local';
+    allowEmptyConfirm?: boolean;
+    browseLabel?: string;
+    onBrowse?: () => Promise<string | null>;
     secondaryLabel?: string;
     onSecondary?: () => void;
     confirmLabel: string;
@@ -23,7 +29,11 @@ export function PromptModal({
     description,
     placeholder,
     defaultValue,
+    suggestions,
     inputType = 'text',
+    allowEmptyConfirm = false,
+    browseLabel,
+    onBrowse,
     secondaryLabel,
     onSecondary,
     confirmLabel,
@@ -44,12 +54,18 @@ export function PromptModal({
             setHasInteracted(false);
         }
     }, [isOpen, defaultValue]);
-    const canConfirm = value.trim().length > 0;
-    const showValidation = hasInteracted && !canConfirm;
+    const canConfirm = allowEmptyConfirm || value.trim().length > 0;
+    const showValidation = !allowEmptyConfirm && hasInteracted && !canConfirm;
 
     if (!isOpen) return null;
 
+    // Keep the input focused while clicking footer buttons: the blur would
+    // reveal the validation line and shift the buttons mid-click, so the
+    // mouseup lands elsewhere and the first click gets swallowed.
+    const keepInputFocus = (event: MouseEvent<HTMLButtonElement>) => event.preventDefault();
+
     return (
+        <ModalPortal>
         <div
             className="fixed inset-0 bg-black/50 flex items-start justify-center pt-[20vh] z-50"
             role="dialog"
@@ -71,12 +87,13 @@ export function PromptModal({
                     )}
                 </div>
                 <div className="p-4 space-y-3">
-                    <input
+                    <AutocompleteTextInput
                         autoFocus
                         type={inputType}
                         value={value}
-                        onChange={(e) => {
-                            setValue(e.target.value);
+                        suggestions={suggestions ?? []}
+                        onChange={(next) => {
+                            setValue(next);
                             if (!hasInteracted) {
                                 setHasInteracted(true);
                             }
@@ -107,15 +124,33 @@ export function PromptModal({
                         </p>
                     )}
                     <div className="flex justify-end gap-2">
+                        {browseLabel && onBrowse && (
+                            <Button
+                                variant="secondary"
+                                className="mr-auto"
+                                onMouseDown={keepInputFocus}
+                                onClick={() => {
+                                    void onBrowse().then((picked) => {
+                                        if (typeof picked === 'string' && picked) {
+                                            setValue(picked);
+                                            setHasInteracted(true);
+                                        }
+                                    });
+                                }}
+                            >
+                                {browseLabel}
+                            </Button>
+                        )}
                         {secondaryLabel && onSecondary && (
-                            <Button variant="secondary" onClick={onSecondary}>
+                            <Button variant="secondary" onMouseDown={keepInputFocus} onClick={onSecondary}>
                                 {secondaryLabel}
                             </Button>
                         )}
-                        <Button variant="secondary" onClick={onCancel}>
+                        <Button variant="secondary" onMouseDown={keepInputFocus} onClick={onCancel}>
                             {cancelLabel}
                         </Button>
                         <Button
+                            onMouseDown={keepInputFocus}
                             onClick={() => {
                                 if (canConfirm) {
                                     onConfirm(value);
@@ -131,5 +166,6 @@ export function PromptModal({
                 </div>
             </div>
         </div>
+        </ModalPortal>
     );
 }

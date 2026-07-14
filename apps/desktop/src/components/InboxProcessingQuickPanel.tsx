@@ -1,14 +1,20 @@
+import { useEffect, useRef, type KeyboardEvent } from 'react';
 import { ArrowRight, BookOpen, CheckCircle, ClipboardList, Clock, Trash2, User, X } from 'lucide-react';
-import { DEFAULT_PROJECT_COLOR, type Area, type Project, type Task, type TaskPriority } from '@mindwtr/core';
+import { DEFAULT_PROJECT_COLOR, filterProjectsBySelectedArea, safeFormatDate, safeParseDate, tFallback, type Area, type Project, type Task, type TaskPriority, type TimeEstimate } from '@mindwtr/core';
 
 import { cn } from '../lib/utils';
 import {
     InboxProcessingScheduleFields,
+    type InboxProcessingScheduleFieldKey,
     type InboxProcessingScheduleFieldsControls,
 } from './InboxProcessingScheduleFields';
+import { TokenAutocompleteInput } from './Task/TokenAutocompleteInput';
+import { AutocompleteTextInput } from './ui/AutocompleteTextInput';
+import { AreaSelector } from './ui/AreaSelector';
 import { ProjectSelector } from './ui/ProjectSelector';
+import { QuickDateChips } from './QuickDateChips';
 
-type QuickActionabilityChoice = 'actionable' | 'trash' | 'someday' | 'reference';
+type QuickActionabilityChoice = 'actionable' | 'later' | 'trash' | 'someday' | 'reference';
 type QuickTwoMinuteChoice = 'yes' | 'no';
 type QuickExecutionChoice = 'defer' | 'delegate';
 
@@ -33,20 +39,30 @@ export type InboxProcessingQuickPanelProps = {
     setExecutionChoice: (value: QuickExecutionChoice) => void;
     showScheduleFields: boolean;
     scheduleFields: InboxProcessingScheduleFieldsControls;
+    visibleScheduleFieldKeys: InboxProcessingScheduleFieldKey[];
     delegateWho: string;
     setDelegateWho: (value: string) => void;
     delegateFollowUp: string;
     setDelegateFollowUp: (value: string) => void;
     onSendDelegateRequest: () => void;
     selectedContexts: string[];
+    contextsDraft: string;
     selectedTags: string[];
+    tagsDraft: string;
     selectedEnergyLevel?: Task['energyLevel'];
     setSelectedEnergyLevel: (value: Task['energyLevel']) => void;
     selectedAssignedTo: string;
     setSelectedAssignedTo: (value: string) => void;
+    personOptions: string[];
+    selectedTimeEstimate?: TimeEstimate;
+    setSelectedTimeEstimate: (value: TimeEstimate | undefined) => void;
+    timeEstimateOptions: TimeEstimate[];
+    showContextsField: boolean;
+    showTagsField: boolean;
     showEnergyLevelField: boolean;
     showAssignedToField: boolean;
-    prioritiesEnabled: boolean;
+    showTimeEstimateField: boolean;
+    showPriorityField: boolean;
     selectedPriority?: TaskPriority;
     setSelectedPriority: (value: TaskPriority | undefined) => void;
     onContextsInputChange: (value: string) => void;
@@ -55,19 +71,23 @@ export type InboxProcessingQuickPanelProps = {
     toggleTag: (tag: string) => void;
     suggestedContexts: string[];
     suggestedTags: string[];
+    allContexts: string[];
+    allTags: string[];
     projects: Project[];
     areas: Area[];
     selectedProjectId: string | null;
     setSelectedProjectId: (value: string | null) => void;
     selectedAreaId: string | null;
     setSelectedAreaId: (value: string | null) => void;
+    showProjectField: boolean;
+    showAreaField: boolean;
     convertToProject: boolean;
     setConvertToProject: (value: boolean) => void;
     projectTitleDraft: string;
     setProjectTitleDraft: (value: string) => void;
     nextActionDraft: string;
     setNextActionDraft: (value: string) => void;
-    addProject: (title: string, color: string) => Promise<Project | null>;
+    addProject: (title: string, color: string, initialProps?: Partial<Project>) => Promise<Project | null>;
     onSubmit: () => void | Promise<void>;
 };
 
@@ -79,6 +99,38 @@ export type {
 
 const PRIORITY_OPTIONS: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 const ENERGY_LEVEL_OPTIONS: Array<NonNullable<Task['energyLevel']>> = ['low', 'medium', 'high'];
+const formatTimeEstimateLabel = (value: TimeEstimate): string => {
+    if (value === '5min') return '5m';
+    if (value === '10min') return '10m';
+    if (value === '15min') return '15m';
+    if (value === '30min') return '30m';
+    if (value === '1hr') return '1h';
+    if (value === '2hr') return '2h';
+    if (value === '3hr') return '3h';
+    if (value === '4hr') return '4h';
+    return '4h+';
+};
+
+const shouldCommitQuickProcessingFromEnter = (target: EventTarget | null): boolean => {
+    if (!(target instanceof HTMLElement)) return false;
+    if (target.isContentEditable) return false;
+    if (target.closest('button, [role="button"], [role="option"], [role="listbox"]')) return false;
+
+    const tagName = target.tagName.toLowerCase();
+    if (tagName === 'textarea' || tagName === 'select') return false;
+    return tagName === 'input';
+};
+
+const shouldCommitQuickProcessingFromShortcut = (target: EventTarget | null): boolean => {
+    if (!(target instanceof HTMLElement)) return true;
+    if (target.isContentEditable) return false;
+    if (target.closest('[role="option"], [role="listbox"]')) return false;
+    return target.tagName.toLowerCase() !== 'select';
+};
+
+const isQuickProcessingSubmitShortcut = (event: Pick<KeyboardEvent | globalThis.KeyboardEvent, 'altKey' | 'ctrlKey' | 'key' | 'metaKey' | 'shiftKey'>): boolean => (
+    event.key === 'Enter' && !event.shiftKey && !event.altKey && (event.ctrlKey || event.metaKey)
+);
 
 export function InboxProcessingQuickPanel({
     t,
@@ -101,20 +153,30 @@ export function InboxProcessingQuickPanel({
     setExecutionChoice,
     showScheduleFields,
     scheduleFields,
+    visibleScheduleFieldKeys,
     delegateWho,
     setDelegateWho,
     delegateFollowUp,
     setDelegateFollowUp,
     onSendDelegateRequest,
     selectedContexts,
+    contextsDraft,
     selectedTags,
+    tagsDraft,
     selectedEnergyLevel,
     setSelectedEnergyLevel,
     selectedAssignedTo,
     setSelectedAssignedTo,
+    personOptions,
+    selectedTimeEstimate,
+    setSelectedTimeEstimate,
+    timeEstimateOptions,
+    showContextsField,
+    showTagsField,
     showEnergyLevelField,
     showAssignedToField,
-    prioritiesEnabled,
+    showTimeEstimateField,
+    showPriorityField,
     selectedPriority,
     setSelectedPriority,
     onContextsInputChange,
@@ -123,12 +185,16 @@ export function InboxProcessingQuickPanel({
     toggleTag,
     suggestedContexts,
     suggestedTags,
+    allContexts,
+    allTags,
     projects,
     areas,
     selectedProjectId,
     setSelectedProjectId,
     selectedAreaId,
     setSelectedAreaId,
+    showProjectField,
+    showAreaField,
     convertToProject,
     setConvertToProject,
     projectTitleDraft,
@@ -139,12 +205,132 @@ export function InboxProcessingQuickPanel({
     onSubmit,
 }: InboxProcessingQuickPanelProps) {
     const showActionFields = actionabilityChoice === 'actionable';
+    const showLaterFields = actionabilityChoice === 'later';
     const showDecisionFields = showActionFields && twoMinuteChoice === 'no';
     const showDelegationFields = showDecisionFields && executionChoice === 'delegate';
     const showNextActionFields = showDecisionFields && executionChoice === 'defer';
+    const showReferenceOrganizationFields = actionabilityChoice === 'reference';
+    const laterLabel = tFallback(t, 'process.later', 'Later');
+    const laterHint = tFallback(t, 'process.laterHint', 'Set a start date and move this to Next.');
+    const compareLabels = (left: string, right: string) =>
+        left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' });
+    const sortedProjects = [...projects].sort((a, b) => compareLabels(a.title, b.title));
+    const projectFilterAreaId = selectedAreaId || undefined;
+    const filteredProjects = filterProjectsBySelectedArea(sortedProjects, projectFilterAreaId);
+    const organizationTokenFields = showContextsField || showTagsField ? (
+        <div className="grid gap-3 md:grid-cols-2">
+            {showContextsField ? (
+                <div className="space-y-2">
+                    <label htmlFor="quick-processing-contexts" className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.contextsLabel')}</label>
+                    <TokenAutocompleteInput
+                        id="quick-processing-contexts"
+                        aria-label={t('taskEdit.contextsLabel')}
+                        value={contextsDraft}
+                        onChange={onContextsInputChange}
+                        suggestions={[...suggestedContexts, ...allContexts]}
+                        prefix="@"
+                        placeholder={t('taskEdit.contextsPlaceholder')}
+                        className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                    />
+                    {suggestedContexts.length > 0 ? (
+                        <div className="flex flex-wrap gap-2">
+                            {suggestedContexts.map((ctx) => (
+                                <button
+                                    key={ctx}
+                                    type="button"
+                                    onClick={() => toggleContext(ctx)}
+                                    className={cn(
+                                        'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
+                                        selectedContexts.includes(ctx)
+                                            ? 'bg-primary text-primary-foreground border-primary'
+                                            : 'bg-muted/40 border-border hover:bg-muted/70'
+                                    )}
+                                >
+                                    {ctx}
+                                </button>
+                            ))}
+                        </div>
+                    ) : null}
+                </div>
+            ) : null}
+            {showTagsField ? (
+                <div className="space-y-2">
+                    <label htmlFor="quick-processing-tags" className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.tagsLabel')}</label>
+                    <TokenAutocompleteInput
+                        id="quick-processing-tags"
+                        aria-label={t('taskEdit.tagsLabel')}
+                        value={tagsDraft}
+                        onChange={onTagsInputChange}
+                        suggestions={[...suggestedTags, ...allTags]}
+                        prefix="#"
+                        placeholder={t('taskEdit.tagsPlaceholder')}
+                        className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                    />
+                    {suggestedTags.length > 0 ? (
+                        <div className="flex flex-wrap gap-2">
+                            {suggestedTags.map((tag) => (
+                                <button
+                                    key={tag}
+                                    type="button"
+                                    onClick={() => toggleTag(tag)}
+                                    className={cn(
+                                        'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
+                                        selectedTags.includes(tag)
+                                            ? 'bg-emerald-500 text-white border-emerald-600'
+                                            : 'bg-muted/40 border-border hover:bg-muted/70'
+                                    )}
+                                >
+                                    {tag}
+                                </button>
+                            ))}
+                        </div>
+                    ) : null}
+                </div>
+            ) : null}
+        </div>
+    ) : null;
+
+    useEffect(() => {
+        const handleDocumentKeyDown = (event: globalThis.KeyboardEvent) => {
+            if (event.defaultPrevented) return;
+            if (event.key === 'Process' || event.isComposing) return;
+            if (!isQuickProcessingSubmitShortcut(event)) return;
+            if (!shouldCommitQuickProcessingFromShortcut(event.target)) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+            void onSubmit();
+        };
+
+        document.addEventListener('keydown', handleDocumentKeyDown);
+        return () => document.removeEventListener('keydown', handleDocumentKeyDown);
+    }, [onSubmit]);
+
+    // After a long form is submitted the view is left scrolled to the bottom;
+    // bring the panel top (title of the next task) back into view on advance.
+    const panelRef = useRef<HTMLDivElement | null>(null);
+    useEffect(() => {
+        panelRef.current?.scrollIntoView?.({ block: 'start' });
+    }, [processingTask.id]);
+
+    const handlePanelKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+        if (event.defaultPrevented) return;
+        if (event.key === 'Process' || event.nativeEvent.isComposing) return;
+        if (isQuickProcessingSubmitShortcut(event)) return;
+        if (event.key !== 'Enter' || event.shiftKey || event.altKey) return;
+        if (!shouldCommitQuickProcessingFromEnter(event.target)) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        void onSubmit();
+    };
 
     return (
-        <div className="bg-card border border-border rounded-xl animate-in fade-in overflow-hidden">
+        <div
+            ref={panelRef}
+            className="bg-card border border-border rounded-xl animate-in fade-in overflow-visible"
+            onKeyDown={handlePanelKeyDown}
+        >
             <div className="flex items-center justify-between gap-3 px-5 py-3.5">
                 <div className="flex items-center gap-2.5 min-w-0">
                     <h3 className="font-semibold text-[15px] truncate inline-flex items-center gap-2">
@@ -239,7 +425,7 @@ export function InboxProcessingQuickPanel({
                         <div className="text-sm font-medium">{t('process.actionable')}</div>
                         <div className="text-xs text-muted-foreground mt-1">{t('process.actionableDesc')}</div>
                     </div>
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
                         <button
                             type="button"
                             onClick={() => setActionabilityChoice('actionable')}
@@ -252,6 +438,19 @@ export function InboxProcessingQuickPanel({
                         >
                             <CheckCircle className="w-3.5 h-3.5 inline mr-1.5" />
                             {t('process.yesActionable')}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setActionabilityChoice('later')}
+                            className={cn(
+                                'rounded-lg px-3 py-2 text-xs font-medium transition-colors border',
+                                actionabilityChoice === 'later'
+                                    ? 'bg-blue-500/15 text-blue-500 border-blue-500/40'
+                                    : 'bg-muted/40 border-border hover:bg-muted/70'
+                            )}
+                        >
+                            <Clock className="w-3.5 h-3.5 inline mr-1.5" />
+                            {laterLabel}
                         </button>
                         <button
                             type="button"
@@ -297,6 +496,24 @@ export function InboxProcessingQuickPanel({
                     </div>
                 </div>
 
+                {showLaterFields ? (
+                    <div className="space-y-3 rounded-lg border border-blue-500/20 bg-blue-500/5 p-3">
+                        <div className="text-xs text-muted-foreground">{laterHint}</div>
+                        <InboxProcessingScheduleFields
+                            t={t}
+                            fields={scheduleFields}
+                            visibleFieldKeys={['start']}
+                            variant="quick"
+                        />
+                    </div>
+                ) : null}
+
+                {showReferenceOrganizationFields && organizationTokenFields ? (
+                    <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3">
+                        {organizationTokenFields}
+                    </div>
+                ) : null}
+
                 {showActionFields ? (
                     <div className="space-y-3">
                         <div>
@@ -338,6 +555,7 @@ export function InboxProcessingQuickPanel({
                             <InboxProcessingScheduleFields
                                 t={t}
                                 fields={scheduleFields}
+                                visibleFieldKeys={visibleScheduleFieldKeys}
                                 variant="quick"
                             />
                         ) : null}
@@ -382,16 +600,22 @@ export function InboxProcessingQuickPanel({
                     <div className="space-y-3">
                         <div className="space-y-1">
                             <label className="text-[11px] text-muted-foreground font-medium">{t('process.delegateWhoLabel')}</label>
-                            <input
+                            <AutocompleteTextInput
                                 aria-label={t('process.delegateWhoLabel')}
                                 value={delegateWho}
-                                onChange={(event) => setDelegateWho(event.target.value)}
+                                onChange={setDelegateWho}
+                                suggestions={personOptions}
                                 placeholder={t('process.delegateWhoPlaceholder')}
                                 className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
                             />
                         </div>
                         <div className="space-y-1">
                             <label className="text-[11px] text-muted-foreground font-medium">{t('process.delegateFollowUpLabel')}</label>
+                            <QuickDateChips
+                                t={t}
+                                selectedDate={safeParseDate(delegateFollowUp)}
+                                onSelect={(date) => setDelegateFollowUp(date ? safeFormatDate(date, 'yyyy-MM-dd') : '')}
+                            />
                             <input
                                 type="date"
                                 aria-label={t('process.delegateFollowUpLabel')}
@@ -435,6 +659,22 @@ export function InboxProcessingQuickPanel({
 
                         {convertToProject ? (
                             <div className="space-y-3">
+                                {showAreaField ? (
+                                    <div className="space-y-1">
+                                        <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.areaLabel')}</label>
+                                        <AreaSelector
+                                            areas={areas}
+                                            value={selectedAreaId ?? ''}
+                                            onChange={(value) => setSelectedAreaId(value || null)}
+                                            placeholder={t('projects.noArea')}
+                                            noAreaLabel={t('projects.noArea')}
+                                            searchPlaceholder={t('areas.search')}
+                                            noMatchesLabel={t('common.noMatches')}
+                                            controlClassName="rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                                            menuClassName="text-sm"
+                                        />
+                                    </div>
+                                ) : null}
                                 <div className="space-y-1">
                                     <label className="text-[11px] text-muted-foreground font-medium">{t('projects.title')}</label>
                                     <input
@@ -457,112 +697,61 @@ export function InboxProcessingQuickPanel({
                             </div>
                         ) : (
                             <div className="space-y-3">
-                                <div className="space-y-1">
-                                    <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.projectLabel')}</label>
-                                    <ProjectSelector
-                                        projects={projects}
-                                        value={selectedProjectId ?? ''}
-                                        onChange={(value) => {
-                                            const nextProjectId = value || null;
-                                            setSelectedProjectId(nextProjectId);
-                                            if (nextProjectId) {
-                                                setSelectedAreaId(null);
-                                            }
-                                        }}
-                                        onCreateProject={async (title) => {
-                                            const created = await addProject(title, DEFAULT_PROJECT_COLOR);
-                                            return created?.id ?? null;
-                                        }}
-                                        placeholder={t('process.project')}
-                                        noProjectLabel={t('process.noProject')}
-                                        searchPlaceholder={t('projects.search')}
-                                        noMatchesLabel={t('common.noMatches')}
-                                        createProjectLabel={t('projects.create')}
-                                    />
-                                </div>
-                                {!selectedProjectId ? (
+                                {!selectedProjectId && showAreaField ? (
                                     <div className="space-y-1">
                                         <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.areaLabel')}</label>
-                                        <select
-                                            aria-label={t('taskEdit.areaLabel')}
+                                        <AreaSelector
+                                            areas={areas}
                                             value={selectedAreaId ?? ''}
-                                            onChange={(event) => setSelectedAreaId(event.target.value || null)}
-                                            className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
-                                        >
-                                            <option value="">{t('projects.noArea')}</option>
-                                            {areas.map((area) => (
-                                                <option key={area.id} value={area.id}>
-                                                    {area.name}
-                                                </option>
-                                            ))}
-                                        </select>
+                                            onChange={(value) => setSelectedAreaId(value || null)}
+                                            placeholder={t('projects.noArea')}
+                                            noAreaLabel={t('projects.noArea')}
+                                            searchPlaceholder={t('areas.search')}
+                                            noMatchesLabel={t('common.noMatches')}
+                                            controlClassName="rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                                            menuClassName="text-sm"
+                                        />
+                                    </div>
+                                ) : null}
+                                {showProjectField ? (
+                                    <div className="space-y-1">
+                                        <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.projectLabel')}</label>
+                                        <ProjectSelector
+                                            projects={filteredProjects}
+                                            allProjects={sortedProjects}
+                                            value={selectedProjectId ?? ''}
+                                            onChange={(value) => {
+                                                const nextProjectId = value || null;
+                                                setSelectedProjectId(nextProjectId);
+                                                if (nextProjectId) {
+                                                    setSelectedAreaId(null);
+                                                }
+                                            }}
+                                            onCreateProject={async (title) => {
+                                                const created = await addProject(
+                                                    title,
+                                                    DEFAULT_PROJECT_COLOR,
+                                                    projectFilterAreaId ? { areaId: projectFilterAreaId } : undefined,
+                                                );
+                                                return created?.id ?? null;
+                                            }}
+                                            placeholder={t('process.project')}
+                                            noProjectLabel={t('process.noProject')}
+                                            searchPlaceholder={t('projects.search')}
+                                            noMatchesLabel={t('common.noMatches')}
+                                            emptyLabel={projectFilterAreaId ? t('projects.noProjectsInArea') : undefined}
+                                            createProjectLabel={t('projects.create')}
+                                            controlClassName="rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                                            menuClassName="text-sm"
+                                        />
                                     </div>
                                 ) : null}
                             </div>
                         )}
 
-                        <div className="grid gap-3 md:grid-cols-2">
-                            <div className="space-y-2">
-                                <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.contextsLabel')}</label>
-                                <input
-                                    aria-label={t('taskEdit.contextsLabel')}
-                                    value={selectedContexts.join(', ')}
-                                    onChange={(event) => onContextsInputChange(event.target.value)}
-                                    placeholder={t('taskEdit.contextsPlaceholder')}
-                                    className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
-                                />
-                                {suggestedContexts.length > 0 ? (
-                                    <div className="flex flex-wrap gap-2">
-                                        {suggestedContexts.map((ctx) => (
-                                            <button
-                                                key={ctx}
-                                                type="button"
-                                                onClick={() => toggleContext(ctx)}
-                                                className={cn(
-                                                    'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
-                                                    selectedContexts.includes(ctx)
-                                                        ? 'bg-primary text-primary-foreground border-primary'
-                                                        : 'bg-muted/40 border-border hover:bg-muted/70'
-                                                )}
-                                            >
-                                                {ctx}
-                                            </button>
-                                        ))}
-                                    </div>
-                                ) : null}
-                            </div>
-                            <div className="space-y-2">
-                                <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.tagsLabel')}</label>
-                                <input
-                                    aria-label={t('taskEdit.tagsLabel')}
-                                    value={selectedTags.join(', ')}
-                                    onChange={(event) => onTagsInputChange(event.target.value)}
-                                    placeholder={t('taskEdit.tagsPlaceholder')}
-                                    className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
-                                />
-                                {suggestedTags.length > 0 ? (
-                                    <div className="flex flex-wrap gap-2">
-                                        {suggestedTags.map((tag) => (
-                                            <button
-                                                key={tag}
-                                                type="button"
-                                                onClick={() => toggleTag(tag)}
-                                                className={cn(
-                                                    'px-2.5 py-1 rounded-full text-xs font-medium transition-colors border',
-                                                    selectedTags.includes(tag)
-                                                        ? 'bg-emerald-500 text-white border-emerald-600'
-                                                        : 'bg-muted/40 border-border hover:bg-muted/70'
-                                                )}
-                                            >
-                                                {tag}
-                                            </button>
-                                        ))}
-                                    </div>
-                                ) : null}
-                            </div>
-                        </div>
+                        {organizationTokenFields}
 
-                        {prioritiesEnabled ? (
+                        {showPriorityField ? (
                             <div className="space-y-2">
                                 <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.priorityLabel')}</label>
                                 <div className="flex flex-wrap gap-2">
@@ -588,7 +777,7 @@ export function InboxProcessingQuickPanel({
                             </div>
                         ) : null}
 
-                        {showEnergyLevelField || showAssignedToField ? (
+                        {showEnergyLevelField || showAssignedToField || showTimeEstimateField ? (
                             <div className="grid gap-3 md:grid-cols-2">
                                 {showEnergyLevelField ? (
                                     <div className="space-y-2">
@@ -608,13 +797,32 @@ export function InboxProcessingQuickPanel({
                                         </select>
                                     </div>
                                 ) : null}
+                                {showTimeEstimateField ? (
+                                    <div className="space-y-2">
+                                        <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.timeEstimateLabel')}</label>
+                                        <select
+                                            aria-label={t('taskEdit.timeEstimateLabel')}
+                                            value={selectedTimeEstimate ?? ''}
+                                            onChange={(event) => setSelectedTimeEstimate((event.target.value || undefined) as TimeEstimate | undefined)}
+                                            className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
+                                        >
+                                            <option value="">{t('common.none')}</option>
+                                            {timeEstimateOptions.map((estimate) => (
+                                                <option key={estimate} value={estimate}>
+                                                    {formatTimeEstimateLabel(estimate)}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                ) : null}
                                 {showAssignedToField ? (
                                     <div className="space-y-2">
                                         <label className="text-[11px] text-muted-foreground font-medium">{t('taskEdit.assignedTo')}</label>
-                                        <input
+                                        <AutocompleteTextInput
                                             aria-label={t('taskEdit.assignedTo')}
                                             value={selectedAssignedTo}
-                                            onChange={(event) => setSelectedAssignedTo(event.target.value)}
+                                            onChange={setSelectedAssignedTo}
+                                            suggestions={personOptions}
                                             placeholder={t('taskEdit.assignedToPlaceholder')}
                                             className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-primary/40 focus:outline-none"
                                         />

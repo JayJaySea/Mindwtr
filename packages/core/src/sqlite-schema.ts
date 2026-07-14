@@ -1,8 +1,9 @@
-export const SQLITE_SCHEMA_VERSION = 2;
+export const SQLITE_SCHEMA_VERSION = 10;
 
 export const SQLITE_BASE_SCHEMA = `
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
 
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
@@ -13,8 +14,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   assignedTo TEXT,
   taskMode TEXT,
   startTime TEXT,
+  relativeStartOffset TEXT,
   dueDate TEXT,
   recurrence TEXT,
+  showFutureRecurrence INTEGER,
   pushCount INTEGER,
   tags TEXT,
   contexts TEXT,
@@ -27,10 +30,18 @@ CREATE TABLE IF NOT EXISTS tasks (
   sectionId TEXT REFERENCES sections(id) ON DELETE SET NULL,
   areaId TEXT REFERENCES areas(id) ON DELETE SET NULL,
   orderNum INTEGER,
+  boardOrder INTEGER,
   isFocusedToday INTEGER,
   timeEstimate TEXT,
+  timeSpentMinutes INTEGER,
+  suppressMindwtrReminders INTEGER,
+  repeatReminderMinutes INTEGER,
   reviewAt TEXT,
   completedAt TEXT,
+  statusBeforeProjectArchive TEXT,
+  completedAtBeforeProjectArchive TEXT,
+  isFocusedTodayBeforeProjectArchive INTEGER,
+  projectArchivedAt TEXT,
   rev INTEGER,
   revBy TEXT,
   createdAt TEXT NOT NULL,
@@ -47,6 +58,7 @@ CREATE TABLE IF NOT EXISTS projects (
   orderNum INTEGER,
   tagIds TEXT,
   isSequential INTEGER,
+  sequentialScope TEXT,
   isFocused INTEGER,
   supportNotes TEXT,
   attachments TEXT,
@@ -58,7 +70,8 @@ CREATE TABLE IF NOT EXISTS projects (
   revBy TEXT,
   createdAt TEXT NOT NULL,
   updatedAt TEXT NOT NULL,
-  deletedAt TEXT
+  deletedAt TEXT,
+  purgedAt TEXT
 );
 
 CREATE TABLE IF NOT EXISTS areas (
@@ -67,6 +80,20 @@ CREATE TABLE IF NOT EXISTS areas (
   color TEXT,
   icon TEXT,
   orderNum INTEGER NOT NULL,
+  rev INTEGER,
+  revBy TEXT,
+  createdAt TEXT NOT NULL,
+  updatedAt TEXT NOT NULL,
+  deletedAt TEXT,
+  deletedAtBeforeProjectArchive TEXT,
+  projectArchivedAt TEXT
+);
+
+CREATE TABLE IF NOT EXISTS people (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  note TEXT,
+  referenceLink TEXT,
   rev INTEGER,
   revBy TEXT,
   createdAt TEXT NOT NULL,
@@ -85,7 +112,9 @@ CREATE TABLE IF NOT EXISTS sections (
   revBy TEXT,
   createdAt TEXT NOT NULL,
   updatedAt TEXT NOT NULL,
-  deletedAt TEXT
+  deletedAt TEXT,
+  deletedAtBeforeProjectArchive TEXT,
+  projectArchivedAt TEXT
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -93,8 +122,31 @@ CREATE TABLE IF NOT EXISTS settings (
   data TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS saved_filters (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  icon TEXT,
+  view TEXT NOT NULL,
+  criteria TEXT NOT NULL,
+  sortBy TEXT,
+  sortOrder TEXT,
+  groupBy TEXT,
+  createdAt TEXT NOT NULL,
+  updatedAt TEXT NOT NULL,
+  deletedAt TEXT
+);
+
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS calendar_sync (
+  task_id TEXT NOT NULL,
+  calendar_event_id TEXT NOT NULL,
+  calendar_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  last_synced_at TEXT NOT NULL,
+  PRIMARY KEY (task_id, platform)
 );
 
 INSERT OR IGNORE INTO schema_migrations (version) VALUES (1);
@@ -114,6 +166,8 @@ BEGIN
   WHERE new.attachments IS NOT NULL AND json_valid(new.attachments) = 0;
   SELECT RAISE(ABORT, 'invalid_tasks_recurrence_json')
   WHERE new.recurrence IS NOT NULL AND json_valid(new.recurrence) = 0;
+  SELECT RAISE(ABORT, 'invalid_tasks_relative_start_offset_json')
+  WHERE new.relativeStartOffset IS NOT NULL AND json_valid(new.relativeStartOffset) = 0;
 END;
 
 CREATE TRIGGER IF NOT EXISTS tasks_validate_update
@@ -131,6 +185,8 @@ BEGIN
   WHERE new.attachments IS NOT NULL AND json_valid(new.attachments) = 0;
   SELECT RAISE(ABORT, 'invalid_tasks_recurrence_json')
   WHERE new.recurrence IS NOT NULL AND json_valid(new.recurrence) = 0;
+  SELECT RAISE(ABORT, 'invalid_tasks_relative_start_offset_json')
+  WHERE new.relativeStartOffset IS NOT NULL AND json_valid(new.relativeStartOffset) = 0;
 END;
 
 CREATE TRIGGER IF NOT EXISTS projects_validate_insert
@@ -167,6 +223,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_reviewAt ON tasks(reviewAt);
 CREATE INDEX IF NOT EXISTS idx_tasks_completedAt ON tasks(completedAt);
 CREATE INDEX IF NOT EXISTS idx_tasks_createdAt ON tasks(createdAt);
 CREATE INDEX IF NOT EXISTS idx_tasks_updatedAt ON tasks(updatedAt);
+CREATE INDEX IF NOT EXISTS idx_tasks_updatedAt_rev ON tasks(updatedAt, rev);
 CREATE INDEX IF NOT EXISTS idx_tasks_updatedAt_deletedAt ON tasks(updatedAt, deletedAt);
 CREATE INDEX IF NOT EXISTS idx_tasks_status_deletedAt ON tasks(status, deletedAt);
 CREATE INDEX IF NOT EXISTS idx_tasks_project_deletedAt ON tasks(projectId, deletedAt);
@@ -178,8 +235,14 @@ CREATE INDEX IF NOT EXISTS idx_tasks_area_id ON tasks(areaId);
 CREATE INDEX IF NOT EXISTS idx_tasks_section_id ON tasks(sectionId);
 CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
 CREATE INDEX IF NOT EXISTS idx_projects_areaId ON projects(areaId);
+CREATE INDEX IF NOT EXISTS idx_projects_area_deletedAt ON projects(areaId, deletedAt);
 CREATE INDEX IF NOT EXISTS idx_projects_area_order ON projects(areaId, orderNum);
 CREATE INDEX IF NOT EXISTS idx_projects_dueDate ON projects(dueDate);
+CREATE INDEX IF NOT EXISTS idx_projects_updatedAt_rev ON projects(updatedAt, rev);
+CREATE INDEX IF NOT EXISTS idx_sections_updatedAt_rev ON sections(updatedAt, rev);
+CREATE INDEX IF NOT EXISTS idx_areas_updatedAt_rev ON areas(updatedAt, rev);
+CREATE INDEX IF NOT EXISTS idx_people_updatedAt_rev ON people(updatedAt, rev);
+CREATE INDEX IF NOT EXISTS idx_saved_filters_view ON saved_filters(view);
 `;
 
 export const SQLITE_FTS_SCHEMA = `
@@ -189,6 +252,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
   description,
   tags,
   contexts,
+  checklist,
+  location,
+  assignedTo,
   content=''
 );
 
@@ -202,37 +268,37 @@ CREATE VIRTUAL TABLE IF NOT EXISTS projects_fts USING fts5(
 );
 
 CREATE TRIGGER IF NOT EXISTS tasks_ai AFTER INSERT ON tasks BEGIN
-  INSERT INTO tasks_fts (id, title, description, tags, contexts)
-  VALUES (new.id, new.title, coalesce(new.description, ''), coalesce(new.tags, ''), coalesce(new.contexts, ''));
+  INSERT INTO tasks_fts (rowid, title, description, tags, contexts, checklist, location, assignedTo)
+  VALUES (new.rowid, new.title, coalesce(new.description, ''), coalesce(new.tags, ''), coalesce(new.contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(new.checklist)), ''), coalesce(new.location, ''), coalesce(new.assignedTo, ''));
 END;
 
 CREATE TRIGGER IF NOT EXISTS tasks_ad AFTER DELETE ON tasks BEGIN
-  INSERT INTO tasks_fts (tasks_fts, id, title, description, tags, contexts)
-  VALUES ('delete', old.id, old.title, coalesce(old.description, ''), coalesce(old.tags, ''), coalesce(old.contexts, ''));
+  INSERT INTO tasks_fts (tasks_fts, rowid, title, description, tags, contexts, checklist, location, assignedTo)
+  VALUES ('delete', old.rowid, old.title, coalesce(old.description, ''), coalesce(old.tags, ''), coalesce(old.contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(old.checklist)), ''), coalesce(old.location, ''), coalesce(old.assignedTo, ''));
 END;
 
 CREATE TRIGGER IF NOT EXISTS tasks_au AFTER UPDATE ON tasks BEGIN
-  INSERT INTO tasks_fts (tasks_fts, id, title, description, tags, contexts)
-  VALUES ('delete', old.id, old.title, coalesce(old.description, ''), coalesce(old.tags, ''), coalesce(old.contexts, ''));
-  INSERT INTO tasks_fts (id, title, description, tags, contexts)
-  VALUES (new.id, new.title, coalesce(new.description, ''), coalesce(new.tags, ''), coalesce(new.contexts, ''));
+  INSERT INTO tasks_fts (tasks_fts, rowid, title, description, tags, contexts, checklist, location, assignedTo)
+  VALUES ('delete', old.rowid, old.title, coalesce(old.description, ''), coalesce(old.tags, ''), coalesce(old.contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(old.checklist)), ''), coalesce(old.location, ''), coalesce(old.assignedTo, ''));
+  INSERT INTO tasks_fts (rowid, title, description, tags, contexts, checklist, location, assignedTo)
+  VALUES (new.rowid, new.title, coalesce(new.description, ''), coalesce(new.tags, ''), coalesce(new.contexts, ''), coalesce((SELECT group_concat(json_extract(value, '$.title'), ' ') FROM json_each(new.checklist)), ''), coalesce(new.location, ''), coalesce(new.assignedTo, ''));
 END;
 
 CREATE TRIGGER IF NOT EXISTS projects_ai AFTER INSERT ON projects BEGIN
-  INSERT INTO projects_fts (id, title, supportNotes, tagIds, areaTitle)
-  VALUES (new.id, new.title, coalesce(new.supportNotes, ''), coalesce(new.tagIds, ''), coalesce(new.areaTitle, ''));
+  INSERT INTO projects_fts (rowid, title, supportNotes, tagIds, areaTitle)
+  VALUES (new.rowid, new.title, coalesce(new.supportNotes, ''), coalesce(new.tagIds, ''), coalesce(new.areaTitle, ''));
 END;
 
 CREATE TRIGGER IF NOT EXISTS projects_ad AFTER DELETE ON projects BEGIN
-  INSERT INTO projects_fts (projects_fts, id, title, supportNotes, tagIds, areaTitle)
-  VALUES ('delete', old.id, old.title, coalesce(old.supportNotes, ''), coalesce(old.tagIds, ''), coalesce(old.areaTitle, ''));
+  INSERT INTO projects_fts (projects_fts, rowid, title, supportNotes, tagIds, areaTitle)
+  VALUES ('delete', old.rowid, old.title, coalesce(old.supportNotes, ''), coalesce(old.tagIds, ''), coalesce(old.areaTitle, ''));
 END;
 
 CREATE TRIGGER IF NOT EXISTS projects_au AFTER UPDATE ON projects BEGIN
-  INSERT INTO projects_fts (projects_fts, id, title, supportNotes, tagIds, areaTitle)
-  VALUES ('delete', old.id, old.title, coalesce(old.supportNotes, ''), coalesce(old.tagIds, ''), coalesce(old.areaTitle, ''));
-  INSERT INTO projects_fts (id, title, supportNotes, tagIds, areaTitle)
-  VALUES (new.id, new.title, coalesce(new.supportNotes, ''), coalesce(new.tagIds, ''), coalesce(new.areaTitle, ''));
+  INSERT INTO projects_fts (projects_fts, rowid, title, supportNotes, tagIds, areaTitle)
+  VALUES ('delete', old.rowid, old.title, coalesce(old.supportNotes, ''), coalesce(old.tagIds, ''), coalesce(old.areaTitle, ''));
+  INSERT INTO projects_fts (rowid, title, supportNotes, tagIds, areaTitle)
+  VALUES (new.rowid, new.title, coalesce(new.supportNotes, ''), coalesce(new.tagIds, ''), coalesce(new.areaTitle, ''));
 END;
 `;
 

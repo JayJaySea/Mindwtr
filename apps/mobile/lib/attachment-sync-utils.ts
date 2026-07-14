@@ -4,15 +4,20 @@ import type { AppData, Attachment } from '@mindwtr/core';
 import {
   computeSha256Hex,
   createWebdavDownloadBackoff,
+  decodeUriSafe,
   globalProgressTracker,
+  isDropboxUnauthorizedError,
+  markAttachmentUnrecoverable,
+  sleep,
 } from '@mindwtr/core';
-import { DropboxUnauthorizedError } from './dropbox-sync';
 import {
   CLOUD_TOKEN_KEY,
+  CLOUD_ALLOW_INSECURE_HTTP_KEY,
   CLOUD_URL_KEY,
   WEBDAV_PASSWORD_KEY,
   WEBDAV_URL_KEY,
   WEBDAV_USERNAME_KEY,
+  WEBDAV_ALLOW_INSECURE_HTTP_KEY,
 } from './sync-constants';
 import { logInfo, logWarn, sanitizeLogMessage } from './app-log';
 import { isLikelyFilePath } from './sync-service-utils';
@@ -29,11 +34,14 @@ export const WEBDAV_ATTACHMENT_MISSING_BACKOFF_MS = 15 * 60_000;
 export const WEBDAV_ATTACHMENT_ERROR_BACKOFF_MS = 2 * 60_000;
 export const DROPBOX_ATTACHMENT_MAX_DOWNLOADS_PER_SYNC = 10;
 export const DROPBOX_ATTACHMENT_MAX_UPLOADS_PER_SYNC = 10;
+export const ATTACHMENT_LOCAL_MIGRATION_MAX_PER_SYNC = 3;
 const webdavDownloadBackoff = createWebdavDownloadBackoff({
   missingBackoffMs: WEBDAV_ATTACHMENT_MISSING_BACKOFF_MS,
   errorBackoffMs: WEBDAV_ATTACHMENT_ERROR_BACKOFF_MS,
 });
 export const CLOUD_PROVIDER_DROPBOX = 'dropbox';
+
+export { markAttachmentUnrecoverable, sleep };
 
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const BASE64_LOOKUP = (() => {
@@ -59,8 +67,6 @@ export const logAttachmentInfo = (message: string, extra?: Record<string, string
   void logInfo(message, { scope: 'attachment', extra });
 };
 
-export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 export const getWebdavDownloadBackoff = (attachmentId: string): number | null => {
   return webdavDownloadBackoff.getBlockedUntil(attachmentId);
 };
@@ -75,32 +81,6 @@ export const clearWebdavDownloadBackoff = (attachmentId: string): void => {
 
 export const pruneWebdavDownloadBackoff = (): void => {
   webdavDownloadBackoff.prune();
-};
-
-export const markAttachmentUnrecoverable = (attachment: Attachment): boolean => {
-  const now = new Date().toISOString();
-  let mutated = false;
-  if (attachment.cloudKey !== undefined) {
-    attachment.cloudKey = undefined;
-    mutated = true;
-  }
-  if (attachment.fileHash !== undefined) {
-    attachment.fileHash = undefined;
-    mutated = true;
-  }
-  if (attachment.localStatus !== 'missing') {
-    attachment.localStatus = 'missing';
-    mutated = true;
-  }
-  if (!attachment.deletedAt) {
-    attachment.deletedAt = now;
-    mutated = true;
-  }
-  if (attachment.updatedAt !== now) {
-    attachment.updatedAt = now;
-    mutated = true;
-  }
-  return mutated;
 };
 
 export const readAttachmentBytesForUpload = async (
@@ -187,6 +167,21 @@ export const extractExtension = (value?: string): string => {
   return match ? match[0].toLowerCase() : '';
 };
 
+const stripUriQueryAndFragment = (value: string): string => (
+  value.split('?')[0]?.split('#')[0] ?? value
+);
+
+const getSafLeafName = (value: string): string => {
+  const decoded = decodeUriSafe(value);
+  const stripped = stripUriQueryAndFragment(decoded).replace(/\/+$/, '');
+  const lastSeparator = Math.max(stripped.lastIndexOf('/'), stripped.lastIndexOf(':'));
+  return lastSeparator >= 0 ? stripped.slice(lastSeparator + 1) : stripped;
+};
+
+const hasSafLeafName = (value: string, expected: string): boolean => (
+  getSafLeafName(value) === expected
+);
+
 const buildTempUri = (targetUri: string): string => {
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   return `${targetUri}.tmp-${suffix}`;
@@ -214,15 +209,30 @@ export const writeBytesSafely = async (targetUri: string, bytes: Uint8Array): Pr
 
 export const copyFileSafely = async (sourceUri: string, targetUri: string): Promise<void> => {
   const tempUri = buildTempUri(targetUri);
-  await FileSystem.copyAsync({ from: sourceUri, to: tempUri });
+  try {
+    await FileSystem.copyAsync({ from: sourceUri, to: tempUri });
+  } catch (error) {
+    logAttachmentWarn('Attachment temp copy failed, falling back to byte write', error);
+    await writeBytesSafely(targetUri, await readFileAsBytes(sourceUri));
+    logAttachmentInfo('Attachment byte fallback copied file', { sourceUri, targetUri });
+    return;
+  }
   try {
     await FileSystem.moveAsync({ from: tempUri, to: targetUri });
-  } catch (error) {
-    await FileSystem.copyAsync({ from: sourceUri, to: targetUri });
+  } catch (moveError) {
+    logAttachmentWarn('Attachment temp move failed, falling back to direct copy', moveError);
     try {
-      await FileSystem.deleteAsync(tempUri, { idempotent: true });
-    } catch {
-      // Ignore cleanup errors for temp file.
+      await FileSystem.copyAsync({ from: sourceUri, to: targetUri });
+    } catch (copyError) {
+      logAttachmentWarn('Attachment direct copy failed, falling back to byte write', copyError);
+      await writeBytesSafely(targetUri, await readFileAsBytes(sourceUri));
+      logAttachmentInfo('Attachment byte fallback copied file', { sourceUri, targetUri });
+    } finally {
+      try {
+        await FileSystem.deleteAsync(tempUri, { idempotent: true });
+      } catch {
+        // Ignore cleanup errors for temp file.
+      }
     }
   }
 };
@@ -259,8 +269,8 @@ export const getCloudBaseUrl = (fullUrl: string): string => {
   return trimmed;
 };
 
-export type WebDavConfig = { url: string; username: string; password: string };
-export type CloudConfig = { url: string; token: string };
+export type WebDavConfig = { url: string; username: string; password: string; allowInsecureHttp?: boolean };
+export type CloudConfig = { url: string; token: string; allowInsecureHttp?: boolean };
 export type ResolvedSyncDir =
   | { type: 'file'; dirUri: string; attachmentsDirUri: string }
   | { type: 'saf'; dirUri: string; attachmentsDirUri: string };
@@ -280,15 +290,6 @@ export const getDropboxClientId = async (): Promise<string> => {
   } catch {
     return '';
   }
-};
-
-const isDropboxUnauthorizedError = (error: unknown): boolean => {
-  if (error instanceof DropboxUnauthorizedError) return true;
-  const message = sanitizeLogMessage(error instanceof Error ? error.message : String(error)).toLowerCase();
-  return message.includes('http 401')
-    || message.includes('invalid_access_token')
-    || message.includes('expired_access_token')
-    || message.includes('unauthorized');
 };
 
 export const runDropboxAuthorized = async <T,>(
@@ -311,29 +312,45 @@ export const runDropboxAuthorized = async <T,>(
 };
 
 export const loadWebDavConfig = async (): Promise<WebDavConfig | null> => {
-  const url = await AsyncStorage.getItem(WEBDAV_URL_KEY);
+  const [url, username, password, allowInsecureHttp] = await Promise.all([
+    AsyncStorage.getItem(WEBDAV_URL_KEY),
+    AsyncStorage.getItem(WEBDAV_USERNAME_KEY),
+    AsyncStorage.getItem(WEBDAV_PASSWORD_KEY),
+    AsyncStorage.getItem(WEBDAV_ALLOW_INSECURE_HTTP_KEY),
+  ]);
   if (!url) return null;
   return {
     url,
-    username: (await AsyncStorage.getItem(WEBDAV_USERNAME_KEY)) || '',
-    password: (await AsyncStorage.getItem(WEBDAV_PASSWORD_KEY)) || '',
+    username: username || '',
+    password: password || '',
+    allowInsecureHttp: allowInsecureHttp === 'true',
   };
 };
 
 export const loadCloudConfig = async (): Promise<CloudConfig | null> => {
-  const url = await AsyncStorage.getItem(CLOUD_URL_KEY);
+  const [url, token, allowInsecureHttp] = await Promise.all([
+    AsyncStorage.getItem(CLOUD_URL_KEY),
+    AsyncStorage.getItem(CLOUD_TOKEN_KEY),
+    AsyncStorage.getItem(CLOUD_ALLOW_INSECURE_HTTP_KEY),
+  ]);
   if (!url) return null;
   return {
     url,
-    token: (await AsyncStorage.getItem(CLOUD_TOKEN_KEY)) || '',
+    token: token || '',
+    allowInsecureHttp: allowInsecureHttp === 'true',
   };
 };
 
-export const getAttachmentsDir = async (): Promise<string | null> => {
+const getManagedAttachmentsDir = (): string | null => {
   const base = FileSystem.documentDirectory || FileSystem.cacheDirectory;
   if (!base) return null;
   const normalized = base.endsWith('/') ? base : `${base}/`;
-  const dir = `${normalized}${ATTACHMENTS_DIR_NAME}/`;
+  return `${normalized}${ATTACHMENTS_DIR_NAME}/`;
+};
+
+export const getAttachmentsDir = async (): Promise<string | null> => {
+  const dir = getManagedAttachmentsDir();
+  if (!dir) return null;
   try {
     await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
   } catch (error) {
@@ -395,14 +412,8 @@ const resolveSafSyncDir = async (syncUri: string): Promise<Extract<ResolvedSyncD
   for (const candidate of directoryCandidates) {
     try {
       const entries = await StorageAccessFramework.readDirectoryAsync(candidate);
-      const decoded: Array<{ entry: string; decoded: string }> = entries.map((entry: string) => ({
-        entry,
-        decoded: decodeURIComponent(entry),
-      }));
-      const matchEntry = decoded.find((item) =>
-        item.decoded.endsWith(`/${ATTACHMENTS_DIR_NAME}`) || item.decoded.endsWith(`:${ATTACHMENTS_DIR_NAME}`)
-      );
-      attachmentsDirUri = matchEntry?.entry ?? null;
+      const matchEntry = entries.find((entry: string) => hasSafLeafName(entry, ATTACHMENTS_DIR_NAME));
+      attachmentsDirUri = matchEntry ?? null;
       if (attachmentsDirUri) break;
     } catch (error) {
       if (candidate === directoryCandidates[directoryCandidates.length - 1]) {
@@ -451,22 +462,26 @@ export const resolveFileSyncDir = async (syncPath: string): Promise<ResolvedSync
   return { type: 'file', dirUri, attachmentsDirUri };
 };
 
-export const findSafEntry = async (dirUri: string, fileName: string): Promise<string | null> => {
-  if (!StorageAccessFramework?.readDirectoryAsync) return null;
+export const readSafDirectoryEntriesByName = async (dirUri: string): Promise<Map<string, string>> => {
+  const entriesByName = new Map<string, string>();
+  if (!StorageAccessFramework?.readDirectoryAsync) return entriesByName;
   try {
     const entries = await StorageAccessFramework.readDirectoryAsync(dirUri);
-    const decoded: Array<{ entry: string; decoded: string }> = entries.map((entry: string) => ({
-      entry,
-      decoded: decodeURIComponent(entry),
-    }));
-    const matchEntry = decoded.find((item) =>
-      item.decoded.endsWith(`/${fileName}`) || item.decoded.endsWith(`:${fileName}`)
-    );
-    return matchEntry?.entry ?? null;
+    for (const entry of entries) {
+      const name = getSafLeafName(entry);
+      if (name && !entriesByName.has(name)) {
+        entriesByName.set(name, entry);
+      }
+    }
   } catch (error) {
     logAttachmentWarn('Failed to read SAF directory', error);
-    return null;
   }
+  return entriesByName;
+};
+
+export const findSafEntry = async (dirUri: string, fileName: string): Promise<string | null> => {
+  const entriesByName = await readSafDirectoryEntriesByName(dirUri);
+  return entriesByName.get(fileName) ?? null;
 };
 
 export const readFileAsBytes = async (uri: string): Promise<Uint8Array> => {
@@ -530,15 +545,26 @@ export const fileExists = async (uri: string): Promise<boolean> => {
   }
 };
 
-export const persistAttachmentLocally = async (attachment: Attachment): Promise<Attachment> => {
-  if (attachment.kind !== 'file') return attachment;
+export type PersistAttachmentOutcome = {
+  attachment: Attachment;
+  /**
+   * 'copied' — bytes were re-homed into the managed attachments dir now;
+   * 'already-local' — the uri already points into the managed dir (success);
+   * 'not-applicable' — nothing to persist (link/http/non-file, or no dir);
+   * 'failed' — the copy was attempted and did not succeed.
+   */
+  status: 'copied' | 'already-local' | 'not-applicable' | 'failed';
+};
+
+export const persistAttachmentLocallyDetailed = async (attachment: Attachment): Promise<PersistAttachmentOutcome> => {
+  if (attachment.kind !== 'file') return { attachment, status: 'not-applicable' };
   const uri = attachment.uri || '';
-  if (!uri || isHttpAttachmentUri(uri)) return attachment;
+  if (!uri || isHttpAttachmentUri(uri)) return { attachment, status: 'not-applicable' };
 
   const attachmentsDir = await getAttachmentsDir();
-  if (!attachmentsDir) return attachment;
+  if (!attachmentsDir) return { attachment, status: 'not-applicable' };
 
-  if (uri.startsWith(attachmentsDir)) return attachment;
+  if (uri.startsWith(attachmentsDir)) return { attachment, status: 'already-local' };
 
   const ext = extractExtension(attachment.title) || extractExtension(uri);
   const filename = `${attachment.id}${ext}`;
@@ -552,12 +578,11 @@ export const persistAttachmentLocally = async (attachment: Attachment): Promise<
     });
     const alreadyExists = await fileExists(targetUri);
     if (!alreadyExists) {
-      if (isContentAttachmentUri(uri)) {
-        const bytes = await readFileAsBytes(uri);
-        await writeBytesSafely(targetUri, bytes);
-      } else {
-        await copyFileSafely(uri, targetUri);
-      }
+      // copyFileSafely streams through native copyAsync (temp + rename) and
+      // only falls back to the JS byte round-trip when the provider refuses
+      // the copy — content:// sources included, so share-sheet files avoid a
+      // double base64 pass on the JS thread.
+      await copyFileSafely(uri, targetUri);
     }
     let size = attachment.size;
     if (!Number.isFinite(size ?? NaN)) {
@@ -572,15 +597,125 @@ export const persistAttachmentLocally = async (attachment: Attachment): Promise<
       size: Number.isFinite(size ?? NaN) ? String(size) : 'unknown',
     });
     return {
-      ...attachment,
-      uri: targetUri,
-      size,
-      localStatus: 'available',
+      attachment: {
+        ...attachment,
+        uri: targetUri,
+        size,
+        localStatus: 'available',
+      },
+      status: 'copied',
     };
   } catch (error) {
     logAttachmentWarn('Failed to cache attachment locally', error);
-    return attachment;
+    return { attachment, status: 'failed' };
   }
+};
+
+// Compatibility shape: callers that only need the (possibly re-homed)
+// attachment. Note the ambiguity — an unchanged result can mean failure OR
+// already-managed; callers that must tell them apart use the Detailed variant.
+export const persistAttachmentLocally = async (attachment: Attachment): Promise<Attachment> => (
+  (await persistAttachmentLocallyDetailed(attachment)).attachment
+);
+
+export const ensureAttachmentStoredLocally = async (attachment: Attachment): Promise<boolean> => {
+  if (attachment.kind !== 'file') return false;
+  if (attachment.deletedAt) return false;
+
+  const cached = await persistAttachmentLocally(attachment);
+  if (
+    cached.uri === attachment.uri
+    && cached.size === attachment.size
+    && cached.localStatus === attachment.localStatus
+  ) {
+    return false;
+  }
+
+  attachment.uri = cached.uri;
+  attachment.size = cached.size;
+  attachment.localStatus = cached.localStatus;
+  return true;
+};
+
+export const attachmentNeedsManagedLocalCopy = (attachment: Attachment): boolean => {
+  if (attachment.kind !== 'file') return false;
+  if (attachment.deletedAt) return false;
+  const uri = attachment.uri || '';
+  if (!uri || isHttpAttachmentUri(uri)) return false;
+  const attachmentsDir = getManagedAttachmentsDir();
+  if (!attachmentsDir) return false;
+  return !uri.startsWith(attachmentsDir);
+};
+
+export const createAttachmentLocalMigrationLimiter = (
+  maxMigrations = ATTACHMENT_LOCAL_MIGRATION_MAX_PER_SYNC
+): ((attachment: Attachment) => Promise<{ migrated: boolean; skipped: boolean }>) => {
+  let migrationAttempts = 0;
+  let limitLogged = false;
+
+  return async (attachment: Attachment): Promise<{ migrated: boolean; skipped: boolean }> => {
+    if (!attachmentNeedsManagedLocalCopy(attachment)) {
+      return { migrated: false, skipped: false };
+    }
+    if (migrationAttempts >= maxMigrations) {
+      if (!limitLogged) {
+        logAttachmentInfo('Attachment local migration limit reached', {
+          limit: String(maxMigrations),
+        });
+        limitLogged = true;
+      }
+      return { migrated: false, skipped: true };
+    }
+
+    migrationAttempts += 1;
+    const migrated = await ensureAttachmentStoredLocally(attachment);
+    // If migration failed but the original URI is still readable, the backend can upload from it.
+    return { migrated, skipped: false };
+  };
+};
+
+export const hasPendingAttachmentSyncWork = async (appData: AppData): Promise<boolean> => {
+  if (appData.settings.attachments?.pendingRemoteDeletes?.length) return true;
+
+  const attachmentsById = collectAttachments(appData);
+  let shouldCheckManagedStorage = false;
+
+  for (const attachment of attachmentsById.values()) {
+    if (attachment.kind !== 'file') continue;
+    if (attachment.deletedAt) continue;
+
+    const uri = attachment.uri || '';
+    const isHttp = isHttpAttachmentUri(uri);
+    const hasLocalUri = Boolean(uri) && !isHttp;
+    if (!attachment.cloudKey && hasLocalUri && attachment.localStatus !== 'missing') {
+      return true;
+    }
+    if (attachment.cloudKey && hasLocalUri && attachment.localStatus === undefined) {
+      return true;
+    }
+    if (attachment.cloudKey && (!uri || attachment.localStatus === 'missing' || attachment.localStatus === 'downloading')) {
+      return true;
+    }
+    if (hasLocalUri) {
+      shouldCheckManagedStorage = true;
+    }
+  }
+
+  if (!shouldCheckManagedStorage) return false;
+  const attachmentsDir = getManagedAttachmentsDir();
+  if (!attachmentsDir) return false;
+
+  for (const attachment of attachmentsById.values()) {
+    if (attachment.kind !== 'file') continue;
+    if (attachment.deletedAt) continue;
+    const uri = attachment.uri || '';
+    if (!uri || isHttpAttachmentUri(uri)) continue;
+    if (!uri.startsWith(attachmentsDir)) {
+      return true;
+    }
+  }
+
+  return false;
 };
 
 export const collectAttachments = (appData: AppData): Map<string, Attachment> => {

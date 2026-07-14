@@ -1,8 +1,11 @@
+import { useId } from 'react';
 import { KeybindingStyle } from '../contexts/keybinding-context';
+import { ModalPortal } from './ModalPortal';
 import {
     type GlobalQuickAddShortcutSetting,
     formatGlobalQuickAddShortcutForDisplay,
 } from '../lib/global-quick-add-shortcut';
+import { MANUAL_SYNC_SHORTCUT_DISPLAY } from '../lib/manual-sync-shortcut';
 
 interface KeybindingHelpModalProps {
     style: KeybindingStyle;
@@ -25,16 +28,20 @@ export function KeybindingHelpModal({
     quickAddShortcut,
     t,
 }: KeybindingHelpModalProps) {
+    const titleId = useId();
     const isMac = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform);
     const quickAddShortcutDisplay = formatGlobalQuickAddShortcutForDisplay(quickAddShortcut, isMac);
     const sharedGlobal: HelpItem[] = [
-        { keys: quickAddShortcutDisplay, labelKey: 'keybindings.quickAdd' },
+        { keys: quickAddShortcutDisplay, labelKey: 'keybindings.globalQuickAdd', fallbackLabel: 'Global quick add' },
+        { keys: 'a', labelKey: 'keybindings.inAppQuickAdd', fallbackLabel: 'In-app quick add' },
+        { keys: MANUAL_SYNC_SHORTCUT_DISPLAY, labelKey: 'settings.syncNow', fallbackLabel: 'Sync now' },
         { keys: 'Ctrl+, / Cmd+,', labelKey: 'keybindings.openSettings' },
         { keys: 'Ctrl-b / Cmd-b', labelKey: 'keybindings.toggleSidebar' },
         { keys: 'Ctrl+\\ / Cmd+\\', labelKey: 'keybindings.toggleSidebar' },
         { keys: 'Ctrl+Shift+\\ / Cmd+Shift+\\', labelKey: 'keybindings.toggleFocusMode' },
         { keys: 'Ctrl+Shift+D / Cmd+Shift+D', labelKey: 'keybindings.list.toggleDetails' },
         { keys: 'Ctrl+Shift+C / Cmd+Shift+C', labelKey: 'keybindings.list.toggleDensity' },
+        { keys: 'Ctrl+Z / Cmd+Z', labelKey: 'keybindings.undo', fallbackLabel: 'Undo last complete/delete' },
         { keys: 'F11', labelKey: 'keybindings.toggleFullscreen' },
     ];
     const vimGlobal: HelpItem[] = [
@@ -56,19 +63,38 @@ export function KeybindingHelpModal({
         { keys: 'gb', labelKey: 'keybindings.goBoard' },
         { keys: 'gd', labelKey: 'keybindings.goDone' },
         { keys: 'ga', labelKey: 'keybindings.goArchived' },
-        { keys: 'a1-a9', labelKey: 'keybindings.switchArea', fallbackLabel: 'Switch to Area 1-9' },
-        { keys: 'a0', labelKey: 'keybindings.clearAreaFilter', fallbackLabel: 'Clear area filter' },
+        { keys: 'A1-A9', labelKey: 'keybindings.switchArea', fallbackLabel: 'Switch to Area 1-9' },
+        { keys: 'A0', labelKey: 'keybindings.clearAreaFilter', fallbackLabel: 'Clear area filter' },
     ];
 
     const vimList: HelpItem[] = [
         { keys: 'j / k / ↑ / ↓', labelKey: 'keybindings.list.nextPrev' },
         { keys: 'gg / G', labelKey: 'keybindings.list.firstLast' },
+        { keys: 'Enter', labelKey: 'keybindings.list.open', fallbackLabel: 'Open selected task' },
         { keys: 'e', labelKey: 'keybindings.list.edit' },
+        { keys: '.', labelKey: 'taskEdit.moreOptions' },
         { keys: 'Ctrl+Enter / Cmd+Enter', labelKey: 'keybindings.list.saveEdit' },
         { keys: 'Esc', labelKey: 'keybindings.list.cancelEdit' },
         { keys: 'x', labelKey: 'keybindings.list.toggleDone' },
         { keys: 'dd', labelKey: 'keybindings.list.delete' },
-        { keys: 'o', labelKey: 'keybindings.list.newTask' },
+        { keys: 'si / sn / sw / ss / sd / sa', labelKey: 'keybindings.list.setStatus', fallbackLabel: 'Set status: Inbox / Next / Waiting / Someday / Done / Archived' },
+        { keys: 'Insert', labelKey: 'keybindings.list.newTask', fallbackLabel: 'Focus add-task input' },
+    ];
+
+    const standardList: HelpItem[] = [
+        { keys: 'j / k / ↑ / ↓', labelKey: 'keybindings.list.nextPrev' },
+        { keys: 'gg / G', labelKey: 'keybindings.list.firstLast' },
+        { keys: 'Enter', labelKey: 'keybindings.list.open', fallbackLabel: 'Open selected task' },
+        { keys: 'Shift+Enter', labelKey: 'keybindings.list.edit' },
+        { keys: 'e', labelKey: 'keybindings.list.toggleDone' },
+        { keys: 'x', labelKey: 'keybindings.list.select', fallbackLabel: 'Select / deselect task' },
+        { keys: '#', labelKey: 'keybindings.list.delete' },
+        { keys: 'z', labelKey: 'keybindings.undo', fallbackLabel: 'Undo last complete/delete' },
+        { keys: '.', labelKey: 'taskEdit.moreOptions' },
+        { keys: 'Ctrl+Enter / Cmd+Enter', labelKey: 'keybindings.list.saveEdit' },
+        { keys: 'Esc', labelKey: 'keybindings.list.cancelEdit' },
+        { keys: 'si / sn / sw / ss / sd / sa', labelKey: 'keybindings.list.setStatus', fallbackLabel: 'Set status: Inbox / Next / Waiting / Someday / Done / Archived' },
+        { keys: 'Insert', labelKey: 'keybindings.list.newTask', fallbackLabel: 'Focus add-task input' },
     ];
 
     const emacsGlobal: HelpItem[] = [
@@ -92,16 +118,19 @@ export function KeybindingHelpModal({
 
     const emacsList: HelpItem[] = [
         { keys: 'Ctrl-n / Ctrl-p / ↑ / ↓', labelKey: 'keybindings.list.nextPrev' },
+        { keys: 'Enter', labelKey: 'keybindings.list.open', fallbackLabel: 'Open selected task' },
         { keys: 'Ctrl-e', labelKey: 'keybindings.list.edit' },
+        { keys: 'Ctrl-.', labelKey: 'taskEdit.moreOptions' },
         { keys: 'Ctrl+Enter / Cmd+Enter', labelKey: 'keybindings.list.saveEdit' },
         { keys: 'Esc', labelKey: 'keybindings.list.cancelEdit' },
         { keys: 'Ctrl-t', labelKey: 'keybindings.list.toggleDone' },
         { keys: 'Ctrl-d', labelKey: 'keybindings.list.delete' },
-        { keys: 'Ctrl-o', labelKey: 'keybindings.list.newTask' },
+        { keys: 'si / sn / sw / ss / sd / sa', labelKey: 'keybindings.list.setStatus', fallbackLabel: 'Set status: Inbox / Next / Waiting / Someday / Done / Archived' },
+        { keys: 'Insert', labelKey: 'keybindings.list.newTask', fallbackLabel: 'Focus add-task input' },
     ];
 
     const globalItems = style === 'emacs' ? emacsGlobal : vimGlobal;
-    const listItems = style === 'emacs' ? emacsList : vimList;
+    const listItems = style === 'emacs' ? emacsList : style === 'standard' ? standardList : vimList;
     const resolveItemLabel = (item: HelpItem) => {
         const translated = t(item.labelKey);
         if (translated !== item.labelKey) return translated;
@@ -109,26 +138,27 @@ export function KeybindingHelpModal({
     };
 
     return (
+        <ModalPortal>
         <div
             className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-            role="button"
-            tabIndex={0}
-            aria-label={t('common.close')}
-            onClick={onClose}
             onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
+                if (event.key === 'Escape') {
                     event.preventDefault();
                     onClose();
                 }
             }}
         >
+            <div className="absolute inset-0" aria-hidden="true" onClick={onClose} />
             <div
-                className="bg-card border border-border rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col"
+                className="relative bg-card border border-border rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby={titleId}
                 onClick={(e) => e.stopPropagation()}
             >
                 <div className="p-6 border-b border-border flex items-center justify-between">
                     <div>
-                        <h3 className="text-xl font-semibold">{t('keybindings.helpTitle')}</h3>
+                        <h3 id={titleId} className="text-xl font-semibold">{t('keybindings.helpTitle')}</h3>
                         <p className="text-sm text-muted-foreground mt-1">
                             {t('keybindings.helpSubtitle')}
                         </p>
@@ -164,12 +194,13 @@ export function KeybindingHelpModal({
                     </div>
 
                     <p className="text-xs text-muted-foreground">
-                        {t('nav.settings')}: {t('keybindings.styleLabel')} • {t('keybindings.style.vim')} / {t('keybindings.style.emacs')} ({currentView})
+                        {t('nav.settings')}: {t('keybindings.styleLabel')} • {t('keybindings.style.standard')} / {t('keybindings.style.vim')} / {t('keybindings.style.emacs')} ({currentView})
                     </p>
                 </div>
 
                 <div className="p-4 border-t border-border flex justify-end">
                     <button
+                        type="button"
                         onClick={onClose}
                         className="px-4 py-2 rounded-md text-sm font-medium bg-muted hover:bg-muted/80 transition-colors"
                     >
@@ -178,5 +209,6 @@ export function KeybindingHelpModal({
                 </div>
             </div>
         </div>
+        </ModalPortal>
     );
 }

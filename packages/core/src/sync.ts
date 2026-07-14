@@ -1,20 +1,24 @@
-import type { AppData, Attachment, Area, Project, Task } from './types';
+import type { AppData, Attachment, Area, Person, Project, Task } from './types';
 import { logWarn } from './logger';
 import {
     type ClockSkewWarning,
     type ConflictReason,
     type EntityMergeStats,
     type MergeResult,
+    type MergeStats,
     type SyncCycleIO,
     type SyncCycleResult,
     type SyncHistoryEntry,
     CLOCK_SKEW_THRESHOLD_MS,
+    DELETE_VS_LIVE_AMBIGUOUS_WINDOW_MS,
+    SYNC_REPAIR_REV_BY,
 } from './sync-types';
 import {
     isValidTimestamp,
     type SyncMergeArea,
     normalizeAreaForSyncMerge,
     normalizeAppData,
+    normalizePersonForSyncMerge,
     normalizeProjectForSyncMerge,
     repairMergedSyncReferences,
     normalizeRevisionMetadata,
@@ -26,7 +30,11 @@ import { mergeSettingsForSync } from './sync-merge-settings';
 import {
     chooseDeterministicWinner,
     collectComparableDiffKeys,
+    createSyncSignatureMemo,
+    type SyncSignatureMemo,
     hashComparableSignature,
+    normalizeAreaForContentComparison,
+    normalizePersonForContentComparison,
     normalizeProjectForContentComparison,
     normalizeSectionForContentComparison,
     normalizeTaskForContentComparison,
@@ -34,6 +42,9 @@ import {
     toComparableValue,
 } from './sync-signatures';
 import { purgeExpiredTombstones } from './sync-tombstones';
+import { nextRevision, SYNC_BACKUP_RESTORE_REV_BY } from './sync-revision';
+import { summarizeMergeStats } from './sync-log-utils';
+import { executeSyncCycle } from './sync-cycle';
 
 export type {
     ClockSkewDirection,
@@ -48,9 +59,11 @@ export type {
     SyncHistoryEntry,
     SyncStep,
 } from './sync-types';
-export { CLOCK_SKEW_THRESHOLD_MS } from './sync-types';
+export { CLOCK_SKEW_THRESHOLD_MS, DELETE_VS_LIVE_AMBIGUOUS_WINDOW_MS, SYNC_REPAIR_REV_BY } from './sync-types';
 export { normalizeAppData } from './sync-normalization';
 export { purgeExpiredTombstones } from './sync-tombstones';
+export { createSyncCycleExecutor, executeSyncCycle } from './sync-cycle';
+export type { SyncCycleExecutor, SyncCycleOperation } from './sync-cycle';
 
 export const appendSyncHistory = (
     settings: AppData['settings'] | undefined,
@@ -70,6 +83,20 @@ export const appendSyncHistory = (
     return next.slice(0, Math.max(1, limit));
 };
 
+const buildSyncHistoryDetails = (stats: MergeStats): string | undefined => {
+    const summary = summarizeMergeStats(stats);
+    const details: string[] = [];
+    if (summary.deleteVsLiveConflicts > 0) {
+        const itemLabel = summary.deleteVsLiveConflicts === 1 ? 'item' : 'items';
+        details.push(`Delete-vs-live conflict on ${summary.deleteVsLiveConflicts} ${itemLabel}; live edits can be preserved when delete and edit times are ambiguous.`);
+    }
+    if (summary.futureTimestampClamps > 0) {
+        const itemLabel = summary.futureTimestampClamps === 1 ? 'timestamp' : 'timestamps';
+        details.push(`Future sync timestamp clamp on ${summary.futureTimestampClamps} ${itemLabel}; check device clocks if this repeats.`);
+    }
+    return details.length > 0 ? details.join(' ') : undefined;
+};
+
 function createEmptyEntityStats(localTotal: number, incomingTotal: number): EntityMergeStats {
     return {
         localTotal,
@@ -87,6 +114,8 @@ function createEmptyEntityStats(localTotal: number, incomingTotal: number): Enti
         invalidTimestamps: 0,
         timestampAdjustments: 0,
         timestampAdjustmentIds: [],
+        futureTimestampClamps: 0,
+        futureTimestampClampIds: [],
         conflictReasonCounts: {},
         conflictSamples: [],
     };
@@ -94,9 +123,9 @@ function createEmptyEntityStats(localTotal: number, incomingTotal: number): Enti
 
 const CONFLICT_SAMPLE_LIMIT = 5;
 const CONFLICT_DIFF_KEY_LIMIT = 8;
-const DELETE_VS_LIVE_AMBIGUOUS_WINDOW_MS = 30 * 1000;
 const PENDING_REMOTE_WRITE_RETRY_BASE_MS = 5 * 1000;
 const PENDING_REMOTE_WRITE_RETRY_MAX_MS = 5 * 60 * 1000;
+const PENDING_REMOTE_WRITE_MAX_ATTEMPTS = 12;
 const ATTACHMENT_URI_DECODE_LIMIT = 32;
 const ATTACHMENT_TRAVERSAL_SEGMENT_PATTERN = /(^|[\\/])\.\.([\\/]|$)/;
 const ATTACHMENT_TRAVERSAL_SEGMENT_CACHE_LIMIT = 1024;
@@ -117,13 +146,13 @@ const parseMergeTimestamp = (value: unknown, maxAllowedMs?: number): MergeTimest
     if (!Number.isFinite(parsed)) {
         return { raw: -1, safe: -1, wasClamped: false };
     }
-    if (maxAllowedMs !== undefined && parsed > maxAllowedMs) {
+    if (maxAllowedMs !== undefined && parsed > maxAllowedMs + CLOCK_SKEW_THRESHOLD_MS) {
         return { raw: parsed, safe: maxAllowedMs, wasClamped: true };
     }
     return { raw: parsed, safe: parsed, wasClamped: false };
 };
 
-const attachmentTraversalSegmentCache = new Map<string, boolean>();
+const attachmentTraversalSegmentSafetyCache = new Map<string, boolean>();
 
 const getMergeTimestampComparison = (
     localTime: MergeTimestampInfo,
@@ -142,7 +171,7 @@ const getMergeTimestampComparison = (
 };
 
 const containsAttachmentTraversalSegment = (value: string): boolean => {
-    const cached = attachmentTraversalSegmentCache.get(value);
+    const cached = attachmentTraversalSegmentSafetyCache.get(value);
     if (cached !== undefined) {
         return cached;
     }
@@ -187,10 +216,10 @@ const containsAttachmentTraversalSegment = (value: string): boolean => {
     }
 
     const hasTraversalSegment = Array.from(candidates).some((candidate) => ATTACHMENT_TRAVERSAL_SEGMENT_PATTERN.test(candidate));
-    if (attachmentTraversalSegmentCache.size >= ATTACHMENT_TRAVERSAL_SEGMENT_CACHE_LIMIT) {
-        attachmentTraversalSegmentCache.clear();
+    if (attachmentTraversalSegmentSafetyCache.size >= ATTACHMENT_TRAVERSAL_SEGMENT_CACHE_LIMIT) {
+        attachmentTraversalSegmentSafetyCache.clear();
     }
-    attachmentTraversalSegmentCache.set(value, hasTraversalSegment);
+    attachmentTraversalSegmentSafetyCache.set(value, hasTraversalSegment);
     return hasTraversalSegment;
 };
 
@@ -211,12 +240,18 @@ type MergeableEntity = {
     revBy?: string;
 };
 
+type MergeAppDataOptions = {
+    nowIso?: string;
+};
+
 function mergeEntitiesWithStats<T extends MergeableEntity>(
     local: T[],
     incoming: T[],
     mergeConflict?: (localItem: T, incomingItem: T, winner: T) => T,
     normalizeForComparison?: ComparisonNormalizer<T>,
     entityType: string = 'entity',
+    signatureMemo: SyncSignatureMemo = createSyncSignatureMemo(),
+    nowIso?: string,
 ): { merged: T[]; stats: EntityMergeStats } {
     const localMap = new Map<string, T>(local.map((item) => [item.id, item]));
     const incomingMap = new Map<string, T>(incoming.map((item) => [item.id, item]));
@@ -226,7 +261,15 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
     const merged: T[] = [];
     let invalidDeletedAtWarnings = 0;
     let ambiguousResurrectionWarnings = 0;
-    const maxAllowedMergeTime = Date.now();
+    let discardedLiveConflictWarnings = 0;
+    let taskStatusResolutionWarnings = 0;
+    let futureTimestampClampWarnings = 0;
+    const nowTime = nowIso ? new Date(nowIso).getTime() : NaN;
+    const maxAllowedMergeTime = Number.isFinite(nowTime) ? nowTime : Date.now();
+    const getStringField = (item: T, field: string): string | undefined => {
+        const value = (item as Record<string, unknown>)[field];
+        return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+    };
     const recoverCreatedAtFromCounterpart = (item: T, counterpart?: T): string | undefined => {
         if (!counterpart?.createdAt) return undefined;
         const updatedTime = new Date(item.updatedAt).getTime();
@@ -290,6 +333,26 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
         const normalizedIncomingItem = normalizeTimestamps(incomingItem, localItem);
         const localUpdatedTime = parseMergeTimestamp(normalizedLocalItem.updatedAt, maxAllowedMergeTime);
         const incomingUpdatedTime = parseMergeTimestamp(normalizedIncomingItem.updatedAt, maxAllowedMergeTime);
+        if (localUpdatedTime.wasClamped || incomingUpdatedTime.wasClamped) {
+            stats.futureTimestampClamps += Number(localUpdatedTime.wasClamped) + Number(incomingUpdatedTime.wasClamped);
+            if (stats.futureTimestampClampIds.length < 20) stats.futureTimestampClampIds.push(id);
+            if (localUpdatedTime.wasClamped && incomingUpdatedTime.wasClamped) {
+                futureTimestampClampWarnings += 1;
+                if (futureTimestampClampWarnings <= 5) {
+                    logWarn('Both merge candidates had future updatedAt timestamps clamped', {
+                        scope: 'sync',
+                        category: 'sync',
+                        context: {
+                            entityType,
+                            id,
+                            localUpdatedAt: normalizedLocalItem.updatedAt,
+                            incomingUpdatedAt: normalizedIncomingItem.updatedAt,
+                            clampTime: new Date(maxAllowedMergeTime).toISOString(),
+                        },
+                    });
+                }
+            }
+        }
         const safeLocalTime = localUpdatedTime.safe;
         const safeIncomingTime = incomingUpdatedTime.safe;
         const comparableUpdatedTimeDiff = getMergeTimestampComparison(localUpdatedTime, incomingUpdatedTime);
@@ -308,25 +371,21 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
         const revByDiff = localRevBy !== incomingRevBy;
         const comparableLocalItem = normalizeForComparison ? normalizeForComparison(normalizedLocalItem) : normalizedLocalItem;
         const comparableIncomingItem = normalizeForComparison ? normalizeForComparison(normalizedIncomingItem) : normalizedIncomingItem;
-        const localComparableSignature = toComparableSignature(comparableLocalItem);
-        const incomingComparableSignature = toComparableSignature(comparableIncomingItem);
+        const localComparableSignature = toComparableSignature(comparableLocalItem, signatureMemo);
+        const incomingComparableSignature = toComparableSignature(comparableIncomingItem, signatureMemo);
         const comparableContentMatches = localComparableSignature === incomingComparableSignature;
-        const revisionOnlyDrift = hasRevision
-            && revDiff !== 0
-            && localDeleted === incomingDeleted
-            && comparableContentMatches;
         const shouldCheckContentDiff = hasRevision
             ? revDiff === 0 && localDeleted === incomingDeleted
             : localDeleted === incomingDeleted;
         const contentDiff = shouldCheckContentDiff ? !comparableContentMatches : false;
-        const meaningfulRevisionDiff = hasRevision && revDiff !== 0 && !revisionOnlyDrift;
+        const unresolvedDeleteStateDiff = localDeleted !== incomingDeleted && (!hasRevision || revDiff === 0);
         const conflictReasons: ConflictReason[] = [];
-        if (localDeleted !== incomingDeleted) conflictReasons.push('deleteState');
-        if (meaningfulRevisionDiff) conflictReasons.push('revision');
+        if (unresolvedDeleteStateDiff) conflictReasons.push('deleteState');
         if (contentDiff) conflictReasons.push('content');
+        let deleteVsLiveOperationDiffMs: number | undefined;
 
         const differs = hasRevision
-            ? meaningfulRevisionDiff || localDeleted !== incomingDeleted || contentDiff
+            ? unresolvedDeleteStateDiff || contentDiff
             : localDeleted !== incomingDeleted || contentDiff;
 
         if (differs) {
@@ -340,7 +399,7 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
 
         const safeTimeDiff = safeIncomingTime - safeLocalTime;
         const absoluteSkew = Math.abs(safeTimeDiff);
-        if (absoluteSkew > stats.maxClockSkewMs) {
+        if (differs && absoluteSkew > stats.maxClockSkewMs) {
             stats.maxClockSkewMs = absoluteSkew;
             stats.maxClockSkewDirection = safeTimeDiff >= 0 ? 'remote-ahead' : 'local-ahead';
         }
@@ -363,19 +422,23 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
                 return safeUpdatedTime;
             }
 
-            return deletedTimeRaw > maxAllowedMergeTime ? maxAllowedMergeTime : deletedTimeRaw;
+            const safeDeletedTime = deletedTimeRaw > maxAllowedMergeTime + CLOCK_SKEW_THRESHOLD_MS ? maxAllowedMergeTime : deletedTimeRaw;
+            return Math.max(safeUpdatedTime, safeDeletedTime);
         };
         let winner = comparableUpdatedTimeDiff > 0 ? normalizedIncomingItem : normalizedLocalItem;
         const preferDeletedCandidate = (left: T, right: T): T => {
             if (left.deletedAt && !right.deletedAt) return left;
             if (right.deletedAt && !left.deletedAt) return right;
-            return chooseDeterministicWinner(left, right);
+            return chooseDeterministicWinner(left, right, signatureMemo);
         };
         const preferLiveCandidate = (left: T, right: T): T => {
             if (left.deletedAt && !right.deletedAt) return right;
             if (right.deletedAt && !left.deletedAt) return left;
-            return chooseDeterministicWinner(left, right);
+            return chooseDeterministicWinner(left, right, signatureMemo);
         };
+        const isBackupRestoreLiveCandidate = (item: T): boolean => (
+            !item.deletedAt && item.revBy === SYNC_BACKUP_RESTORE_REV_BY
+        );
         const resolveDeleteVsLiveWinner = (
             localCandidate: T,
             incomingCandidate: T,
@@ -383,6 +446,22 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
             const localOpTime = resolveOperationTime(localCandidate, localUpdatedTime);
             const incomingOpTime = resolveOperationTime(incomingCandidate, incomingUpdatedTime);
             const operationDiff = incomingOpTime - localOpTime;
+            const restoreLiveCandidate = isBackupRestoreLiveCandidate(localCandidate)
+                ? localCandidate
+                : isBackupRestoreLiveCandidate(incomingCandidate)
+                    ? incomingCandidate
+                    : undefined;
+            if (restoreLiveCandidate) {
+                const restoreOpTime = restoreLiveCandidate === localCandidate ? localOpTime : incomingOpTime;
+                const tombstoneOpTime = restoreLiveCandidate === localCandidate ? incomingOpTime : localOpTime;
+                if (restoreOpTime >= tombstoneOpTime) {
+                    return {
+                        winner: restoreLiveCandidate,
+                        preservedLiveInAmbiguousWindow: Math.abs(operationDiff) <= DELETE_VS_LIVE_AMBIGUOUS_WINDOW_MS,
+                        operationDiffMs: operationDiff,
+                    };
+                }
+            }
             if (Math.abs(operationDiff) <= DELETE_VS_LIVE_AMBIGUOUS_WINDOW_MS) {
                 if (hasRevision && revDiff !== 0) {
                     const winner = revDiff > 0 ? normalizedLocalItem : normalizedIncomingItem;
@@ -392,7 +471,9 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
                         operationDiffMs: operationDiff,
                     };
                 }
-                const winner = preferLiveCandidate(localCandidate, incomingCandidate);
+                const winner = hasRevision
+                    ? preferLiveCandidate(localCandidate, incomingCandidate)
+                    : preferDeletedCandidate(localCandidate, incomingCandidate);
                 return {
                     winner,
                     preservedLiveInAmbiguousWindow: !winner.deletedAt,
@@ -412,46 +493,10 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
             };
         };
 
-        if (hasRevision) {
-            if (localDeleted !== incomingDeleted) {
-                const resolution = resolveDeleteVsLiveWinner(normalizedLocalItem, normalizedIncomingItem);
-                winner = resolution.winner;
-                if (resolution.preservedLiveInAmbiguousWindow) {
-                    ambiguousResurrectionWarnings += 1;
-                    if (ambiguousResurrectionWarnings <= 5) {
-                        logWarn('Preserved live item during ambiguous delete-vs-live merge', {
-                            scope: 'sync',
-                            category: 'sync',
-                            context: {
-                                entityType,
-                                id,
-                                operationDiffMs: resolution.operationDiffMs,
-                                localDeletedAt: normalizedLocalItem.deletedAt,
-                                incomingDeletedAt: normalizedIncomingItem.deletedAt,
-                                localUpdatedAt: normalizedLocalItem.updatedAt,
-                                incomingUpdatedAt: normalizedIncomingItem.updatedAt,
-                                localRev,
-                                incomingRev,
-                                localRevBy: localRevBy || undefined,
-                                incomingRevBy: incomingRevBy || undefined,
-                            },
-                        });
-                    }
-                }
-            } else if (revDiff !== 0) {
-                winner = revDiff > 0 ? normalizedLocalItem : normalizedIncomingItem;
-            } else if (comparableUpdatedTimeDiff !== 0) {
-                winner = comparableUpdatedTimeDiff > 0 ? normalizedIncomingItem : normalizedLocalItem;
-            // Only use revBy when both sides provide it; otherwise older clients without revBy
-            // fall back to deterministic convergence instead of silently losing to partial metadata.
-            } else if (revByDiff && localRevBy && incomingRevBy) {
-                winner = incomingRevBy > localRevBy ? normalizedIncomingItem : normalizedLocalItem;
-            } else {
-                winner = chooseDeterministicWinner(normalizedLocalItem, normalizedIncomingItem);
-            }
-        } else if (localDeleted !== incomingDeleted) {
+        if (localDeleted !== incomingDeleted) {
             const resolution = resolveDeleteVsLiveWinner(normalizedLocalItem, normalizedIncomingItem);
             winner = resolution.winner;
+            deleteVsLiveOperationDiffMs = resolution.operationDiffMs;
             if (resolution.preservedLiveInAmbiguousWindow) {
                 ambiguousResurrectionWarnings += 1;
                 if (ambiguousResurrectionWarnings <= 5) {
@@ -474,14 +519,103 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
                     });
                 }
             }
-        } else if (withinSkew && comparableUpdatedTimeDiff === 0) {
-            winner = chooseDeterministicWinner(normalizedLocalItem, normalizedIncomingItem);
+        } else if (hasRevision) {
+            if (revDiff !== 0) {
+                winner = revDiff > 0 ? normalizedLocalItem : normalizedIncomingItem;
+            } else if (comparableUpdatedTimeDiff !== 0) {
+                winner = comparableUpdatedTimeDiff > 0 ? normalizedIncomingItem : normalizedLocalItem;
+            // Only use revBy when both sides provide it; otherwise older clients without revBy
+            // fall back to deterministic convergence instead of silently losing to partial metadata.
+            } else if (revByDiff && localRevBy && incomingRevBy) {
+                winner = incomingRevBy > localRevBy ? normalizedIncomingItem : normalizedLocalItem;
+            } else {
+                winner = chooseDeterministicWinner(normalizedLocalItem, normalizedIncomingItem, signatureMemo);
+            }
+        } else {
+            const hasInvalidTimestamp = localUpdatedTime.raw < 0 || incomingUpdatedTime.raw < 0;
+            const requiresStrictTimestampOrdering = comparableUpdatedTimeDiff !== 0
+                && (hasInvalidTimestamp || localUpdatedTime.wasClamped || incomingUpdatedTime.wasClamped);
+            if (requiresStrictTimestampOrdering) {
+                winner = comparableUpdatedTimeDiff > 0 ? normalizedIncomingItem : normalizedLocalItem;
+            } else if (withinSkew) {
+                winner = chooseDeterministicWinner(normalizedLocalItem, normalizedIncomingItem, signatureMemo);
+            } else if (comparableUpdatedTimeDiff !== 0) {
+                winner = comparableUpdatedTimeDiff > 0 ? normalizedIncomingItem : normalizedLocalItem;
+            } else {
+                winner = chooseDeterministicWinner(normalizedLocalItem, normalizedIncomingItem, signatureMemo);
+            }
         }
         if (winner === normalizedIncomingItem) stats.resolvedUsingIncoming += 1;
         else stats.resolvedUsingLocal += 1;
 
+        if (entityType === 'task') {
+            const localStatus = getStringField(normalizedLocalItem, 'status');
+            const incomingStatus = getStringField(normalizedIncomingItem, 'status');
+            if (localStatus && incomingStatus && localStatus !== incomingStatus) {
+                taskStatusResolutionWarnings += 1;
+                if (taskStatusResolutionWarnings <= 10) {
+                    const winnerSide = winner === normalizedIncomingItem ? 'incoming' : 'local';
+                    const resolutionReason = localDeleted !== incomingDeleted
+                        ? 'deleteState'
+                        : hasRevision && revDiff !== 0
+                            ? 'revision'
+                            : comparableUpdatedTimeDiff !== 0
+                                ? 'timestamp'
+                                : revByDiff && localRevBy && incomingRevBy
+                                    ? 'revBy'
+                                    : 'deterministic';
+                    logWarn('syncTaskStatusResolution', {
+                        scope: 'sync',
+                        category: 'sync',
+                        context: {
+                            id,
+                            winnerSide,
+                            resolutionReason,
+                            countedConflict: differs,
+                            localStatus,
+                            incomingStatus,
+                            localCompletedAt: getStringField(normalizedLocalItem, 'completedAt'),
+                            incomingCompletedAt: getStringField(normalizedIncomingItem, 'completedAt'),
+                            localUpdatedAt: normalizedLocalItem.updatedAt,
+                            incomingUpdatedAt: normalizedIncomingItem.updatedAt,
+                            localRev,
+                            incomingRev,
+                            localRevBy: localRevBy || undefined,
+                            incomingRevBy: incomingRevBy || undefined,
+                        },
+                    });
+                }
+            }
+        }
+
         if (winner.deletedAt && (!normalizedLocalItem.deletedAt || !normalizedIncomingItem.deletedAt || differs)) {
             stats.deletionsWon += 1;
+        }
+
+        if (localDeleted !== incomingDeleted && winner.deletedAt) {
+            discardedLiveConflictWarnings += 1;
+            if (discardedLiveConflictWarnings <= 5) {
+                logWarn('syncConflictDiscarded', {
+                    scope: 'sync',
+                    category: 'sync',
+                    context: {
+                        entityType,
+                        id,
+                        discardedSide: localDeleted ? 'incoming' : 'local',
+                        winnerSide: winner === normalizedIncomingItem ? 'incoming' : 'local',
+                        reason: 'deleteState',
+                        operationDiffMs: deleteVsLiveOperationDiffMs,
+                        localDeletedAt: normalizedLocalItem.deletedAt,
+                        incomingDeletedAt: normalizedIncomingItem.deletedAt,
+                        localUpdatedAt: normalizedLocalItem.updatedAt,
+                        incomingUpdatedAt: normalizedIncomingItem.updatedAt,
+                        localRev,
+                        incomingRev,
+                        localRevBy: localRevBy || undefined,
+                        incomingRevBy: incomingRevBy || undefined,
+                    },
+                });
+            }
         }
 
         if (differs && (stats.conflictSamples?.length || 0) < CONFLICT_SAMPLE_LIMIT) {
@@ -517,30 +651,59 @@ function mergeEntitiesWithStats<T extends MergeableEntity>(
         merged.push(normalizeTimestamps(mergedItem));
     }
 
+    if (discardedLiveConflictWarnings > 5) {
+        logWarn('syncConflictDiscardedSummary', {
+            scope: 'sync',
+            category: 'sync',
+            context: {
+                entityType,
+                total: discardedLiveConflictWarnings,
+                elided: discardedLiveConflictWarnings - 5,
+            },
+        });
+    }
+    if (taskStatusResolutionWarnings > 10) {
+        logWarn('syncTaskStatusResolutionSummary', {
+            scope: 'sync',
+            category: 'sync',
+            context: {
+                entityType,
+                total: taskStatusResolutionWarnings,
+                elided: taskStatusResolutionWarnings - 10,
+            },
+        });
+    }
+
     stats.mergedTotal = merged.length;
 
     return { merged, stats };
 }
 
-function mergeAreas(local: SyncMergeArea[], incoming: SyncMergeArea[]): { merged: Area[]; stats: EntityMergeStats } {
-    const result = mergeEntitiesWithStats(local, incoming, undefined, undefined, 'area');
+function mergeAreas(
+    local: SyncMergeArea[],
+    incoming: SyncMergeArea[],
+    signatureMemo: SyncSignatureMemo = createSyncSignatureMemo(),
+    nowIso?: string,
+): { merged: Area[]; stats: EntityMergeStats } {
+    const result = mergeEntitiesWithStats(local, incoming, undefined, normalizeAreaForContentComparison, 'area', signatureMemo, nowIso);
     let fallbackOrder = result.merged.reduce((maxOrder, area) => {
         const order = typeof area.order === 'number' && Number.isFinite(area.order) ? area.order : -1;
         return Math.max(maxOrder, order);
     }, -1) + 1;
     const merged: Area[] = result.merged.map((area) => {
-        const order = typeof area.order === 'number' && Number.isFinite(area.order)
-            ? area.order
-            : fallbackOrder;
-        const normalized: Area = { ...area, order };
+        if (typeof area.order === 'number' && Number.isFinite(area.order)) {
+            return { ...area, order: area.order };
+        }
+        const normalized: Area = {
+            ...area,
+            order: fallbackOrder,
+            rev: nextRevision(area.rev),
+            revBy: SYNC_REPAIR_REV_BY,
+        };
         fallbackOrder += 1;
         return normalized;
     });
     return { merged, stats: result.stats };
-}
-
-export function filterDeleted<T extends { deletedAt?: string }>(items: T[]): T[] {
-    return items.filter((item) => !item.deletedAt);
 }
 
 const getClockSkewWarning = (stats: MergeResult['stats']): ClockSkewWarning | undefined => {
@@ -549,10 +712,12 @@ const getClockSkewWarning = (stats: MergeResult['stats']): ClockSkewWarning | un
         stats.projects,
         stats.sections,
         stats.areas,
-    ].filter((entityStats) =>
-        (entityStats.maxClockSkewMs || 0) > CLOCK_SKEW_THRESHOLD_MS
-        && !!entityStats.maxClockSkewDirection
-    );
+        stats.people,
+    ].filter((entityStats): entityStats is EntityMergeStats => {
+        if (!entityStats) return false;
+        return (entityStats.maxClockSkewMs || 0) > CLOCK_SKEW_THRESHOLD_MS
+            && !!entityStats.maxClockSkewDirection;
+    });
     if (candidates.length === 0) return undefined;
     candidates.sort((left, right) => (right.maxClockSkewMs || 0) - (left.maxClockSkewMs || 0));
     const winner = candidates[0];
@@ -563,14 +728,16 @@ const getClockSkewWarning = (stats: MergeResult['stats']): ClockSkewWarning | un
     };
 };
 
-export function mergeAppDataWithStats(local: AppData, incoming: AppData): MergeResult {
-    const nowIso = new Date().toISOString();
+export function mergeAppDataWithStats(local: AppData, incoming: AppData, options: MergeAppDataOptions = {}): MergeResult {
+    const nowIso = isValidTimestamp(options.nowIso) ? options.nowIso : new Date().toISOString();
+    const signatureMemo = createSyncSignatureMemo();
     const localNormalized = {
         ...local,
         tasks: (local.tasks || []).map((task) => normalizeRevisionMetadata(normalizeTaskForSyncMerge(task, nowIso))),
         projects: (local.projects || []).map((project) => normalizeRevisionMetadata(normalizeProjectForSyncMerge(project))),
         sections: (local.sections || []).map((section) => normalizeRevisionMetadata(section)),
         areas: (local.areas || []).map((area) => normalizeRevisionMetadata(normalizeAreaForSyncMerge(area, nowIso))),
+        people: (local.people || []).map((person) => normalizeRevisionMetadata(normalizePersonForSyncMerge(person, nowIso))),
     };
     const incomingNormalized = {
         ...incoming,
@@ -578,6 +745,7 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData): MergeR
         projects: (incoming.projects || []).map((project) => normalizeRevisionMetadata(normalizeProjectForSyncMerge(project))),
         sections: (incoming.sections || []).map((section) => normalizeRevisionMetadata(section)),
         areas: (incoming.areas || []).map((area) => normalizeRevisionMetadata(normalizeAreaForSyncMerge(area, nowIso))),
+        people: (incoming.people || []).map((person) => normalizeRevisionMetadata(normalizePersonForSyncMerge(person, nowIso))),
     };
 
     const mergeAttachments = (localAttachments?: Attachment[], incomingAttachments?: Attachment[]): Attachment[] | undefined => {
@@ -608,7 +776,6 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData): MergeR
                 return winner;
             }
 
-            const winnerIsIncoming = winner === incomingAttachment;
             const winnerHasUri = hasAvailableUri(winner);
             const localHasUri = hasAvailableUri(localAttachment);
             const incomingHasUri = hasAvailableUri(incomingAttachment);
@@ -622,14 +789,16 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData): MergeR
             if (winnerHasUri) {
                 uri = winnerUri || winner.uri;
                 localStatus = winner.localStatus || 'available';
-            } else if (winnerIsIncoming && localHasUri) {
-                uri = localUri || localAttachment.uri;
-                localStatus = localAttachment.localStatus || 'available';
-            } else if (!winnerIsIncoming && incomingHasUri) {
-                uri = incomingUri || incomingAttachment.uri;
-                localStatus = incomingAttachment.localStatus || 'available';
+            } else if (localHasUri || incomingHasUri) {
+                if (localHasUri) {
+                    uri = localUri || localAttachment.uri;
+                    localStatus = localAttachment.localStatus || 'available';
+                } else {
+                    uri = incomingUri || incomingAttachment.uri;
+                    localStatus = incomingAttachment.localStatus || 'available';
+                }
             } else {
-                uri = '';
+                uri = winnerUri || localUri || incomingUri || '';
                 localStatus = normalizeMissingFileStatus(localStatus, winner.deletedAt);
             }
             if ((localStatus === undefined || localStatus === null) && !!sanitizeMergedAttachmentUri(uri)) {
@@ -647,7 +816,7 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData): MergeR
                 uri,
                 localStatus,
             };
-        }, undefined, 'attachment').merged;
+        }, undefined, 'attachment', signatureMemo, nowIso).merged;
 
         const normalized = merged.map((attachment) => {
             if (attachment.kind !== 'file') return attachment;
@@ -686,7 +855,9 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData): MergeR
             return { ...winner, attachments };
         },
         normalizeTaskForContentComparison,
-        'task'
+        'task',
+        signatureMemo,
+        nowIso
     );
 
     const projectsResult = mergeEntitiesWithStats(
@@ -697,7 +868,9 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData): MergeR
             return { ...winner, attachments };
         },
         normalizeProjectForContentComparison,
-        'project'
+        'project',
+        signatureMemo,
+        nowIso
     );
 
     const sectionsResult = mergeEntitiesWithStats(
@@ -705,16 +878,28 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData): MergeR
         incomingNormalized.sections,
         undefined,
         normalizeSectionForContentComparison,
-        'section'
+        'section',
+        signatureMemo,
+        nowIso
     );
 
-    const areasResult = mergeAreas(localNormalized.areas, incomingNormalized.areas);
+    const areasResult = mergeAreas(localNormalized.areas, incomingNormalized.areas, signatureMemo, nowIso);
+    const peopleResult = mergeEntitiesWithStats(
+        localNormalized.people,
+        incomingNormalized.people,
+        undefined,
+        normalizePersonForContentComparison,
+        'person',
+        signatureMemo,
+        nowIso
+    );
 
     const stats = {
         tasks: tasksResult.stats,
         projects: projectsResult.stats,
         sections: sectionsResult.stats,
         areas: areasResult.stats,
+        people: peopleResult.stats,
     };
 
     return {
@@ -723,6 +908,7 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData): MergeR
             projects: projectsResult.merged,
             sections: sectionsResult.merged,
             areas: areasResult.merged,
+            people: peopleResult.merged as Person[],
             settings: mergeSettingsForSync(localNormalized.settings, incomingNormalized.settings),
         }, nowIso),
         stats,
@@ -730,8 +916,8 @@ export function mergeAppDataWithStats(local: AppData, incoming: AppData): MergeR
     };
 }
 
-export function mergeAppData(local: AppData, incoming: AppData): AppData {
-    return mergeAppDataWithStats(local, incoming).data;
+export function mergeAppData(local: AppData, incoming: AppData, options: MergeAppDataOptions = {}): AppData {
+    return mergeAppDataWithStats(local, incoming, options).data;
 }
 
 const withPendingRemoteWriteFlag = (
@@ -769,6 +955,10 @@ const clearPendingRemoteWriteFlag = (data: AppData): AppData => {
 
 const hasPendingRemoteWriteFlag = (data: AppData): boolean => isValidTimestamp(data.settings.pendingRemoteWriteAt);
 
+const isLocalSyncAbortError = (error: unknown): boolean => (
+    error instanceof Error && error.name === 'LocalSyncAbort'
+);
+
 const getPendingRemoteWriteAttemptCount = (data: AppData): number => {
     const attempts = data.settings.pendingRemoteWriteAttempts;
     if (typeof attempts !== 'number' || !Number.isFinite(attempts) || attempts < 0) {
@@ -785,8 +975,16 @@ const getPendingRemoteWriteBlockedMs = (data: AppData, nowIso: string): number =
     return Math.max(0, retryAtMs - nowMs);
 };
 
-const withPendingRemoteWriteRetry = (data: AppData, nowIso: string): AppData => {
-    const nextAttempts = getPendingRemoteWriteAttemptCount(data) + 1;
+const getSyncErrorMessage = (error: unknown): string | undefined => {
+    if (error instanceof Error && error.message.trim()) return error.message.trim();
+    if (typeof error === 'string' && error.trim()) return error.trim();
+    return undefined;
+};
+
+const withPendingRemoteWriteRetry = (data: AppData, nowIso: string, error?: unknown): AppData => {
+    const rawNextAttempts = getPendingRemoteWriteAttemptCount(data) + 1;
+    const nextAttempts = Math.min(rawNextAttempts, PENDING_REMOTE_WRITE_MAX_ATTEMPTS);
+    const reachedAttemptCeiling = rawNextAttempts >= PENDING_REMOTE_WRITE_MAX_ATTEMPTS;
     const backoffMs = Math.min(
         PENDING_REMOTE_WRITE_RETRY_MAX_MS,
         PENDING_REMOTE_WRITE_RETRY_BASE_MS * (2 ** Math.max(0, nextAttempts - 1))
@@ -799,13 +997,19 @@ const withPendingRemoteWriteRetry = (data: AppData, nowIso: string): AppData => 
         ...data,
         settings: {
             ...data.settings,
+            // This path only runs after the merged snapshot was saved locally and
+            // the remote write failed, so the UI should show an error until retry clears it.
+            lastSyncStatus: 'error',
+            lastSyncError: reachedAttemptCeiling
+                ? `Remote write failed after ${PENDING_REMOTE_WRITE_MAX_ATTEMPTS} attempts. Check your sync backend, then sync again.`
+                : getSyncErrorMessage(error) ?? 'Remote write failed. Retrying in the background.',
             pendingRemoteWriteRetryAt: retryAt,
             pendingRemoteWriteAttempts: nextAttempts,
         },
     };
 };
 
-export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult> {
+async function performSyncCycleUnlocked(io: SyncCycleIO): Promise<SyncCycleResult> {
     const nowIso = io.now ? io.now() : new Date().toISOString();
     const yieldToUi = async () => {
         if (typeof io.yieldToUi === 'function') {
@@ -838,7 +1042,13 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
         const blockedMs = getPendingRemoteWriteBlockedMs(localData, nowIso);
         if (blockedMs > 0) {
             const seconds = Math.max(1, Math.ceil(blockedMs / 1000));
-            throw new Error(`Sync paused briefly after remote write failure. Retry in about ${seconds}s.`);
+            return {
+                data: localData,
+                status: 'skipped',
+                skipped: 'pendingRemoteWriteBackoff',
+                retryInMs: blockedMs,
+                message: `Sync paused briefly after remote write failure. Retry in about ${seconds}s.`,
+            };
         }
         pendingRemoteWriteMeta = {
             pendingAt: localData.settings.pendingRemoteWriteAt as string,
@@ -874,24 +1084,12 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
 
     io.onStep?.('merge');
     await yieldToUi();
-    const mergeResult = mergeAppDataWithStats(localData, remoteData);
-    const conflictCount = (mergeResult.stats.tasks.conflicts || 0)
-        + (mergeResult.stats.projects.conflicts || 0)
-        + (mergeResult.stats.sections.conflicts || 0)
-        + (mergeResult.stats.areas.conflicts || 0);
+    const mergeResult = mergeAppDataWithStats(localData, remoteData, { nowIso });
+    const mergeSummary = summarizeMergeStats(mergeResult.stats);
+    const conflictCount = mergeSummary.conflicts;
     const nextSyncStatus: SyncCycleResult['status'] = conflictCount > 0 ? 'conflict' : 'success';
-    const conflictIds = [
-        ...(mergeResult.stats.tasks.conflictIds || []),
-        ...(mergeResult.stats.projects.conflictIds || []),
-        ...(mergeResult.stats.sections.conflictIds || []),
-        ...(mergeResult.stats.areas.conflictIds || []),
-    ].slice(0, 10);
-    const maxClockSkewMs = Math.max(
-        mergeResult.stats.tasks.maxClockSkewMs || 0,
-        mergeResult.stats.projects.maxClockSkewMs || 0,
-        mergeResult.stats.sections.maxClockSkewMs || 0,
-        mergeResult.stats.areas.maxClockSkewMs || 0
-    );
+    const conflictIds = mergeSummary.conflictIds.slice(0, 10);
+    const maxClockSkewMs = mergeSummary.maxClockSkewMs;
     if (maxClockSkewMs > CLOCK_SKEW_THRESHOLD_MS) {
         logWarn('Sync merge detected large clock skew', {
             scope: 'sync',
@@ -902,10 +1100,7 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
             },
         });
     }
-    const timestampAdjustments = (mergeResult.stats.tasks.timestampAdjustments || 0)
-        + (mergeResult.stats.projects.timestampAdjustments || 0)
-        + (mergeResult.stats.sections.timestampAdjustments || 0)
-        + (mergeResult.stats.areas.timestampAdjustments || 0);
+    const timestampAdjustments = mergeSummary.timestampAdjustments;
     const historyEntry: SyncHistoryEntry = {
         at: nowIso,
         status: nextSyncStatus,
@@ -915,7 +1110,7 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
         conflictIds,
         maxClockSkewMs,
         timestampAdjustments,
-        details: io.historyContext?.details,
+        details: io.historyContext?.details ?? buildSyncHistoryDetails(mergeResult.stats),
     };
     const nextHistory = appendSyncHistory(mergeResult.data.settings, historyEntry);
     const nextMergedData: AppData = {
@@ -935,7 +1130,9 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
         || pruned.removedProjectTombstones > 0
         || pruned.removedSectionTombstones > 0
         || pruned.removedAreaTombstones > 0
+        || pruned.removedPersonTombstones > 0
         || pruned.removedAttachmentTombstones > 0
+        || pruned.removedSavedFilterTombstones > 0
         || pruned.removedPendingRemoteDeletes > 0
     ) {
         logWarn('Purged expired sync tombstones', {
@@ -945,7 +1142,9 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
                 removedProjectTombstones: pruned.removedProjectTombstones,
                 removedSectionTombstones: pruned.removedSectionTombstones,
                 removedAreaTombstones: pruned.removedAreaTombstones,
+                removedPersonTombstones: pruned.removedPersonTombstones,
                 removedAttachmentTombstones: pruned.removedAttachmentTombstones,
+                removedSavedFilterTombstones: pruned.removedSavedFilterTombstones,
                 removedPendingRemoteDeletes: pruned.removedPendingRemoteDeletes,
             },
         });
@@ -996,7 +1195,11 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
     try {
         await io.writeRemote(persistedFinalData);
     } catch (error) {
-        const localDataWithRetry = withPendingRemoteWriteRetry(finalDataWithPendingRemoteWrite, nowIso);
+        if (isLocalSyncAbortError(error)) {
+            await io.clearPendingRemoteWriteAfterLocalAbort?.(finalDataWithPendingRemoteWrite.settings.pendingRemoteWriteAt as string);
+            throw error;
+        }
+        const localDataWithRetry = withPendingRemoteWriteRetry(finalDataWithPendingRemoteWrite, nowIso, error);
         io.onStep?.('write-local');
         await yieldToUi();
         await io.writeLocal(localDataWithRetry);
@@ -1005,7 +1208,14 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
 
     io.onStep?.('write-local');
     await yieldToUi();
-    await io.writeLocal(persistedFinalData);
+    try {
+        await io.writeLocal(persistedFinalData);
+    } catch (error) {
+        if (isLocalSyncAbortError(error)) {
+            await io.clearPendingRemoteWriteAfterLocalAbort?.(finalDataWithPendingRemoteWrite.settings.pendingRemoteWriteAt as string);
+        }
+        throw error;
+    }
 
     return {
         data: persistedFinalData,
@@ -1013,4 +1223,8 @@ export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult
         status: nextSyncStatus,
         clockSkewWarning: mergeResult.clockSkewWarning,
     };
+}
+
+export async function performSyncCycle(io: SyncCycleIO): Promise<SyncCycleResult> {
+    return executeSyncCycle(() => performSyncCycleUnlocked(io));
 }

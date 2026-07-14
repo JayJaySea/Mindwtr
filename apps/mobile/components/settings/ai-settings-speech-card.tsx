@@ -2,18 +2,19 @@ import React from 'react';
 import { ActivityIndicator, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 import type { ThemeColors } from '@/hooks/use-theme-colors';
+import { CompactText } from '@/components/compact-text';
 
 import { DEFAULT_WHISPER_MODEL } from './settings.constants';
 import { styles } from './settings.styles';
 
-type Localize = (english: string, chinese: string) => string;
+type SettingsTranslator = (key: string, values?: Record<string, string | number | boolean | null | undefined>) => string;
 type SpeechProvider = 'openai' | 'gemini' | 'whisper';
 type Translate = (key: string) => string;
 
 type AiSettingsSpeechCardProps = {
     isExpoGo: boolean;
     isFossBuild: boolean;
-    localize: Localize;
+    tr: SettingsTranslator;
     onDeleteWhisperModel: () => void;
     onDownloadWhisperModel: () => void;
     onOpenModelPicker: () => void;
@@ -43,7 +44,7 @@ type AiSettingsSpeechCardProps = {
 export function AiSettingsSpeechCard({
     isExpoGo,
     isFossBuild,
-    localize,
+    tr,
     onDeleteWhisperModel,
     onDownloadWhisperModel,
     onOpenModelPicker,
@@ -113,9 +114,12 @@ export function AiSettingsSpeechCard({
                                     ]}
                                     onPress={() => onSpeechProviderChange('openai')}
                                 >
-                                    <Text style={[styles.backendOptionText, { color: speechProvider === 'openai' ? tc.tint : tc.secondaryText }]}>
+                                    <CompactText
+                                        style={[styles.backendOptionText, { color: speechProvider === 'openai' ? tc.tint : tc.secondaryText }]}
+                                        numberOfLines={2}
+                                    >
                                         {t('settings.aiProviderOpenAI')}
-                                    </Text>
+                                    </CompactText>
                                 </TouchableOpacity>
                             )}
                             {!isFossBuild && (
@@ -126,9 +130,12 @@ export function AiSettingsSpeechCard({
                                     ]}
                                     onPress={() => onSpeechProviderChange('gemini')}
                                 >
-                                    <Text style={[styles.backendOptionText, { color: speechProvider === 'gemini' ? tc.tint : tc.secondaryText }]}>
+                                    <CompactText
+                                        style={[styles.backendOptionText, { color: speechProvider === 'gemini' ? tc.tint : tc.secondaryText }]}
+                                        numberOfLines={2}
+                                    >
                                         {t('settings.aiProviderGemini')}
-                                    </Text>
+                                    </CompactText>
                                 </TouchableOpacity>
                             )}
                             <TouchableOpacity
@@ -138,9 +145,12 @@ export function AiSettingsSpeechCard({
                                 ]}
                                 onPress={() => onSpeechProviderChange('whisper')}
                             >
-                                <Text style={[styles.backendOptionText, { color: speechProvider === 'whisper' ? tc.tint : tc.secondaryText }]}>
-                                    {isFossBuild ? localize('Local Whisper', '本地 Whisper') : t('settings.speechProviderOffline')}
-                                </Text>
+                                <CompactText
+                                    style={[styles.backendOptionText, { color: speechProvider === 'whisper' ? tc.tint : tc.secondaryText }]}
+                                    numberOfLines={2}
+                                >
+                                    {isFossBuild ? tr('settings.aiMobile.localWhisper') : t('settings.speechProviderOffline')}
+                                </CompactText>
                             </TouchableOpacity>
                         </View>
                     </View>
@@ -155,7 +165,12 @@ export function AiSettingsSpeechCard({
                             style={[styles.dropdownButton, { borderColor: tc.border, backgroundColor: tc.cardBg }]}
                             onPress={onOpenModelPicker}
                         >
-                            <Text style={[styles.dropdownValue, { color: tc.text }]} numberOfLines={1}>{speechModel}</Text>
+                            <CompactText
+                                style={[styles.dropdownValue, { color: tc.text }]}
+                                numberOfLines={2}
+                            >
+                                {speechModel}
+                            </CompactText>
                             <Text style={[styles.dropdownChevron, { color: tc.secondaryText }]}>▾</Text>
                         </TouchableOpacity>
                     </View>
@@ -168,10 +183,7 @@ export function AiSettingsSpeechCard({
                                     <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{t('settings.speechOfflineModelDesc')}</Text>
                                     {isExpoGo ? (
                                         <Text style={[styles.settingDescription, { color: tc.danger, marginTop: 6 }]}>
-                                            {localize(
-                                                'Whisper transcription requires a dev build or production build (not Expo Go).',
-                                                'Whisper 转录需要开发版或正式版构建（Expo Go 不支持）。'
-                                            )}
+                                            {tr('settings.aiMobile.whisperTranscriptionRequiresADevBuildOrProductionBuildNot')}
                                         </Text>
                                     ) : null}
                                 </View>
@@ -199,18 +211,24 @@ export function AiSettingsSpeechCard({
                                             style={[styles.backendOption, { borderColor: tc.border }]}
                                             onPress={onDeleteWhisperModel}
                                         >
-                                            <Text style={[styles.backendOptionText, { color: tc.text }]}>
+                                            <CompactText
+                                                style={[styles.backendOptionText, { color: tc.text }]}
+                                                numberOfLines={2}
+                                            >
                                                 {t('settings.speechOfflineDelete')}
-                                            </Text>
+                                            </CompactText>
                                         </TouchableOpacity>
                                     ) : (
                                         <TouchableOpacity
                                             style={[styles.backendOption, { borderColor: tc.border }]}
                                             onPress={onDownloadWhisperModel}
                                         >
-                                            <Text style={[styles.backendOptionText, { color: tc.text }]}>
+                                            <CompactText
+                                                style={[styles.backendOptionText, { color: tc.text }]}
+                                                numberOfLines={2}
+                                            >
                                                 {t('settings.speechOfflineDownload')}
-                                            </Text>
+                                            </CompactText>
                                         </TouchableOpacity>
                                     )}
                                 </View>
@@ -270,9 +288,12 @@ export function AiSettingsSpeechCard({
                                 ]}
                                 onPress={() => onSpeechModeChange('smart_parse')}
                             >
-                                <Text style={[styles.backendOptionText, { color: speechMode === 'smart_parse' ? tc.tint : tc.secondaryText }]}>
+                                <CompactText
+                                    style={[styles.backendOptionText, { color: speechMode === 'smart_parse' ? tc.tint : tc.secondaryText }]}
+                                    numberOfLines={2}
+                                >
                                     {t('settings.speechModeSmart')}
-                                </Text>
+                                </CompactText>
                             </TouchableOpacity>
                             <TouchableOpacity
                                 style={[
@@ -281,9 +302,12 @@ export function AiSettingsSpeechCard({
                                 ]}
                                 onPress={() => onSpeechModeChange('transcribe_only')}
                             >
-                                <Text style={[styles.backendOptionText, { color: speechMode === 'transcribe_only' ? tc.tint : tc.secondaryText }]}>
+                                <CompactText
+                                    style={[styles.backendOptionText, { color: speechMode === 'transcribe_only' ? tc.tint : tc.secondaryText }]}
+                                    numberOfLines={2}
+                                >
                                     {t('settings.speechModeTranscript')}
-                                </Text>
+                                </CompactText>
                             </TouchableOpacity>
                         </View>
                     </View>
@@ -309,9 +333,12 @@ export function AiSettingsSpeechCard({
                                     ]}
                                     onPress={() => onSpeechFieldStrategyChange(option.value as 'smart' | 'title_only' | 'description_only')}
                                 >
-                                    <Text style={[styles.backendOptionText, { color: speechFieldStrategy === option.value ? tc.tint : tc.secondaryText }]}>
+                                    <CompactText
+                                        style={[styles.backendOptionText, { color: speechFieldStrategy === option.value ? tc.tint : tc.secondaryText }]}
+                                        numberOfLines={2}
+                                    >
                                         {option.label}
-                                    </Text>
+                                    </CompactText>
                                 </TouchableOpacity>
                             ))}
                         </View>

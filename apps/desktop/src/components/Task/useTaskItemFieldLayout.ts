@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from 'react';
-import type { AppData, Task, TaskEditorFieldId, TaskPriority, TaskStatus, RecurrenceRule, TimeEstimate } from '@mindwtr/core';
+import type { AppData, Task, TaskDraft, TaskEditorFieldId } from '@mindwtr/core';
 import {
     DEFAULT_TASK_EDITOR_HIDDEN,
     DEFAULT_TASK_EDITOR_ORDER,
@@ -11,21 +11,7 @@ import {
 type UseTaskItemFieldLayoutParams = {
     settings: AppData['settings'] | undefined;
     task: Task;
-    editStatus: TaskStatus;
-    editProjectId: string;
-    editSectionId: string;
-    editAreaId: string;
-    editPriority: TaskPriority | '';
-    editEnergyLevel?: NonNullable<Task['energyLevel']> | '';
-    editAssignedTo?: string;
-    editContexts: string;
-    editDescription: string;
-    editDueDate: string;
-    editRecurrence: RecurrenceRule | '';
-    editReviewAt: string;
-    editStartTime: string;
-    editTags: string;
-    editTimeEstimate: TimeEstimate | '';
+    draft: TaskDraft;
     prioritiesEnabled: boolean;
     timeEstimatesEnabled: boolean;
     visibleEditAttachmentsLength: number;
@@ -34,25 +20,29 @@ type UseTaskItemFieldLayoutParams = {
 export function useTaskItemFieldLayout({
     settings,
     task,
-    editStatus,
-    editProjectId,
-    editSectionId,
-    editAreaId,
-    editPriority,
-    editEnergyLevel = '',
-    editAssignedTo = '',
-    editContexts,
-    editDescription,
-    editDueDate,
-    editRecurrence,
-    editReviewAt,
-    editStartTime,
-    editTags,
-    editTimeEstimate,
+    draft,
     prioritiesEnabled,
     timeEstimatesEnabled,
     visibleEditAttachmentsLength,
 }: UseTaskItemFieldLayoutParams) {
+    const {
+        status: editStatus,
+        projectId: editProjectId,
+        sectionId: editSectionId,
+        areaId: editAreaId,
+        priority: editPriority,
+        energyLevel: editEnergyLevel,
+        assignedTo: editAssignedTo,
+        contexts: editContexts,
+        description: editDescription,
+        dueDate: editDueDate,
+        recurrence: editRecurrence,
+        reviewAt: editReviewAt,
+        startTime: editStartTime,
+        tags: editTags,
+        location: editLocation,
+        timeEstimate: editTimeEstimate,
+    } = draft;
     const savedOrder = settings?.gtd?.taskEditor?.order ?? [];
     const savedHidden = settings?.gtd?.taskEditor?.hidden ?? DEFAULT_TASK_EDITOR_HIDDEN;
     const sectionAssignments = useMemo(
@@ -98,7 +88,7 @@ export function useTaskItemFieldLayout({
     const hasValue = useCallback((fieldId: TaskEditorFieldId) => {
         switch (fieldId) {
             case 'status':
-                return editStatus !== 'inbox';
+                return false;
             case 'project':
                 return Boolean(editProjectId || task.projectId);
             case 'section':
@@ -116,6 +106,8 @@ export function useTaskItemFieldLayout({
                 return Boolean(editContexts.trim());
             case 'description':
                 return Boolean(editDescription.trim());
+            case 'location':
+                return Boolean(editLocation.trim());
             case 'tags':
                 return Boolean(editTags.trim());
             case 'timeEstimate':
@@ -143,6 +135,7 @@ export function useTaskItemFieldLayout({
         editDescription,
         editDueDate,
         editEnergyLevel,
+        editLocation,
         editPriority,
         editProjectId,
         editRecurrence,

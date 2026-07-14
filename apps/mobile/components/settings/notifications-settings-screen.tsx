@@ -1,15 +1,27 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Modal, Platform, Pressable, ScrollView, Switch, Text, TouchableOpacity, View } from 'react-native';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { normalizeDateFormatSetting, resolveDateLocaleTag, useTaskStore } from '@mindwtr/core';
 
+import {
+    areDueDateRemindersEnabled,
+    areStartDateRemindersEnabled,
+    areTaskRemindersEnabled,
+    isWeeklyReviewReminderEnabled,
+} from '@/lib/mobile-notification-settings';
 import { requestNotificationPermission, startMobileNotifications } from '@/lib/notification-service';
+import {
+    applyPersistentCaptureNotification,
+    isPersistentCaptureSupported,
+    readPersistentCaptureEnabled,
+    writePersistentCaptureEnabled,
+} from '@/lib/persistent-capture-notification';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 
 import { useSettingsLocalization, useSettingsScrollContent } from './settings.hooks';
-import { SettingsTopBar, SubHeader } from './settings.shell';
+import { SettingsTopBar } from './settings.shell';
 import { styles } from './settings.styles';
 
 export function NotificationsSettingsScreen() {
@@ -23,19 +35,26 @@ export function NotificationsSettingsScreen() {
     const [weeklyReviewTimeDraft, setWeeklyReviewTimeDraft] = useState<Date | null>(null);
     const [weeklyReviewDayPickerOpen, setWeeklyReviewDayPickerOpen] = useState(false);
 
-    const notificationsEnabled = settings.notificationsEnabled !== false;
+    const notificationsEnabled = areTaskRemindersEnabled(settings);
+    const startDateNotificationsEnabled = areStartDateRemindersEnabled(settings);
+    const dueDateNotificationsEnabled = areDueDateRemindersEnabled(settings);
     const dailyDigestMorningEnabled = settings.dailyDigestMorningEnabled === true;
     const dailyDigestEveningEnabled = settings.dailyDigestEveningEnabled === true;
     const dailyDigestMorningTime = settings.dailyDigestMorningTime || '09:00';
     const dailyDigestEveningTime = settings.dailyDigestEveningTime || '20:00';
-    const weeklyReviewEnabled = settings.weeklyReviewEnabled === true;
+    const weeklyReviewEnabled = isWeeklyReviewReminderEnabled(settings);
     const weeklyReviewTime = settings.weeklyReviewTime || '18:00';
     const weeklyReviewDay = Number.isFinite(settings.weeklyReviewDay) ? (settings.weeklyReviewDay as number) : 0;
     const dateFormat = normalizeDateFormatSetting(settings.dateFormat);
     const systemLocale = typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function'
         ? Intl.DateTimeFormat().resolvedOptions().locale
         : '';
-    const locale = resolveDateLocaleTag({ language, dateFormat, systemLocale });
+    const locale = resolveDateLocaleTag({
+        language,
+        dateFormat,
+        calendarSystem: settings.calendarSystem,
+        systemLocale,
+    });
 
     const toTimePickerDate = (time: string) => {
         const [hours, minutes] = time.split(':').map((v) => parseInt(v, 10));
@@ -62,6 +81,33 @@ export function NotificationsSettingsScreen() {
         }
         return false;
     }, []);
+
+    const [persistentCaptureEnabled, setPersistentCaptureEnabled] = useState(false);
+    useEffect(() => {
+        if (!isPersistentCaptureSupported()) return;
+        readPersistentCaptureEnabled().then(setPersistentCaptureEnabled).catch(console.error);
+    }, []);
+    const persistentCaptureStrings = useCallback(() => ({
+        title: t('captureNotification.title') || 'Quick capture',
+        text: t('captureNotification.text') || 'Tap to capture to your Inbox',
+        channelName: t('captureNotification.channelName') || 'Quick capture',
+    }), [t]);
+    const togglePersistentCapture = useCallback((value: boolean) => {
+        if (!value) {
+            setPersistentCaptureEnabled(false);
+            applyPersistentCaptureNotification(false, persistentCaptureStrings());
+            writePersistentCaptureEnabled(false).catch(console.error);
+            return;
+        }
+        ensureNotificationsPermission()
+            .then((granted) => {
+                if (!granted) return;
+                setPersistentCaptureEnabled(true);
+                applyPersistentCaptureNotification(true, persistentCaptureStrings());
+                writePersistentCaptureEnabled(true).catch(console.error);
+            })
+            .catch(console.error);
+    }, [ensureNotificationsPermission, persistentCaptureStrings]);
 
     const openDigestTimePicker = useCallback((picker: 'morning' | 'evening') => {
         setDigestTimePicker(picker);
@@ -128,8 +174,7 @@ export function NotificationsSettingsScreen() {
 
     return (
         <SafeAreaView style={[styles.container, { backgroundColor: tc.bg }]} edges={['bottom']}>
-            <SettingsTopBar />
-            <SubHeader title={t('settings.notifications')} />
+            <SettingsTopBar title={t('settings.notifications')} />
             <ScrollView style={styles.scrollView} contentContainerStyle={scrollContentStyle}>
                 <View style={[styles.settingCard, { backgroundColor: tc.cardBg }]}>
                     <View style={styles.settingRow}>
@@ -154,6 +199,80 @@ export function NotificationsSettingsScreen() {
                             trackColor={{ false: '#767577', true: '#3B82F6' }}
                         />
                     </View>
+
+                    <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                        <View style={styles.settingInfo}>
+                            <Text style={[styles.settingLabel, { color: tc.text, opacity: notificationsEnabled ? 1 : 0.5 }]}>
+                                {t('settings.startDateNotifications')}
+                            </Text>
+                            <Text style={[styles.settingDescription, { color: tc.secondaryText, opacity: notificationsEnabled ? 1 : 0.5 }]}>
+                                {t('settings.startDateNotificationsDesc')}
+                            </Text>
+                        </View>
+                        <Switch
+                            value={startDateNotificationsEnabled}
+                            disabled={!notificationsEnabled}
+                            onValueChange={(value) => {
+                                if (!value) {
+                                    updateSettings({ startDateNotificationsEnabled: false }).catch(console.error);
+                                    return;
+                                }
+                                ensureNotificationsPermission()
+                                    .then((granted) => {
+                                        if (!granted) return;
+                                        updateSettings({ startDateNotificationsEnabled: true }).catch(console.error);
+                                    })
+                                    .catch(console.error);
+                            }}
+                            trackColor={{ false: '#767577', true: '#3B82F6' }}
+                        />
+                    </View>
+
+                    <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                        <View style={styles.settingInfo}>
+                            <Text style={[styles.settingLabel, { color: tc.text, opacity: notificationsEnabled ? 1 : 0.5 }]}>
+                                {t('settings.dueDateNotifications')}
+                            </Text>
+                            <Text style={[styles.settingDescription, { color: tc.secondaryText, opacity: notificationsEnabled ? 1 : 0.5 }]}>
+                                {t('settings.dueDateNotificationsDesc')}
+                            </Text>
+                        </View>
+                        <Switch
+                            value={dueDateNotificationsEnabled}
+                            disabled={!notificationsEnabled}
+                            onValueChange={(value) => {
+                                if (!value) {
+                                    updateSettings({ dueDateNotificationsEnabled: false }).catch(console.error);
+                                    return;
+                                }
+                                ensureNotificationsPermission()
+                                    .then((granted) => {
+                                        if (!granted) return;
+                                        updateSettings({ dueDateNotificationsEnabled: true }).catch(console.error);
+                                    })
+                                    .catch(console.error);
+                            }}
+                            trackColor={{ false: '#767577', true: '#3B82F6' }}
+                        />
+                    </View>
+
+                    {isPersistentCaptureSupported() && (
+                        <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>
+                                    {t('settings.persistentCaptureLabel')}
+                                </Text>
+                                <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
+                                    {t('settings.persistentCaptureDesc')}
+                                </Text>
+                            </View>
+                            <Switch
+                                value={persistentCaptureEnabled}
+                                onValueChange={togglePersistentCapture}
+                                trackColor={{ false: '#767577', true: '#3B82F6' }}
+                            />
+                        </View>
+                    )}
                 </View>
 
                 <View style={[styles.settingCard, { backgroundColor: tc.cardBg, marginTop: 12 }]}>
@@ -177,14 +296,13 @@ export function NotificationsSettingsScreen() {
                                     .catch(console.error);
                             }}
                             trackColor={{ false: '#767577', true: '#3B82F6' }}
-                            disabled={!notificationsEnabled}
                         />
                     </View>
 
                     <TouchableOpacity
                         style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
                         onPress={() => setWeeklyReviewDayPickerOpen(true)}
-                        disabled={!weeklyReviewEnabled || !notificationsEnabled}
+                        disabled={!weeklyReviewEnabled}
                     >
                         <View style={styles.settingInfo}>
                             <Text style={[styles.settingLabel, { color: tc.text, opacity: weeklyReviewEnabled ? 1 : 0.5 }]}>
@@ -199,7 +317,7 @@ export function NotificationsSettingsScreen() {
                     <TouchableOpacity
                         style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
                         onPress={openWeeklyReviewTimePicker}
-                        disabled={!weeklyReviewEnabled || !notificationsEnabled}
+                        disabled={!weeklyReviewEnabled}
                     >
                         <View style={styles.settingInfo}>
                             <Text style={[styles.settingLabel, { color: tc.text, opacity: weeklyReviewEnabled ? 1 : 0.5 }]}>

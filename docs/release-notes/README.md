@@ -2,12 +2,9 @@
 
 Versioned notes for desktop/mobile/core/cloud releases live in this folder.
 
-## Drafts
-
-- [v0.8.3 draft](./0.8.3.md)
-
 ## Versions
 
+- [Unreleased](./unreleased.md)
 - [v0.4.2](./0.4.2.md)
 - [v0.4.3](./0.4.3.md)
 - [v0.4.4](./0.4.4.md)
@@ -62,6 +59,26 @@ Versioned notes for desktop/mobile/core/cloud releases live in this folder.
 - [v0.8.0](./0.8.0.md)
 - [v0.8.1](./0.8.1.md)
 - [v0.8.2](./0.8.2.md)
+- [v0.8.3](./0.8.3.md)
+- [v0.8.4](./0.8.4.md)
+- [v0.8.5](./0.8.5.md)
+- [v0.8.6](./0.8.6.md)
+- [v0.8.7](./0.8.7.md)
+- [v0.8.8](./0.8.8.md)
+- [v0.8.9](./0.8.9.md)
+- [v0.9.0](./0.9.0.md)
+- [v0.9.1](./0.9.1.md)
+- [v0.9.2](./0.9.2.md)
+- [v0.9.3](./0.9.3.md)
+- [v0.9.4](./0.9.4.md)
+- [v0.9.5](./0.9.5.md)
+- [v0.9.6](./0.9.6.md)
+- [v0.9.7](./0.9.7.md)
+- [v0.9.8](./0.9.8.md)
+- [v0.9.9](./0.9.9.md)
+- [v0.9.10](./0.9.10.md)
+- [v1.0.0](./1.0.0.md)
+- [v1.0.5-rc.1](./1.0.5-rc.1.md)
 
 ## Store-Specific Notes
 

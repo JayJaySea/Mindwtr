@@ -146,15 +146,18 @@ export function createMindwtrAutomationStorage(options: AutomationStorageOptions
         await sqlite.ensureSchema();
         const writeDb = openSqliteDatabase(paths.dbPath);
         try {
+            writeDb.exec('BEGIN IMMEDIATE;');
+            writeDb.exec('PRAGMA defer_foreign_keys = ON;');
+
             for (const task of data.tasks) {
                 const taskOrder = Number.isFinite(task.order) ? task.order : task.orderNum;
                 writeDb.prepare(
                     `INSERT INTO tasks (
-                        id, title, status, priority, taskMode, startTime, dueDate, recurrence, pushCount,
+                        id, title, status, priority, taskMode, startTime, dueDate, recurrence, showFutureRecurrence, pushCount,
                         tags, contexts, checklist, description, textDirection, attachments, location,
                         projectId, sectionId, areaId, orderNum, isFocusedToday, timeEstimate, reviewAt,
                         completedAt, rev, revBy, createdAt, updatedAt, deletedAt, purgedAt
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         title = excluded.title,
                         status = excluded.status,
@@ -163,6 +166,7 @@ export function createMindwtrAutomationStorage(options: AutomationStorageOptions
                         startTime = excluded.startTime,
                         dueDate = excluded.dueDate,
                         recurrence = excluded.recurrence,
+                        showFutureRecurrence = excluded.showFutureRecurrence,
                         pushCount = excluded.pushCount,
                         tags = excluded.tags,
                         contexts = excluded.contexts,
@@ -194,6 +198,7 @@ export function createMindwtrAutomationStorage(options: AutomationStorageOptions
                     task.startTime ?? null,
                     task.dueDate ?? null,
                     toJson(task.recurrence),
+                    toBool(task.showFutureRecurrence),
                     task.pushCount ?? null,
                     toJson(task.tags ?? []),
                     toJson(task.contexts ?? []),
@@ -328,7 +333,13 @@ export function createMindwtrAutomationStorage(options: AutomationStorageOptions
             writeDb.prepare(
                 'INSERT INTO settings (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data',
             ).run(JSON.stringify(data.settings ?? {}));
+            writeDb.exec('COMMIT;');
         } catch (error) {
+            try {
+                writeDb.exec('ROLLBACK;');
+            } catch {
+                // Ignore rollback errors when SQLite has already closed the transaction.
+            }
             throw error;
         } finally {
             writeDb.close();

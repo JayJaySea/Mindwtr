@@ -155,6 +155,9 @@ export const styles = StyleSheet.create({
   stepContainer: {
     flex: 1,
   },
+  keyboardAvoidingContainer: {
+    flex: 1,
+  },
   stepContent: {
     flex: 1,
   },
@@ -254,6 +257,7 @@ export const styles = StyleSheet.create({
   startDateActions: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     marginTop: 6,
     gap: 8,
   },
@@ -291,10 +295,8 @@ export const styles = StyleSheet.create({
     borderRadius: 12,
   },
   selectedContextChip: {
-    backgroundColor: '#3B82F6',
   },
   selectedTagChip: {
-    backgroundColor: '#8B5CF6',
   },
   selectedTokenText: {
     color: '#FFFFFF',
@@ -400,6 +402,64 @@ export const styles = StyleSheet.create({
     borderRadius: 10,
     paddingHorizontal: 10,
     paddingVertical: 8,
+  },
+  projectDecisionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+  },
+  projectDecisionButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  projectDecisionText: {
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  projectConversionCard: {
+    gap: 10,
+  },
+  projectFieldGroup: {
+    gap: 6,
+  },
+  projectFieldLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  projectConversionSubmit: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+    paddingVertical: 12,
+  },
+  extraActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  extraActionInput: {
+    flex: 1,
+  },
+  extraActionRemove: {
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+  },
+  extraActionRemoveText: {
+    fontSize: 16,
+  },
+  addActionButton: {
+    alignSelf: 'flex-start',
+    paddingVertical: 4,
+  },
+  addActionText: {
+    fontSize: 13,
+    fontWeight: '600',
   },
   createProjectButton: {
     paddingHorizontal: 12,

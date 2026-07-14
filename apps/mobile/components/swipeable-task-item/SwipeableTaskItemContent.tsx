@@ -1,17 +1,28 @@
 import React, { type ReactNode, useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { CircleDot, Repeat } from 'lucide-react-native';
+import { useThemeTokens } from '../../hooks/use-theme-tokens';
+import { useStatusColors } from '../../hooks/use-status-colors';
 import {
+    getInlineMarkdownPreview,
     getTaskAgeLabel,
-    getTaskStaleness,
-    getStatusColor,
+    getTaskDateCoherenceIssues,
+    getTaskUrgency,
+    formatTimeEstimateLabel,
     hasTimeComponent,
     resolveTaskTextDirection,
     safeFormatDate,
+    safeParseDate,
     safeParseDueDate,
+    tFallback,
 } from '@mindwtr/core';
-import type { Area, Language, Project, Task } from '@mindwtr/core';
+import type { Area, Language, Project, ProjectSequenceTaskCue, Task } from '@mindwtr/core';
 import type { ThemeColors } from '../../hooks/use-theme-colors';
+import { AppPressable } from '../app-pressable';
+import { FocusStarIcon } from '../FocusStarIcon';
+import { MarkdownInlineText } from '../markdown-text';
 import { styles } from './swipeable-task-item.styles';
+import { CompactText } from '@/components/compact-text';
 
 interface SwipeableTaskItemContentProps {
     accessibilityActions: { label: string; name: string }[];
@@ -21,14 +32,19 @@ interface SwipeableTaskItemContentProps {
     checklistProgress: { completed: number; percent: number; total: number } | null;
     hideChecklistProgress: boolean;
     hideContexts: boolean;
+    hideProjectMeta: boolean;
     hideStatusBadge: boolean;
+    /** Render the status control as a compact icon button (no status-name label) for single-status lists */
+    statusBadgeAsIcon: boolean;
     isDark: boolean;
     isHighlighted: boolean;
     isMultiSelected: boolean;
     language: string;
     localChecklist: Task['checklist'];
+    interactionDisabled?: boolean;
     onAccessibilityAction: (event: { nativeEvent: { actionName: string } }) => void;
     onContextPress?: (context: string) => void;
+    onEditCompletedAt?: () => void;
     onLongPress: () => void;
     onOpenStatusMenu: () => void;
     onPress: () => void;
@@ -38,9 +54,13 @@ interface SwipeableTaskItemContentProps {
     onToggleChecklistItem: (index: number) => void;
     onToggleFocus: () => void;
     projects: Project[];
+    projectDeadlineLabel?: string;
+    recurrenceLabel?: string;
+    sequenceCue?: ProjectSequenceTaskCue;
     areas: Area[];
     selectionMode: boolean;
     showChecklist: boolean;
+    showTaskAge: boolean;
     t: (key: string) => string;
     task: Task;
     tc: ThemeColors;
@@ -55,14 +75,18 @@ export function SwipeableTaskItemContent({
     checklistProgress,
     hideChecklistProgress,
     hideContexts,
+    hideProjectMeta,
     hideStatusBadge,
+    statusBadgeAsIcon,
     isDark,
     isHighlighted,
     isMultiSelected,
+    interactionDisabled = false,
     language,
     localChecklist,
     onAccessibilityAction,
     onContextPress,
+    onEditCompletedAt,
     onLongPress,
     onOpenStatusMenu,
     onPress,
@@ -72,8 +96,12 @@ export function SwipeableTaskItemContent({
     onToggleChecklistItem,
     onToggleFocus,
     projects,
+    projectDeadlineLabel,
+    recurrenceLabel,
+    sequenceCue,
     selectionMode,
     showChecklist,
+    showTaskAge,
     t,
     task,
     tc,
@@ -94,15 +122,7 @@ export function SwipeableTaskItemContent({
     const textAlign = resolvedDirection === 'rtl' ? 'right' : 'left';
     const timeEstimateLabel = (() => {
         if (!task.timeEstimate) return null;
-        if (task.timeEstimate === '5min') return '5m';
-        if (task.timeEstimate === '10min') return '10m';
-        if (task.timeEstimate === '15min') return '15m';
-        if (task.timeEstimate === '30min') return '30m';
-        if (task.timeEstimate === '1hr') return '1h';
-        if (task.timeEstimate === '2hr') return '2h';
-        if (task.timeEstimate === '3hr') return '3h';
-        if (task.timeEstimate === '4hr') return '4h';
-        return '4h+';
+        return formatTimeEstimateLabel(task.timeEstimate);
     })();
     const dueLabel = (() => {
         const due = safeParseDueDate(task.dueDate);
@@ -110,13 +130,39 @@ export function SwipeableTaskItemContent({
         const hasTime = hasTimeComponent(task.dueDate);
         return safeFormatDate(due, hasTime ? 'Pp' : 'P');
     })();
-    const staleness = getTaskStaleness(task.createdAt);
+    const dueColor = (() => {
+        const urgency = getTaskUrgency(task);
+        if (urgency === 'overdue') return tc.danger;
+        if (urgency === 'urgent' || urgency === 'upcoming') return tc.warning;
+        return tc.secondaryText;
+    })();
+    const startLabel = (() => {
+        const start = safeParseDate(task.startTime);
+        if (!start) return null;
+        const hasTime = hasTimeComponent(task.startTime);
+        return safeFormatDate(start, hasTime ? 'Pp' : 'P');
+    })();
+    const startDateLabel = tFallback(t, 'taskEdit.startDateLabel', 'Start');
+    const dateIssueLabel = getTaskDateCoherenceIssues(task).some((issue) => issue.code === 'start_after_due')
+        ? tFallback(t, 'task.dateIssue.startAfterDue', 'Starts after due date')
+        : null;
+    const completionLabel = (() => {
+        if (task.status !== 'done' && task.status !== 'archived') return null;
+        const completionTimestamp = task.completedAt || task.updatedAt;
+        if (!completionTimestamp) return null;
+        return safeFormatDate(completionTimestamp, 'Pp', completionTimestamp);
+    })();
     const ageLabel = getTaskAgeLabel(task.createdAt, language as Language);
-    const showAge = task.status !== 'done'
+    const showAge = showTaskAge
+        && task.status !== 'done'
         && task.status !== 'reference'
-        && (staleness === 'stale' || staleness === 'very-stale')
         && !!ageLabel;
-    const statusColors = getStatusColor(task.status);
+    const statusColors = useStatusColors()[task.status];
+    const isAvailableNextAction = sequenceCue === 'available';
+    const descriptionPreview = useMemo(
+        () => getInlineMarkdownPreview(task.description ?? ''),
+        [task.description],
+    );
     const metaParts: ReactNode[] = [];
     const canNavigateMeta = !selectionMode;
 
@@ -168,7 +214,7 @@ export function SwipeableTaskItemContent({
         );
     };
 
-    if (project) {
+    if (!hideProjectMeta && project) {
         addMetaPart(
             renderMetaItem({
                 key: 'project',
@@ -177,13 +223,29 @@ export function SwipeableTaskItemContent({
                 children: (
                     <>
                         <View style={[styles.projectDot, { backgroundColor: projectColor || tc.tint }]} />
-                        <Text style={[styles.metaText, { color: tc.secondaryText }]} numberOfLines={1}>
+                        <CompactText
+                            style={[styles.metaText, { color: tc.secondaryText }]}
+                            numberOfLines={2}
+                        >
                             {project.title}
-                        </Text>
+                        </CompactText>
                     </>
                 ),
             }),
             'project'
+        );
+    }
+
+    if (projectDeadlineLabel) {
+        addMetaPart(
+            <CompactText
+                key="project-deadline"
+                style={[styles.metaText, styles.projectDeadlineText]}
+                numberOfLines={2}
+            >
+                {projectDeadlineLabel}
+            </CompactText>,
+            'project-deadline'
         );
     }
 
@@ -197,11 +259,14 @@ export function SwipeableTaskItemContent({
                 accessibilityLabel: `Open context ${context}`,
                 children: (
                     <>
-                        <Text style={[styles.metaText, styles.contextText]} numberOfLines={1}>
+                        <CompactText
+                            style={[styles.metaText, styles.contextText]}
+                            numberOfLines={2}
+                        >
                             {context}
-                        </Text>
+                        </CompactText>
                         {moreContexts > 0 && (
-                            <Text style={[styles.metaText, { color: tc.secondaryText }]}>+{moreContexts}</Text>
+                            <CompactText style={[styles.metaText, { color: tc.secondaryText }]}>+{moreContexts}</CompactText>
                         )}
                     </>
                 ),
@@ -220,11 +285,14 @@ export function SwipeableTaskItemContent({
                 accessibilityLabel: `Open tag ${tag}`,
                 children: (
                     <>
-                        <Text style={[styles.metaText, styles.tagText]} numberOfLines={1}>
+                        <CompactText
+                            style={[styles.metaText, styles.tagText]}
+                            numberOfLines={2}
+                        >
                             {tag}
-                        </Text>
+                        </CompactText>
                         {moreTags > 0 && (
-                            <Text style={[styles.metaText, { color: tc.secondaryText }]}>+{moreTags}</Text>
+                            <CompactText style={[styles.metaText, { color: tc.secondaryText }]}>+{moreTags}</CompactText>
                         )}
                     </>
                 ),
@@ -233,12 +301,79 @@ export function SwipeableTaskItemContent({
         );
     }
 
+    if (completionLabel) {
+        addMetaPart(
+            renderMetaItem({
+                key: 'completed',
+                onPress: canNavigateMeta && onEditCompletedAt ? onEditCompletedAt : undefined,
+                accessibilityLabel: tFallback(t, 'task.editCompletedAt', 'Edit completion time'),
+                children: (
+                    <CompactText
+                        style={[styles.metaText, { color: tc.secondaryText }]}
+                    >
+                        {`${t('list.done') || 'Completed'}: ${completionLabel}`}
+                    </CompactText>
+                ),
+            }),
+            'completed'
+        );
+    }
+
     if (dueLabel) {
         addMetaPart(
-            <Text key="due" style={[styles.metaText, styles.dueText]}>
+            <CompactText
+                key="due"
+                style={[styles.metaText, styles.dueText, { color: dueColor }]}
+            >
                 {dueLabel}
-            </Text>,
+            </CompactText>,
             'due'
+        );
+    }
+
+    if (startLabel) {
+        addMetaPart(
+            <CompactText
+                key="start"
+                style={[styles.metaText, { color: tc.secondaryText }]}
+            >
+                {`${startDateLabel}: ${startLabel}`}
+            </CompactText>,
+            'start'
+        );
+    }
+
+    if (dateIssueLabel) {
+        addMetaPart(
+            <CompactText
+                key="date-issue"
+                style={[styles.metaText, styles.dateIssueText]}
+                numberOfLines={1}
+            >
+                {dateIssueLabel}
+            </CompactText>,
+            'date-issue'
+        );
+    }
+
+    if (recurrenceLabel) {
+        addMetaPart(
+            renderMetaItem({
+                key: 'recurrence',
+                children: (
+                    <>
+                        <Repeat size={12} color={tc.secondaryText} strokeWidth={2} />
+                        <CompactText
+                            key="recurrence-label"
+                            style={[styles.metaText, { color: tc.secondaryText }]}
+                            numberOfLines={2}
+                        >
+                            {recurrenceLabel}
+                        </CompactText>
+                    </>
+                ),
+            }),
+            'recurrence'
         );
     }
 
@@ -251,12 +386,19 @@ export function SwipeableTaskItemContent({
         );
     }
 
+    const { isMaterial, shape } = useThemeTokens();
+
     return (
-        <Pressable
+        <AppPressable
             style={[
                 styles.taskItem,
+                isMaterial ? { borderRadius: shape.large } : undefined,
                 { backgroundColor: tc.taskItemBg },
                 { borderWidth: StyleSheet.hairlineWidth, borderColor: tc.border },
+                isAvailableNextAction && !selectionMode && {
+                    backgroundColor: isDark ? 'rgba(59, 130, 246, 0.08)' : 'rgba(59, 130, 246, 0.05)',
+                    borderColor: isDark ? 'rgba(59, 130, 246, 0.34)' : 'rgba(59, 130, 246, 0.24)',
+                },
                 !isDark && {
                     shadowColor: '#0F172A',
                     shadowOffset: { width: 0, height: 2 },
@@ -271,9 +413,11 @@ export function SwipeableTaskItemContent({
             onPress={onPress}
             onLongPress={onLongPress}
             delayLongPress={300}
+            disabled={interactionDisabled}
             accessibilityLabel={accessibilityLabel}
             accessibilityHint={accessibilityHint}
             accessibilityRole="button"
+            accessibilityState={interactionDisabled ? { disabled: true } : undefined}
             accessibilityActions={accessibilityActions}
             onAccessibilityAction={onAccessibilityAction}
         >
@@ -310,32 +454,26 @@ export function SwipeableTaskItemContent({
                                 onToggleFocus();
                             }}
                             hitSlop={8}
-                            style={[
-                                styles.focusButton,
-                                { backgroundColor: isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(15, 23, 42, 0.08)' },
-                            ]}
+                            style={styles.focusButton}
                             accessibilityRole="button"
                             accessibilityLabel={task.isFocusedToday ? t('agenda.removeFromFocus') : t('agenda.addToFocus')}
                         >
-                            <Text
-                                style={[
-                                    styles.focusButtonText,
-                                    { color: task.isFocusedToday ? tc.warning : tc.secondaryText },
-                                ]}
-                            >
-                                {task.isFocusedToday ? '★' : '☆'}
-                            </Text>
+                            <FocusStarIcon
+                                focused={task.isFocusedToday === true}
+                                inactiveColor={tc.secondaryText}
+                            />
                         </Pressable>
                     )}
                 </View>
-                {task.description && (
-                    <Text
-                        style={[styles.taskDescription, { color: tc.secondaryText, writingDirection: textDirection, textAlign }]}
+                {descriptionPreview ? (
+                    <MarkdownInlineText
+                        markdown={descriptionPreview}
+                        tc={tc}
+                        direction={textDirection}
+                        style={[styles.taskDescription, { color: tc.secondaryText }]}
                         numberOfLines={1}
-                    >
-                        {task.description}
-                    </Text>
-                )}
+                    />
+                ) : null}
                 {metaParts.length > 0 && (
                     <View style={styles.inlineMeta}>
                         {metaParts}
@@ -372,16 +510,16 @@ export function SwipeableTaskItemContent({
                                 accessibilityLabel={item.title}
                                 accessibilityState={{ checked: item.isCompleted }}
                             >
-                                <Text
+                                <MarkdownInlineText
+                                    markdown={`${item.isCompleted ? '✓' : '○'} ${item.title}`}
+                                    tc={tc}
                                     style={[
                                         styles.checklistItemText,
                                         { color: tc.secondaryText },
-                                        item.isCompleted && styles.checklistItemCompleted,
+                                        item.isCompleted ? styles.checklistItemCompleted : undefined,
                                     ]}
                                     numberOfLines={1}
-                                >
-                                    {item.isCompleted ? '✓ ' : '○ '} {item.title}
-                                </Text>
+                                />
                             </Pressable>
                         ))}
                     </View>
@@ -399,19 +537,27 @@ export function SwipeableTaskItemContent({
                         onOpenStatusMenu();
                     }}
                     hitSlop={8}
-                    style={[
-                        styles.statusBadge,
-                        { backgroundColor: statusColors.bg, borderColor: statusColors.border },
-                    ]}
+                    style={
+                        statusBadgeAsIcon
+                            ? styles.statusIconButton
+                            : [
+                                styles.statusBadge,
+                                { backgroundColor: statusColors.bg, borderColor: statusColors.border },
+                            ]
+                    }
                     accessibilityLabel={`Change status. Current status: ${task.status}`}
                     accessibilityHint="Double tap to open status menu"
                     accessibilityRole="button"
                 >
-                    <Text style={[styles.statusText, { color: statusColors.text }]}>
-                        {t(`status.${task.status}`)}
-                    </Text>
+                    {statusBadgeAsIcon ? (
+                        <CircleDot size={20} color={statusColors.text} strokeWidth={2} />
+                    ) : (
+                        <Text style={[styles.statusText, { color: statusColors.text }]}>
+                            {t(`status.${task.status}`)}
+                        </Text>
+                    )}
                 </Pressable>
             )}
-        </Pressable>
+        </AppPressable>
     );
 }

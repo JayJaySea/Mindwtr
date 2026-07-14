@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -18,10 +18,23 @@ import {
     type TaskEditorPresetId,
 } from '@/components/task-edit/task-edit-modal.utils';
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
+import { CompactText } from '@/components/compact-text';
+import { dispatchMobileOnboardingEvent } from '@/lib/mobile-onboarding-events';
 import { logSettingsError } from '@/lib/settings-utils';
+import { useToast } from '@/contexts/toast-context';
 import {
+    FOCUS_TASK_LIMIT_OPTIONS,
+    normalizeClockTimeInput,
+    normalizeFocusTaskLimit,
+    getDefaultTaskAreaMode,
+    resolveDefaultNewTaskAreaId,
+    sanitizePomodoroDurations,
+    tFallback,
     translateText,
-    type AppData,
+    type DefaultProjectFlowMode,
+    type FeatureSettings,
+    type GtdSettings,
     type TaskEditorFieldId,
     type TaskEditorSectionId,
     type TimeEstimate,
@@ -30,14 +43,24 @@ import {
 
 import type { SettingsScreen } from './settings.constants';
 import { useSettingsLocalization, useSettingsScrollContent } from './settings.hooks';
-import { MenuItem, SettingsTopBar, SubHeader } from './settings.shell';
+import { SettingsTopBar } from './settings.shell';
 import { styles } from './settings.styles';
 
 type GtdScreen =
     | 'gtd'
     | 'gtd-archive'
+    | 'gtd-capture'
+    | 'gtd-inbox'
+    | 'gtd-pomodoro'
+    | 'gtd-review'
     | 'gtd-time-estimates'
     | 'gtd-task-editor';
+
+type PomodoroSettings = NonNullable<GtdSettings['pomodoro']>;
+type InboxProcessingSettings = NonNullable<GtdSettings['inboxProcessing']>;
+
+const SHOW_TEMP_ONBOARDING_TRIGGER = false;
+const DEFAULT_AREA_ACTIVE_OPTION_ID = '__active-area__';
 
 export function GtdSettingsScreen({
     onNavigate,
@@ -47,11 +70,12 @@ export function GtdSettingsScreen({
     screen: GtdScreen;
 }) {
     const tc = useThemeColors();
+    const filledButton = useFilledButtonColors();
     const insets = useSafeAreaInsets();
-    const { isChineseLanguage, language, localize, t } = useSettingsLocalization();
-    const { settings, updateSettings } = useTaskStore();
+    const { isChineseLanguage, language, tr, t } = useSettingsLocalization();
+    const { showToast } = useToast();
+    const { settings, updateSettings, areas } = useTaskStore();
     const scrollContentStyle = useSettingsScrollContent();
-    const [gtdInboxProcessingExpanded, setGtdInboxProcessingExpanded] = useState(false);
     const [taskEditorExpandedSections, setTaskEditorExpandedSections] = useState<Record<TaskEditorSectionId, boolean>>({
         basic: true,
         scheduling: false,
@@ -59,27 +83,51 @@ export function GtdSettingsScreen({
         details: false,
     });
     const [taskEditorSelectedField, setTaskEditorSelectedField] = useState<TaskEditorFieldId | null>(null);
+    const [defaultAreaPickerVisible, setDefaultAreaPickerVisible] = useState(false);
 
-    const defaultTimeEstimatePresets: TimeEstimate[] = ['10min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
+    const defaultTimeEstimatePresets: TimeEstimate[] = ['5min', '10min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
     const timeEstimateOptions: TimeEstimate[] = ['5min', '10min', '15min', '30min', '1hr', '2hr', '3hr', '4hr', '4hr+'];
     const timeEstimatePresets: TimeEstimate[] = (settings.gtd?.timeEstimatePresets?.length
         ? settings.gtd.timeEstimatePresets
         : defaultTimeEstimatePresets) as TimeEstimate[];
     const defaultCaptureMethod = settings.gtd?.defaultCaptureMethod ?? 'text';
+    const defaultAreaMode = getDefaultTaskAreaMode(settings);
+    const sortedAreas = [...areas]
+        .filter((area) => !area.deletedAt)
+        .sort((a, b) => (a.order - b.order) || a.name.localeCompare(b.name));
+    const defaultAreaId = resolveDefaultNewTaskAreaId(settings, sortedAreas) ?? '';
+    const defaultAreaPickerValue = defaultAreaMode === 'active'
+        ? DEFAULT_AREA_ACTIVE_OPTION_ID
+        : defaultAreaId;
     const saveAudioAttachments = settings.gtd?.saveAudioAttachments !== false;
+    const quickAddAutoClean = settings.quickAddAutoClean === true;
+    const markdownEditorAssist = settings.markdownEditorAssist !== false;
     const inboxProcessing = settings.gtd?.inboxProcessing ?? {};
     const inboxTwoMinuteEnabled = inboxProcessing.twoMinuteEnabled !== false;
     const inboxProjectFirst = inboxProcessing.projectFirst === true;
     const inboxContextStepEnabled = inboxProcessing.contextStepEnabled !== false;
     const inboxScheduleEnabled = inboxProcessing.scheduleEnabled === true;
-    const inboxReferenceEnabled = inboxProcessing.referenceEnabled === true;
     const includeContextStep = settings.gtd?.weeklyReview?.includeContextStep !== false;
+    const includeDailyFocusStep = settings.gtd?.dailyReview?.includeFocusStep !== false;
+    const defaultScheduleTime = normalizeClockTimeInput(settings.gtd?.defaultScheduleTime) || '';
+    const focusTaskLimit = normalizeFocusTaskLimit(settings.gtd?.focusTaskLimit);
+    const defaultProjectFlowMode: DefaultProjectFlowMode = settings.gtd?.defaultProjectFlowMode === 'sequential'
+        ? 'sequential'
+        : 'parallel';
     const autoArchiveDays = Number.isFinite(settings.gtd?.autoArchiveDays)
         ? Math.max(0, Math.floor(settings.gtd?.autoArchiveDays as number))
         : 7;
     const prioritiesEnabled = settings.features?.priorities !== false;
     const timeEstimatesEnabled = settings.features?.timeEstimates !== false;
     const pomodoroEnabled = settings.features?.pomodoro === true;
+    const pomodoroCustomDurations = sanitizePomodoroDurations(settings.gtd?.pomodoro?.customDurations);
+    const pomodoroLinkTask = settings.gtd?.pomodoro?.linkTask === true;
+    const pomodoroAutoStartBreaks = settings.gtd?.pomodoro?.autoStartBreaks === true;
+    const pomodoroAutoStartFocus = settings.gtd?.pomodoro?.autoStartFocus === true;
+    const [pomodoroFocusDraft, setPomodoroFocusDraft] = useState(String(pomodoroCustomDurations.focusMinutes));
+    const [pomodoroBreakDraft, setPomodoroBreakDraft] = useState(String(pomodoroCustomDurations.breakMinutes));
+    const [defaultScheduleTimeDraft, setDefaultScheduleTimeDraft] = useState(defaultScheduleTime);
+    const pomodoroAutoStartNoticeShownRef = React.useRef(false);
 
     useEffect(() => {
         if (screen !== 'gtd-task-editor') {
@@ -106,6 +154,15 @@ export function GtdSettingsScreen({
         settings.gtd?.taskEditor?.sectionOpen?.scheduling,
     ]);
 
+    useEffect(() => {
+        setPomodoroFocusDraft(String(pomodoroCustomDurations.focusMinutes));
+        setPomodoroBreakDraft(String(pomodoroCustomDurations.breakMinutes));
+    }, [pomodoroCustomDurations.breakMinutes, pomodoroCustomDurations.focusMinutes]);
+
+    useEffect(() => {
+        setDefaultScheduleTimeDraft(defaultScheduleTime);
+    }, [defaultScheduleTime]);
+
     const updateFeatureFlags = (next: { priorities?: boolean; timeEstimates?: boolean; pomodoro?: boolean }) => {
         updateSettings({
             features: {
@@ -115,7 +172,80 @@ export function GtdSettingsScreen({
         }).catch(logSettingsError);
     };
 
-    const updateInboxProcessing = (partial: Partial<NonNullable<NonNullable<AppData['settings']['gtd']>['inboxProcessing']>>) => {
+    const showPomodoroAutoStartNotice = () => {
+        if (pomodoroAutoStartNoticeShownRef.current) return;
+        pomodoroAutoStartNoticeShownRef.current = true;
+        showToast({
+            message: tr('settings.gtdMobile.pomodoroWillNowAdvancePhasesAutomatically'),
+            tone: 'info',
+            durationMs: 5000,
+        });
+    };
+
+    const updatePomodoroSettings = (
+        partial: Partial<PomodoroSettings>,
+        options?: { showAutoStartNotice?: boolean }
+    ) => {
+        updateSettings({
+            gtd: {
+                ...(settings.gtd ?? {}),
+                pomodoro: {
+                    ...(settings.gtd?.pomodoro ?? {}),
+                    ...partial,
+                },
+            },
+        }).then(() => {
+            if (options?.showAutoStartNotice) {
+                showPomodoroAutoStartNotice();
+            }
+        }).catch(logSettingsError);
+    };
+
+    const updateGtdSettings = (partial: Partial<GtdSettings>) => {
+        updateSettings({
+            gtd: {
+                ...(settings.gtd ?? {}),
+                ...partial,
+            },
+        }).catch(logSettingsError);
+    };
+
+    const updateDefaultCaptureMethod = (method: 'text' | 'audio') => {
+        updateGtdSettings({ defaultCaptureMethod: method });
+    };
+
+    const commitDefaultScheduleTime = () => {
+        const normalized = normalizeClockTimeInput(defaultScheduleTimeDraft);
+        if (normalized === null) {
+            setDefaultScheduleTimeDraft(defaultScheduleTime);
+            showToast({
+                message: tr('settings.gtdMobile.useHhMmForTheDefaultScheduleTime'),
+                tone: 'warning',
+            });
+            return;
+        }
+        setDefaultScheduleTimeDraft(normalized);
+        if (normalized === defaultScheduleTime) return;
+        updateGtdSettings({ defaultScheduleTime: normalized });
+    };
+
+    const savePomodoroCustomDurations = (nextDurations: { focusMinutes: number; breakMinutes: number }) => {
+        updatePomodoroSettings({ customDurations: nextDurations });
+        return nextDurations;
+    };
+
+    const commitPomodoroMinutes = () => {
+        const focusValue = Number.parseInt(pomodoroFocusDraft, 10);
+        const breakValue = Number.parseInt(pomodoroBreakDraft, 10);
+        const nextDurations = savePomodoroCustomDurations(sanitizePomodoroDurations({
+            focusMinutes: Number.isFinite(focusValue) ? focusValue : pomodoroCustomDurations.focusMinutes,
+            breakMinutes: Number.isFinite(breakValue) ? breakValue : pomodoroCustomDurations.breakMinutes,
+        }));
+        setPomodoroFocusDraft(String(nextDurations.focusMinutes));
+        setPomodoroBreakDraft(String(nextDurations.breakMinutes));
+    };
+
+    const updateInboxProcessing = (partial: Partial<InboxProcessingSettings>) => {
         updateSettings({
             gtd: {
                 ...(settings.gtd ?? {}),
@@ -127,12 +257,24 @@ export function GtdSettingsScreen({
         }).catch(logSettingsError);
     };
 
-    const updateWeeklyReviewConfig = (partial: NonNullable<NonNullable<AppData['settings']['gtd']>['weeklyReview']>) => {
+    const updateWeeklyReviewConfig = (partial: GtdSettings['weeklyReview']) => {
         updateSettings({
             gtd: {
                 ...(settings.gtd ?? {}),
                 weeklyReview: {
                     ...(settings.gtd?.weeklyReview ?? {}),
+                    ...partial,
+                },
+            },
+        }).catch(logSettingsError);
+    };
+
+    const updateDailyReviewConfig = (partial: GtdSettings['dailyReview']) => {
+        updateSettings({
+            gtd: {
+                ...(settings.gtd ?? {}),
+                dailyReview: {
+                    ...(settings.gtd?.dailyReview ?? {}),
                     ...partial,
                 },
             },
@@ -151,20 +293,146 @@ export function GtdSettingsScreen({
         return '4h+';
     };
 
-    if (screen === 'gtd') {
-        const featurePomodoroLabelRaw = t('settings.featurePomodoro');
-        const featurePomodoroDescRaw = t('settings.featurePomodoroDesc');
-        const featurePomodoroLabel = featurePomodoroLabelRaw === 'settings.featurePomodoro'
-            ? localize('Pomodoro timer', '番茄钟')
-            : featurePomodoroLabelRaw;
-        const featurePomodoroDesc = featurePomodoroDescRaw === 'settings.featurePomodoroDesc'
-            ? localize('Enable the optional Pomodoro panel in Focus view.', '在聚焦视图中启用可选的番茄钟面板。')
-            : featurePomodoroDescRaw;
+    const featurePomodoroLabelRaw = t('settings.featurePomodoro');
+    const featurePomodoroDescRaw = t('settings.featurePomodoroDesc');
+    const featurePomodoroLabel = featurePomodoroLabelRaw === 'settings.featurePomodoro'
+        ? tr('settings.featurePomodoro')
+        : featurePomodoroLabelRaw;
+    const featurePomodoroDesc = featurePomodoroDescRaw === 'settings.featurePomodoroDesc'
+        ? tr('settings.featurePomodoroDesc')
+        : featurePomodoroDescRaw;
+    const pomodoroSettingsLabel = tFallback(t, 'settings.pomodoroSettings', tr('settings.gtdMobile.pomodoroSettings'));
+    const pomodoroCustomPresetLabelRaw = t('settings.pomodoroCustomPreset');
+    const pomodoroCustomPresetLabel = pomodoroCustomPresetLabelRaw === 'settings.pomodoroCustomPreset'
+        ? tr('settings.pomodoroCustomPreset')
+        : pomodoroCustomPresetLabelRaw;
+    const pomodoroCustomPresetDescRaw = t('settings.pomodoroCustomPresetDesc');
+    const pomodoroCustomPresetDesc = pomodoroCustomPresetDescRaw === 'settings.pomodoroCustomPresetDesc'
+        ? tr('settings.pomodoroCustomPresetDesc')
+        : pomodoroCustomPresetDescRaw;
+    const pomodoroFocusMinutesLabelRaw = t('settings.pomodoroFocusMinutes');
+    const pomodoroFocusMinutesLabel = pomodoroFocusMinutesLabelRaw === 'settings.pomodoroFocusMinutes'
+        ? tr('settings.pomodoroFocusMinutes')
+        : pomodoroFocusMinutesLabelRaw;
+    const pomodoroBreakMinutesLabelRaw = t('settings.pomodoroBreakMinutes');
+    const pomodoroBreakMinutesLabel = pomodoroBreakMinutesLabelRaw === 'settings.pomodoroBreakMinutes'
+        ? tr('settings.pomodoroBreakMinutes')
+        : pomodoroBreakMinutesLabelRaw;
+    const pomodoroLinkTaskLabel = tFallback(
+        t,
+        'settings.pomodoroLinkTask',
+        tr('settings.pomodoroLinkTask')
+    );
+    const pomodoroLinkTaskDesc = tFallback(
+        t,
+        'settings.pomodoroLinkTaskDesc',
+        tr('settings.pomodoroLinkTaskDesc')
+    );
+    const pomodoroAutoStartBreaksLabelRaw = t('settings.pomodoroAutoStartBreaks');
+    const pomodoroAutoStartBreaksLabel = pomodoroAutoStartBreaksLabelRaw === 'settings.pomodoroAutoStartBreaks'
+        ? tr('settings.gtdMobile.autoStartBreaks')
+        : pomodoroAutoStartBreaksLabelRaw;
+    const pomodoroAutoStartBreaksDescRaw = t('settings.pomodoroAutoStartBreaksDesc');
+    const pomodoroAutoStartBreaksDesc = pomodoroAutoStartBreaksDescRaw === 'settings.pomodoroAutoStartBreaksDesc'
+        ? tr('settings.gtdMobile.startTheBreakTimerAutomaticallyWhenAFocusSessionEnds')
+        : pomodoroAutoStartBreaksDescRaw;
+    const pomodoroAutoStartFocusLabelRaw = t('settings.pomodoroAutoStartFocus');
+    const pomodoroAutoStartFocusLabel = pomodoroAutoStartFocusLabelRaw === 'settings.pomodoroAutoStartFocus'
+        ? tr('settings.gtdMobile.autoStartFocus')
+        : pomodoroAutoStartFocusLabelRaw;
+    const pomodoroAutoStartFocusDescRaw = t('settings.pomodoroAutoStartFocusDesc');
+    const pomodoroAutoStartFocusDesc = pomodoroAutoStartFocusDescRaw === 'settings.pomodoroAutoStartFocusDesc'
+        ? tr('settings.gtdMobile.startTheNextFocusSessionAutomaticallyWhenABreakEnds')
+        : pomodoroAutoStartFocusDescRaw;
+    const defaultScheduleTimeLabel = tFallback(t, 'settings.defaultScheduleTime', tr('settings.gtdMobile.defaultScheduleTime'));
+    const defaultScheduleTimeDesc = tFallback(
+        t,
+        'settings.defaultScheduleTimeDesc',
+        tr('settings.gtdMobile.optionalPreFillsManualStartDueAndReviewTimeFields')
+    );
+    const focusTaskLimitLabel = tFallback(t, 'settings.focusTaskLimit', tr('settings.focusTaskLimit'));
+    const focusTaskLimitDesc = tFallback(
+        t,
+        'settings.focusTaskLimitDesc',
+        tr('settings.focusTaskLimitDesc')
+    );
+    const defaultProjectFlowModeLabel = tFallback(
+        t,
+        'settings.defaultProjectFlowMode',
+        'Default project flow'
+    );
+    const defaultProjectFlowModeDesc = tFallback(
+        t,
+        'settings.defaultProjectFlowModeDesc',
+        'Applies only when creating new projects.'
+    );
+    const defaultAreaLabel = t('settings.defaultArea');
+    const defaultAreaDesc = t('settings.defaultAreaDesc');
+    const defaultAreaNoneLabel = t('settings.defaultAreaNone');
+    const defaultAreaActiveLabel = t('settings.defaultAreaActive');
+    const captureSettingsTitle = tFallback(t, 'settings.captureSettings', tr('settings.gtdMobile.captureDefaults'));
+    const quickAddAutoCleanLabel = t('settings.quickAddAutoClean');
+    const quickAddAutoCleanDesc = t('settings.quickAddAutoCleanDesc');
+    const markdownEditorAssistLabel = t('settings.markdownEditorAssist');
+    const markdownEditorAssistDesc = t('settings.markdownEditorAssistDesc');
+    const reviewSettingsTitle = tFallback(t, 'settings.reviewSettings', tr('settings.gtdMobile.reviewSteps'));
+    const inboxSettingsTitle = tFallback(t, 'settings.inboxProcessing', tr('settings.inboxProcessing'));
+    const projectFlowModeOptions: Array<{ id: DefaultProjectFlowMode; label: string }> = [
+        { id: 'parallel', label: tFallback(t, 'settings.projectFlowParallel', 'Parallel') },
+        { id: 'sequential', label: tFallback(t, 'settings.projectFlowSequential', 'Sequential') },
+    ];
+    const captureMethodOptions: { id: 'text' | 'audio'; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
+        { id: 'text', label: t('settings.captureDefaultText'), icon: 'text-outline' },
+        { id: 'audio', label: t('settings.captureDefaultAudio'), icon: 'mic-outline' },
+    ];
+    const defaultAreaOptions = [
+        { id: '', label: defaultAreaNoneLabel },
+        { id: DEFAULT_AREA_ACTIVE_OPTION_ID, label: defaultAreaActiveLabel },
+        ...sortedAreas.map((area) => ({ id: area.id, label: area.name })),
+    ];
+    const defaultAreaSelectedLabel = defaultAreaOptions.find((option) => option.id === defaultAreaPickerValue)?.label ?? defaultAreaNoneLabel;
+    const selectDefaultArea = (areaId: string) => {
+        if (areaId === DEFAULT_AREA_ACTIVE_OPTION_ID) {
+            updateGtdSettings({ defaultAreaMode: 'active', defaultAreaId: null });
+        } else if (areaId) {
+            updateGtdSettings({ defaultAreaMode: 'fixed', defaultAreaId: areaId });
+        } else {
+            updateGtdSettings({ defaultAreaMode: 'none', defaultAreaId: null });
+        }
+        setDefaultAreaPickerVisible(false);
+    };
 
+    const renderGtdNavigationRow = (
+        title: string,
+        description: string | null,
+        nextScreen: SettingsScreen,
+        options?: { first?: boolean; testID?: string }
+    ) => (
+        <TouchableOpacity
+            testID={options?.testID}
+            style={[
+                styles.gtdNavigationRow,
+                { borderTopColor: tc.border },
+                options?.first && { borderTopWidth: 0 },
+            ]}
+            accessibilityRole="button"
+            onPress={() => onNavigate(nextScreen)}
+            activeOpacity={0.75}
+        >
+            <View style={styles.settingInfo}>
+                <Text style={[styles.settingLabel, { color: tc.text }]}>{title}</Text>
+                {description ? (
+                    <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{description}</Text>
+                ) : null}
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={tc.secondaryText} />
+        </TouchableOpacity>
+    );
+
+    if (screen === 'gtd') {
         return (
             <SafeAreaView style={[styles.container, { backgroundColor: tc.bg }]} edges={['bottom']}>
-                <SettingsTopBar />
-                <SubHeader title={t('settings.gtd')} />
+                <SettingsTopBar title={t('settings.gtd')} />
                 <ScrollView style={styles.scrollView} contentContainerStyle={scrollContentStyle}>
                     <Text style={[styles.description, { color: tc.secondaryText }]}>{t('settings.gtdDesc')}</Text>
                     <View style={[styles.settingCard, { backgroundColor: tc.cardBg, marginBottom: 12 }]}>
@@ -185,17 +453,267 @@ export function GtdSettingsScreen({
                                 trackColor={{ false: '#767577', true: '#3B82F6' }}
                             />
                         </View>
-                    </View>
-
-                    <View style={[styles.menuCard, { backgroundColor: tc.cardBg }]}>
-                        {timeEstimatesEnabled && (
-                            <MenuItem title={t('settings.timeEstimatePresets')} onPress={() => onNavigate('gtd-time-estimates')} />
+                        {pomodoroEnabled && renderGtdNavigationRow(
+                            pomodoroSettingsLabel,
+                            tr('settings.gtdMobile.customPresetTaskLinkingAndAutoStartBehavior'),
+                            'gtd-pomodoro',
+                            { testID: 'gtd-nav-pomodoro' }
                         )}
-                        <MenuItem title={t('settings.autoArchive')} onPress={() => onNavigate('gtd-archive')} />
-                        <MenuItem title={t('settings.taskEditorLayout')} onPress={() => onNavigate('gtd-task-editor')} />
                     </View>
 
                     <View style={[styles.settingCard, { backgroundColor: tc.cardBg, marginTop: 12 }]}>
+                        <View style={styles.settingRow}>
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{defaultScheduleTimeLabel}</Text>
+                                <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{defaultScheduleTimeDesc}</Text>
+                            </View>
+                            <TextInput
+                                value={defaultScheduleTimeDraft}
+                                onChangeText={setDefaultScheduleTimeDraft}
+                                onBlur={commitDefaultScheduleTime}
+                                placeholder={tr('settings.gtdMobile.hhMm')}
+                                placeholderTextColor={tc.secondaryText}
+                                keyboardType="numbers-and-punctuation"
+                                style={[
+                                    styles.textInput,
+                                    styles.inlineTextInput,
+                                    styles.gtdTimeInput,
+                                    { backgroundColor: tc.bg, borderColor: tc.border, color: tc.text },
+                                ]}
+                            />
+                        </View>
+                        <View style={[styles.settingRowColumn, { borderTopWidth: 1, borderTopColor: tc.border, gap: 12 }]}>
+                            <View>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{focusTaskLimitLabel}</Text>
+                                <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{focusTaskLimitDesc}</Text>
+                            </View>
+                            <View style={[styles.gtdSegmentedControl, { backgroundColor: tc.bg, borderColor: tc.border }]}>
+                                {FOCUS_TASK_LIMIT_OPTIONS.map((option) => {
+                                    const selected = focusTaskLimit === option;
+                                    return (
+                                        <TouchableOpacity
+                                            key={option}
+                                            accessibilityRole="button"
+                                            accessibilityState={{ selected }}
+                                            style={[
+                                                styles.gtdSegmentedOption,
+                                                { backgroundColor: selected ? tc.filterBg : 'transparent' },
+                                            ]}
+                                            onPress={() => updateGtdSettings({ focusTaskLimit: option })}
+                                            activeOpacity={0.8}
+                                        >
+                                            <CompactText
+                                                style={[styles.gtdSegmentedOptionText, { color: selected ? tc.tint : tc.secondaryText }]}
+                                                numberOfLines={2}
+                                            >
+                                                {option}
+                                            </CompactText>
+                                        </TouchableOpacity>
+                                    );
+                                })}
+                            </View>
+                        </View>
+                        <View style={[styles.settingRowColumn, { borderTopWidth: 1, borderTopColor: tc.border, gap: 12 }]}>
+                            <View>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{defaultProjectFlowModeLabel}</Text>
+                                <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{defaultProjectFlowModeDesc}</Text>
+                            </View>
+                            <View style={[styles.gtdSegmentedControl, { backgroundColor: tc.bg, borderColor: tc.border }]}>
+                                {projectFlowModeOptions.map((option) => {
+                                    const selected = defaultProjectFlowMode === option.id;
+                                    return (
+                                        <TouchableOpacity
+                                            key={option.id}
+                                            accessibilityRole="button"
+                                            accessibilityState={{ selected }}
+                                            style={[
+                                                styles.gtdSegmentedOption,
+                                                { backgroundColor: selected ? tc.filterBg : 'transparent' },
+                                            ]}
+                                            onPress={() => updateGtdSettings({ defaultProjectFlowMode: option.id })}
+                                            activeOpacity={0.8}
+                                        >
+                                            <CompactText
+                                                style={[styles.gtdSegmentedOptionText, { color: selected ? tc.tint : tc.secondaryText }]}
+                                                numberOfLines={2}
+                                            >
+                                                {option.label}
+                                            </CompactText>
+                                        </TouchableOpacity>
+                                    );
+                                })}
+                            </View>
+                        </View>
+                        {timeEstimatesEnabled && renderGtdNavigationRow(
+                            t('settings.timeEstimatePresets'),
+                            t('settings.timeEstimatePresetsDesc'),
+                            'gtd-time-estimates',
+                            { testID: 'gtd-nav-time-estimates' }
+                        )}
+                        {renderGtdNavigationRow(
+                            t('settings.autoArchive'),
+                            t('settings.autoArchiveDesc'),
+                            'gtd-archive',
+                            { testID: 'gtd-nav-archive' }
+                        )}
+                    </View>
+
+                    <View style={[styles.settingCard, { backgroundColor: tc.cardBg, marginTop: 12 }]}>
+                        {renderGtdNavigationRow(
+                            t('settings.taskEditorLayout'),
+                            t('settings.taskEditorLayoutDesc'),
+                            'gtd-task-editor',
+                            { first: true, testID: 'gtd-nav-task-editor' }
+                        )}
+                        {renderGtdNavigationRow(
+                            captureSettingsTitle,
+                            t('settings.captureDefaultDesc'),
+                            'gtd-capture',
+                            { testID: 'gtd-nav-capture' }
+                        )}
+                    </View>
+
+                    <View style={[styles.settingCard, { backgroundColor: tc.cardBg, marginTop: 12 }]}>
+                        {renderGtdNavigationRow(
+                            reviewSettingsTitle,
+                            tr('settings.gtdMobile.chooseWhichOptionalStepsAppearInDailyAndWeeklyReview'),
+                            'gtd-review',
+                            { first: true, testID: 'gtd-nav-review' }
+                        )}
+                        {renderGtdNavigationRow(
+                            inboxSettingsTitle,
+                            t('settings.inboxProcessingDesc'),
+                            'gtd-inbox',
+                            { testID: 'gtd-nav-inbox' }
+                        )}
+                    </View>
+
+                    {SHOW_TEMP_ONBOARDING_TRIGGER ? (
+                        <TouchableOpacity
+                            accessibilityRole="button"
+                            activeOpacity={0.75}
+                            onPress={dispatchMobileOnboardingEvent}
+                            style={[styles.settingCard, { backgroundColor: tc.cardBg, marginTop: 12 }]}
+                            testID="mobile-onboarding-test-trigger"
+                        >
+                            <View style={styles.settingRow}>
+                                <View style={styles.settingInfo}>
+                                    <Text style={[styles.settingLabel, { color: tc.text }]}>Temporary onboarding test</Text>
+                                    <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
+                                        Opens the mobile first-run onboarding flow so you can test Sync, Import, and Start fresh.
+                                    </Text>
+                                </View>
+                                <Text style={[styles.linkText, { color: tc.tint }]}>Open</Text>
+                            </View>
+                        </TouchableOpacity>
+                    ) : null}
+                </ScrollView>
+            </SafeAreaView>
+        );
+    }
+
+    if (screen === 'gtd-pomodoro') {
+        return (
+            <SafeAreaView style={[styles.container, { backgroundColor: tc.bg }]} edges={['bottom']}>
+                <SettingsTopBar title={pomodoroSettingsLabel} />
+                <ScrollView style={styles.scrollView} contentContainerStyle={scrollContentStyle}>
+                    <Text style={[styles.description, { color: tc.secondaryText }]}>{featurePomodoroDesc}</Text>
+                    {!pomodoroEnabled ? (
+                        <TouchableOpacity
+                            style={[styles.settingCard, { backgroundColor: tc.cardBg }]}
+                            accessibilityRole="button"
+                            onPress={() => updateFeatureFlags({ pomodoro: true })}
+                            activeOpacity={0.75}
+                        >
+                            <View style={styles.settingRow}>
+                                <Text style={[styles.settingLabel, { color: tc.tint }]}>{featurePomodoroLabel}</Text>
+                            </View>
+                        </TouchableOpacity>
+                    ) : (
+                        <View style={[styles.settingCard, { backgroundColor: tc.cardBg }]}>
+                            <View style={[styles.settingRowColumn, { gap: 12 }]}>
+                                <View style={styles.settingInfo}>
+                                    <Text style={[styles.settingLabel, { color: tc.text }]}>{pomodoroCustomPresetLabel}</Text>
+                                    <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{pomodoroCustomPresetDesc}</Text>
+                                </View>
+                                <View style={styles.inlineInputRow}>
+                                    <View style={styles.inlineInputGroup}>
+                                        <Text style={[styles.inlineInputLabel, { color: tc.secondaryText }]}>{pomodoroFocusMinutesLabel}</Text>
+                                        <TextInput
+                                            value={pomodoroFocusDraft}
+                                            onChangeText={setPomodoroFocusDraft}
+                                            onBlur={commitPomodoroMinutes}
+                                            keyboardType="number-pad"
+                                            accessibilityLabel={pomodoroFocusMinutesLabel}
+                                            style={[styles.textInput, styles.inlineTextInput, { borderColor: tc.border, color: tc.text }]}
+                                        />
+                                    </View>
+                                    <View style={styles.inlineInputGroup}>
+                                        <Text style={[styles.inlineInputLabel, { color: tc.secondaryText }]}>{pomodoroBreakMinutesLabel}</Text>
+                                        <TextInput
+                                            value={pomodoroBreakDraft}
+                                            onChangeText={setPomodoroBreakDraft}
+                                            onBlur={commitPomodoroMinutes}
+                                            keyboardType="number-pad"
+                                            accessibilityLabel={pomodoroBreakMinutesLabel}
+                                            style={[styles.textInput, styles.inlineTextInput, { borderColor: tc.border, color: tc.text }]}
+                                        />
+                                    </View>
+                                </View>
+                            </View>
+                            <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                                <View style={styles.settingInfo}>
+                                    <Text style={[styles.settingLabel, { color: tc.text }]}>{pomodoroLinkTaskLabel}</Text>
+                                    <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{pomodoroLinkTaskDesc}</Text>
+                                </View>
+                                <Switch
+                                    value={pomodoroLinkTask}
+                                    onValueChange={(value) => updatePomodoroSettings({ linkTask: value })}
+                                    trackColor={{ false: '#767577', true: '#3B82F6' }}
+                                />
+                            </View>
+                            <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                                <View style={styles.settingInfo}>
+                                    <Text style={[styles.settingLabel, { color: tc.text }]}>{pomodoroAutoStartBreaksLabel}</Text>
+                                    <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{pomodoroAutoStartBreaksDesc}</Text>
+                                </View>
+                                <Switch
+                                    value={pomodoroAutoStartBreaks}
+                                    onValueChange={(value) => updatePomodoroSettings(
+                                        { autoStartBreaks: value },
+                                        { showAutoStartNotice: value && !pomodoroAutoStartBreaks }
+                                    )}
+                                    trackColor={{ false: '#767577', true: '#3B82F6' }}
+                                />
+                            </View>
+                            <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                                <View style={styles.settingInfo}>
+                                    <Text style={[styles.settingLabel, { color: tc.text }]}>{pomodoroAutoStartFocusLabel}</Text>
+                                    <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{pomodoroAutoStartFocusDesc}</Text>
+                                </View>
+                                <Switch
+                                    value={pomodoroAutoStartFocus}
+                                    onValueChange={(value) => updatePomodoroSettings(
+                                        { autoStartFocus: value },
+                                        { showAutoStartNotice: value && !pomodoroAutoStartFocus }
+                                    )}
+                                    trackColor={{ false: '#767577', true: '#3B82F6' }}
+                                />
+                            </View>
+                        </View>
+                    )}
+                </ScrollView>
+            </SafeAreaView>
+        );
+    }
+
+    if (screen === 'gtd-capture') {
+        return (
+            <SafeAreaView style={[styles.container, { backgroundColor: tc.bg }]} edges={['bottom']}>
+                <SettingsTopBar title={captureSettingsTitle} />
+                <ScrollView style={styles.scrollView} contentContainerStyle={scrollContentStyle}>
+                    <Text style={[styles.description, { color: tc.secondaryText }]}>{t('settings.captureDefaultDesc')}</Text>
+                    <View style={[styles.settingCard, { backgroundColor: tc.cardBg }]}>
                         <View style={styles.settingRow}>
                             <View style={styles.settingInfo}>
                                 <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.captureDefault')}</Text>
@@ -203,45 +721,59 @@ export function GtdSettingsScreen({
                             </View>
                         </View>
                         <View style={{ paddingHorizontal: 16, paddingBottom: 12 }}>
-                            <View style={styles.backendToggle}>
-                                <TouchableOpacity
-                                    style={[
-                                        styles.backendOption,
-                                        { borderColor: tc.border, backgroundColor: defaultCaptureMethod === 'text' ? tc.filterBg : 'transparent' },
-                                    ]}
-                                    onPress={() => {
-                                        updateSettings({
-                                            gtd: {
-                                                ...(settings.gtd ?? {}),
-                                                defaultCaptureMethod: 'text',
-                                            },
-                                        }).catch(logSettingsError);
-                                    }}
-                                >
-                                    <Text style={[styles.backendOptionText, { color: defaultCaptureMethod === 'text' ? tc.tint : tc.secondaryText }]}>
-                                        {t('settings.captureDefaultText')}
-                                    </Text>
-                                </TouchableOpacity>
-                                <TouchableOpacity
-                                    style={[
-                                        styles.backendOption,
-                                        { borderColor: tc.border, backgroundColor: defaultCaptureMethod === 'audio' ? tc.filterBg : 'transparent' },
-                                    ]}
-                                    onPress={() => {
-                                        updateSettings({
-                                            gtd: {
-                                                ...(settings.gtd ?? {}),
-                                                defaultCaptureMethod: 'audio',
-                                            },
-                                        }).catch(logSettingsError);
-                                    }}
-                                >
-                                    <Text style={[styles.backendOptionText, { color: defaultCaptureMethod === 'audio' ? tc.tint : tc.secondaryText }]}>
-                                        {t('settings.captureDefaultAudio')}
-                                    </Text>
-                                </TouchableOpacity>
+                            <View style={[styles.gtdSegmentedControl, { backgroundColor: tc.bg, borderColor: tc.border }]}>
+                                {captureMethodOptions.map((option) => {
+                                    const selected = defaultCaptureMethod === option.id;
+                                    return (
+                                        <TouchableOpacity
+                                            key={option.id}
+                                            accessibilityRole="button"
+                                            accessibilityState={{ selected }}
+                                            style={[
+                                                styles.gtdSegmentedOption,
+                                                { backgroundColor: selected ? tc.filterBg : 'transparent' },
+                                            ]}
+                                            onPress={() => updateDefaultCaptureMethod(option.id)}
+                                            activeOpacity={0.8}
+                                        >
+                                            <Ionicons
+                                                name={option.icon}
+                                                size={16}
+                                                color={selected ? tc.tint : tc.secondaryText}
+                                            />
+                                            <CompactText
+                                                style={[styles.gtdSegmentedOptionText, { color: selected ? tc.tint : tc.secondaryText }]}
+                                                numberOfLines={2}
+                                            >
+                                                {option.label}
+                                            </CompactText>
+                                        </TouchableOpacity>
+                                    );
+                                })}
                             </View>
                         </View>
+                        <TouchableOpacity
+                            testID="default-area-picker-button"
+                            style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}
+                            accessibilityRole="button"
+                            accessibilityLabel={`${defaultAreaLabel}: ${defaultAreaSelectedLabel}`}
+                            onPress={() => setDefaultAreaPickerVisible(true)}
+                            activeOpacity={0.75}
+                        >
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{defaultAreaLabel}</Text>
+                                <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{defaultAreaDesc}</Text>
+                            </View>
+                            <View style={[styles.menuRight, { flexShrink: 1, maxWidth: '42%' }]}>
+                            <CompactText
+                                style={[styles.settingValue, { color: tc.secondaryText }]}
+                                numberOfLines={2}
+                            >
+                                {defaultAreaSelectedLabel}
+                            </CompactText>
+                                <Ionicons name="chevron-forward" size={18} color={tc.secondaryText} />
+                            </View>
+                        </TouchableOpacity>
                         {defaultCaptureMethod === 'audio' ? (
                             <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
                                 <View style={styles.settingInfo}>
@@ -262,10 +794,112 @@ export function GtdSettingsScreen({
                                 />
                             </View>
                         ) : null}
+                        <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{quickAddAutoCleanLabel}</Text>
+                                <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{quickAddAutoCleanDesc}</Text>
+                            </View>
+                            <Switch
+                                value={quickAddAutoClean}
+                                onValueChange={(value) => {
+                                    updateSettings({ quickAddAutoClean: value }).catch(logSettingsError);
+                                }}
+                                trackColor={{ false: '#767577', true: '#3B82F6' }}
+                            />
+                        </View>
+                        <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{markdownEditorAssistLabel}</Text>
+                                <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{markdownEditorAssistDesc}</Text>
+                            </View>
+                            <Switch
+                                value={markdownEditorAssist}
+                                onValueChange={(value) => {
+                                    updateSettings({ markdownEditorAssist: value }).catch(logSettingsError);
+                                }}
+                                trackColor={{ false: '#767577', true: '#3B82F6' }}
+                            />
+                        </View>
                     </View>
+                </ScrollView>
+                <Modal
+                    visible={defaultAreaPickerVisible}
+                    transparent
+                    animationType="fade"
+                    onRequestClose={() => setDefaultAreaPickerVisible(false)}
+                >
+                    <Pressable style={styles.pickerOverlay} onPress={() => setDefaultAreaPickerVisible(false)}>
+                        <Pressable
+                            style={[styles.pickerCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}
+                            onPress={(event) => event.stopPropagation()}
+                        >
+                            <Text style={[styles.pickerTitle, { color: tc.text }]}>{defaultAreaLabel}</Text>
+                            <ScrollView style={styles.pickerList} contentContainerStyle={styles.pickerListContent}>
+                                {defaultAreaOptions.map((option) => {
+                                    const selected = defaultAreaPickerValue === option.id;
+                                    return (
+                                        <TouchableOpacity
+                                            key={option.id || 'none'}
+                                            testID={`default-area-picker-option-${option.id || 'none'}`}
+                                            accessibilityRole="button"
+                                            accessibilityState={{ selected }}
+                                            style={[
+                                                styles.pickerOption,
+                                                {
+                                                    backgroundColor: selected ? tc.filterBg : 'transparent',
+                                                    borderColor: selected ? tc.tint : tc.border,
+                                                },
+                                            ]}
+                                            onPress={() => selectDefaultArea(option.id)}
+                                            activeOpacity={0.8}
+                                        >
+                                            <CompactText
+                                                style={[styles.pickerOptionText, { color: selected ? tc.tint : tc.text }]}
+                                                numberOfLines={2}
+                                            >
+                                                {option.label}
+                                            </CompactText>
+                                            {selected ? <Ionicons name="checkmark" size={18} color={tc.tint} /> : null}
+                                        </TouchableOpacity>
+                                    );
+                                })}
+                            </ScrollView>
+                        </Pressable>
+                    </Pressable>
+                </Modal>
+            </SafeAreaView>
+        );
+    }
 
-                    <View style={[styles.settingCard, { backgroundColor: tc.cardBg, marginTop: 12 }]}>
+    if (screen === 'gtd-review') {
+        return (
+            <SafeAreaView style={[styles.container, { backgroundColor: tc.bg }]} edges={['bottom']}>
+                <SettingsTopBar title={reviewSettingsTitle} />
+                <ScrollView style={styles.scrollView} contentContainerStyle={scrollContentStyle}>
+                    <Text style={[styles.description, { color: tc.secondaryText }]}>
+                        {tr('settings.gtdMobile.chooseWhichOptionalStepsAppearInDailyAndWeeklyReview')}
+                    </Text>
+                    <View style={[styles.settingCard, { backgroundColor: tc.cardBg }]}>
                         <View style={styles.settingRow}>
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.dailyReviewConfig')}</Text>
+                                <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{t('settings.dailyReviewConfigDesc')}</Text>
+                            </View>
+                        </View>
+                        <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.dailyReviewIncludeFocusStep')}</Text>
+                                <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
+                                    {t('settings.dailyReviewIncludeFocusStepDesc')}
+                                </Text>
+                            </View>
+                            <Switch
+                                value={includeDailyFocusStep}
+                                onValueChange={(value) => updateDailyReviewConfig({ includeFocusStep: value })}
+                                trackColor={{ false: '#767577', true: '#3B82F6' }}
+                            />
+                        </View>
+                        <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
                             <View style={styles.settingInfo}>
                                 <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.weeklyReviewConfig')}</Text>
                                 <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{t('settings.weeklyReviewConfigDesc')}</Text>
@@ -285,77 +919,58 @@ export function GtdSettingsScreen({
                             />
                         </View>
                     </View>
+                </ScrollView>
+            </SafeAreaView>
+        );
+    }
 
-                    <View style={[styles.settingCard, { backgroundColor: tc.cardBg, marginTop: 12 }]}>
+    if (screen === 'gtd-inbox') {
+        return (
+            <SafeAreaView style={[styles.container, { backgroundColor: tc.bg }]} edges={['bottom']}>
+                <SettingsTopBar title={inboxSettingsTitle} />
+                <ScrollView style={styles.scrollView} contentContainerStyle={scrollContentStyle}>
+                    <Text style={[styles.description, { color: tc.secondaryText }]}>{t('settings.inboxProcessingDesc')}</Text>
+                    <View style={[styles.settingCard, { backgroundColor: tc.cardBg }]}>
                         <View style={styles.settingRow}>
-                            <TouchableOpacity
-                                style={styles.settingInfo}
-                                onPress={() => setGtdInboxProcessingExpanded((prev) => !prev)}
-                                activeOpacity={0.7}
-                            >
-                                <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.inboxProcessing')}</Text>
-                                <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>{t('settings.inboxProcessingDesc')}</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity onPress={() => setGtdInboxProcessingExpanded((prev) => !prev)} activeOpacity={0.7}>
-                                <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
-                                    {gtdInboxProcessingExpanded ? '▾' : '▸'}
-                                </Text>
-                            </TouchableOpacity>
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.inboxTwoMinuteEnabled')}</Text>
+                            </View>
+                            <Switch
+                                value={inboxTwoMinuteEnabled}
+                                onValueChange={(value) => updateInboxProcessing({ twoMinuteEnabled: value })}
+                                trackColor={{ false: '#767577', true: '#3B82F6' }}
+                            />
                         </View>
-                        {gtdInboxProcessingExpanded && (
-                            <>
-                                <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
-                                    <View style={styles.settingInfo}>
-                                        <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.inboxTwoMinuteEnabled')}</Text>
-                                    </View>
-                                    <Switch
-                                        value={inboxTwoMinuteEnabled}
-                                        onValueChange={(value) => updateInboxProcessing({ twoMinuteEnabled: value })}
-                                        trackColor={{ false: '#767577', true: '#3B82F6' }}
-                                    />
-                                </View>
-                                <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
-                                    <View style={styles.settingInfo}>
-                                        <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.inboxProjectFirst')}</Text>
-                                    </View>
-                                    <Switch
-                                        value={inboxProjectFirst}
-                                        onValueChange={(value) => updateInboxProcessing({ projectFirst: value })}
-                                        trackColor={{ false: '#767577', true: '#3B82F6' }}
-                                    />
-                                </View>
-                                <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
-                                    <View style={styles.settingInfo}>
-                                        <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.inboxContextStepEnabled')}</Text>
-                                    </View>
-                                    <Switch
-                                        value={inboxContextStepEnabled}
-                                        onValueChange={(value) => updateInboxProcessing({ contextStepEnabled: value })}
-                                        trackColor={{ false: '#767577', true: '#3B82F6' }}
-                                    />
-                                </View>
-                                <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
-                                    <View style={styles.settingInfo}>
-                                        <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.inboxScheduleEnabled')}</Text>
-                                    </View>
-                                    <Switch
-                                        value={inboxScheduleEnabled}
-                                        onValueChange={(value) => updateInboxProcessing({ scheduleEnabled: value })}
-                                        trackColor={{ false: '#767577', true: '#3B82F6' }}
-                                    />
-                                </View>
-                                <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
-                                    <View style={styles.settingInfo}>
-                                        <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.inboxReferenceEnabled')}</Text>
-                                    </View>
-                                    <Switch
-                                        value={inboxReferenceEnabled}
-                                        onValueChange={(value) => updateInboxProcessing({ referenceEnabled: value })}
-                                        trackColor={{ false: '#767577', true: '#3B82F6' }}
-                                    />
-                                </View>
-                            </>
-                        )}
+                        <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.inboxProjectFirst')}</Text>
+                            </View>
+                            <Switch
+                                value={inboxProjectFirst}
+                                onValueChange={(value) => updateInboxProcessing({ projectFirst: value })}
+                                trackColor={{ false: '#767577', true: '#3B82F6' }}
+                            />
+                        </View>
+                        <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.inboxContextStepEnabled')}</Text>
+                            </View>
+                            <Switch
+                                value={inboxContextStepEnabled}
+                                onValueChange={(value) => updateInboxProcessing({ contextStepEnabled: value })}
+                                trackColor={{ false: '#767577', true: '#3B82F6' }}
+                            />
+                        </View>
+                        <View style={[styles.settingRow, { borderTopWidth: 1, borderTopColor: tc.border }]}>
+                            <View style={styles.settingInfo}>
+                                <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.inboxScheduleEnabled')}</Text>
+                            </View>
+                            <Switch
+                                value={inboxScheduleEnabled}
+                                onValueChange={(value) => updateInboxProcessing({ scheduleEnabled: value })}
+                                trackColor={{ false: '#767577', true: '#3B82F6' }}
+                            />
+                        </View>
                     </View>
                 </ScrollView>
             </SafeAreaView>
@@ -371,8 +986,7 @@ export function GtdSettingsScreen({
 
         return (
             <SafeAreaView style={[styles.container, { backgroundColor: tc.bg }]} edges={['bottom']}>
-                <SettingsTopBar />
-                <SubHeader title={t('settings.autoArchive')} />
+                <SettingsTopBar title={t('settings.autoArchive')} />
                 <ScrollView style={styles.scrollView} contentContainerStyle={scrollContentStyle}>
                     <Text style={[styles.description, { color: tc.secondaryText }]}>{t('settings.autoArchiveDesc')}</Text>
                     <View style={[styles.settingCard, { backgroundColor: tc.cardBg }]}>
@@ -406,8 +1020,7 @@ export function GtdSettingsScreen({
         if (!timeEstimatesEnabled) {
             return (
                 <SafeAreaView style={[styles.container, { backgroundColor: tc.bg }]} edges={['bottom']}>
-                    <SettingsTopBar />
-                    <SubHeader title={t('settings.timeEstimatePresets')} />
+                    <SettingsTopBar title={t('settings.timeEstimatePresets')} />
                     <ScrollView style={styles.scrollView} contentContainerStyle={scrollContentStyle}>
                         <Text style={[styles.description, { color: tc.secondaryText }]}>{t('settings.timeEstimatePresetsDisabled')}</Text>
                         <TouchableOpacity
@@ -448,8 +1061,7 @@ export function GtdSettingsScreen({
 
         return (
             <SafeAreaView style={[styles.container, { backgroundColor: tc.bg }]} edges={['bottom']}>
-                <SettingsTopBar />
-                <SubHeader title={t('settings.timeEstimatePresets')} />
+                <SettingsTopBar title={t('settings.timeEstimatePresets')} />
                 <ScrollView style={styles.scrollView} contentContainerStyle={scrollContentStyle}>
                     <Text style={[styles.description, { color: tc.secondaryText }]}>{t('settings.timeEstimatePresetsDesc')}</Text>
                     <View style={[styles.settingCard, { backgroundColor: tc.cardBg }]}>
@@ -461,7 +1073,12 @@ export function GtdSettingsScreen({
                                     style={[styles.settingRow, idx > 0 && { borderTopWidth: 1, borderTopColor: tc.border }]}
                                     onPress={() => togglePreset(value)}
                                 >
-                                    <Text style={[styles.settingLabel, { color: tc.text }]}>{formatTimeEstimateLabel(value)}</Text>
+                                    <CompactText
+                                        style={[styles.settingLabel, { color: tc.text }]}
+                                        numberOfLines={2}
+                                    >
+                                        {formatTimeEstimateLabel(value)}
+                                    </CompactText>
                                     {selected && <Text style={{ color: '#3B82F6', fontSize: 20 }}>✓</Text>}
                                 </TouchableOpacity>
                             );
@@ -472,12 +1089,21 @@ export function GtdSettingsScreen({
                         onPress={resetToDefault}
                     >
                         <View style={styles.settingRow}>
-                            <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.resetToDefault')}</Text>
+                            <CompactText
+                                style={[styles.settingLabel, { color: tc.text }]}
+                                numberOfLines={2}
+                            >
+                                {t('settings.resetToDefault')}
+                            </CompactText>
                         </View>
                     </TouchableOpacity>
                 </ScrollView>
             </SafeAreaView>
         );
+    }
+
+    if (screen !== 'gtd-task-editor') {
+        throw new Error(`Unhandled GTD settings screen: ${screen}`);
     }
 
     const featureHiddenFields = new Set<TaskEditorFieldId>();
@@ -501,9 +1127,9 @@ export function GtdSettingsScreen({
         ? 'Open sections by default'
         : taskEditorDefaultOpenLabel;
     const taskEditorPresetOptions: { id: Exclude<TaskEditorPresetId, 'custom'>; label: string }[] = [
-        { id: 'simple', label: localize('Simple', '简洁') },
-        { id: 'standard', label: localize('Standard', '标准') },
-        { id: 'full', label: localize('Full', '完整') },
+        { id: 'simple', label: tr('settings.gtdMobile.simple') },
+        { id: 'standard', label: tr('settings.gtdMobile.standard') },
+        { id: 'full', label: tr('settings.gtdMobile.full') },
     ];
     const activeTaskEditorPreset = resolveTaskEditorPresetId({
         order: taskEditorOrder,
@@ -512,22 +1138,17 @@ export function GtdSettingsScreen({
         sectionOpen: settings.gtd?.taskEditor?.sectionOpen,
         featureHiddenFields,
     });
-    const taskEditorHelperText = localize(
-        'Choose a preset, then open a section to fine-tune fields.',
-        '先选择一个预设，再展开分组微调字段。'
-    );
-    const taskEditorCustomLabel = localize('Current layout: Custom', '当前布局：自定义');
-    const taskEditorPresetLabel = localize('Presets', '预设');
-    const taskEditorMoveSectionLabel = localize('Move to section', '移动到分组');
-    const taskEditorOrderLabel = localize('Order within section', '调整分组内顺序');
-    const taskEditorKeepOpenLabel = localize(
-        'Start task editing with this section expanded.',
-        '编辑任务时默认展开此分组。'
-    );
-    const showInEditorLabel = localize('Show in editor', '在编辑器中显示');
-    const moveUpLabel = localize('Move up', '上移');
-    const moveDownLabel = localize('Move down', '下移');
-    const doneLabel = t('common.done') === 'common.done' ? localize('Done', '完成') : t('common.done');
+    const taskEditorHelperText = tr('settings.gtdMobile.chooseAPresetThenOpenASectionToFineTune');
+    const taskEditorCustomLabel = tr('settings.gtdMobile.currentLayoutCustom');
+    const taskEditorPresetLabel = tr('settings.gtdMobile.presets');
+    const taskEditorMoveSectionLabel = tr('settings.gtdMobile.moveToSection');
+    const taskEditorOrderLabel = tr('settings.gtdMobile.orderWithinSection');
+    const taskEditorKeepOpenLabel = tr('settings.gtdMobile.startTaskEditingWithThisSectionExpanded');
+    const showInEditorLabel = tr('settings.gtdMobile.showInEditor');
+    const hideInEditorLabel = tr('settings.gtdMobile.hideFromEditor');
+    const moveUpLabel = tr('projects.moveUp');
+    const moveDownLabel = tr('projects.moveDown');
+    const doneLabel = tFallback(t, 'common.done', tr('nav.done'));
 
     const fieldLabel = (fieldId: TaskEditorFieldId) => {
         switch (fieldId) {
@@ -549,6 +1170,8 @@ export function GtdSettingsScreen({
                 return t('taskEdit.contextsLabel');
             case 'description':
                 return t('taskEdit.descriptionLabel');
+            case 'location':
+                return t('taskEdit.locationLabel');
             case 'tags':
                 return t('taskEdit.tagsLabel');
             case 'timeEstimate':
@@ -592,7 +1215,7 @@ export function GtdSettingsScreen({
             sections?: Partial<Record<TaskEditorFieldId, TaskEditorSectionId>>;
             sectionOpen?: Partial<Record<TaskEditorSectionId, boolean>>;
         },
-        nextFeatures?: AppData['settings']['features']
+        nextFeatures?: FeatureSettings
     ) => {
         updateSettings({
             ...(nextFeatures ? { features: nextFeatures } : null),
@@ -684,45 +1307,59 @@ export function GtdSettingsScreen({
         const visible = !hiddenSet.has(fieldId);
 
         return (
-            <TouchableOpacity
+            <View
                 style={[
                     styles.taskEditorCompactRow,
                     { borderTopColor: tc.border },
                     (showTopBorder || !isFirst) && styles.taskEditorCompactRowBorder,
                 ]}
-                onPress={() => setTaskEditorSelectedField(fieldId)}
-                activeOpacity={0.8}
             >
-                <View
-                    style={[
-                        styles.taskEditorVisibilityBadge,
-                        {
-                            backgroundColor: visible ? tc.filterBg : 'transparent',
-                            borderColor: visible ? tc.tint : tc.border,
-                        },
-                    ]}
+                <TouchableOpacity
+                    testID={`task-editor-visibility-${fieldId}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${visible ? hideInEditorLabel : showInEditorLabel}: ${fieldLabel(fieldId)}`}
+                    accessibilityState={{ selected: visible }}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    onPress={() => toggleFieldVisibility(fieldId)}
+                    activeOpacity={0.8}
                 >
-                    <Ionicons
-                        name={visible ? 'eye-outline' : 'eye-off-outline'}
-                        size={16}
-                        color={visible ? tc.tint : tc.secondaryText}
-                    />
-                </View>
-                <View style={styles.settingInfo}>
-                    <Text style={[styles.settingLabel, { color: tc.text }]}>{fieldLabel(fieldId)}</Text>
-                    <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
-                        {visible ? t('settings.visible') : t('settings.hidden')}
-                    </Text>
-                </View>
-                <Ionicons name="chevron-forward" size={18} color={tc.secondaryText} />
-            </TouchableOpacity>
+                    <View
+                        style={[
+                            styles.taskEditorVisibilityBadge,
+                            {
+                                backgroundColor: visible ? tc.filterBg : 'transparent',
+                                borderColor: visible ? tc.tint : tc.border,
+                            },
+                        ]}
+                    >
+                        <Ionicons
+                            name={visible ? 'eye-outline' : 'eye-off-outline'}
+                            size={16}
+                            color={visible ? tc.tint : tc.secondaryText}
+                        />
+                    </View>
+                </TouchableOpacity>
+                <TouchableOpacity
+                    testID={`task-editor-row-${fieldId}`}
+                    style={styles.taskEditorCompactRowMain}
+                    onPress={() => setTaskEditorSelectedField(fieldId)}
+                    activeOpacity={0.8}
+                >
+                    <View style={styles.settingInfo}>
+                        <Text style={[styles.settingLabel, { color: tc.text }]}>{fieldLabel(fieldId)}</Text>
+                        <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
+                            {visible ? t('settings.visible') : t('settings.hidden')}
+                        </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color={tc.secondaryText} />
+                </TouchableOpacity>
+            </View>
         );
     }
 
     return (
         <SafeAreaView style={[styles.container, { backgroundColor: tc.bg }]} edges={['bottom']}>
-            <SettingsTopBar />
-            <SubHeader title={t('settings.taskEditorLayout')} />
+            <SettingsTopBar title={t('settings.taskEditorLayout')} />
             <ScrollView style={styles.scrollView} contentContainerStyle={scrollContentStyle}>
                 <Text style={[styles.description, { color: tc.secondaryText }]}>{t('settings.taskEditorLayoutDesc')}</Text>
                 <Text style={[styles.description, { color: tc.secondaryText, marginTop: -6 }]}>{taskEditorHelperText}</Text>
@@ -747,9 +1384,12 @@ export function GtdSettingsScreen({
                                         saveTaskEditor(preset);
                                     }}
                                 >
-                                    <Text style={[styles.taskEditorPresetButtonText, { color: selected ? tc.tint : tc.secondaryText }]}>
+                                    <CompactText
+                                        style={[styles.taskEditorPresetButtonText, { color: selected ? tc.tint : tc.secondaryText }]}
+                                        numberOfLines={1}
+                                    >
                                         {option.label}
-                                    </Text>
+                                    </CompactText>
                                 </TouchableOpacity>
                             );
                         })}
@@ -773,7 +1413,12 @@ export function GtdSettingsScreen({
                                 activeOpacity={0.8}
                             >
                                 <View style={styles.taskEditorSectionHeaderMain}>
-                                    <Text style={[styles.settingLabel, { color: tc.text }]}>{group.title}</Text>
+                                    <CompactText
+                                        style={[styles.settingLabel, { color: tc.text }]}
+                                        numberOfLines={2}
+                                    >
+                                        {group.title}
+                                    </CompactText>
                                     <View style={[styles.taskEditorSectionCountBadge, { backgroundColor: tc.filterBg }]}>
                                         <Text style={[styles.taskEditorSectionCountText, { color: tc.tint }]}>{groupOrder.length}</Text>
                                     </View>
@@ -827,7 +1472,12 @@ export function GtdSettingsScreen({
                     }}
                 >
                     <View style={styles.settingRow}>
-                        <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.resetToDefault')}</Text>
+                        <CompactText
+                            style={[styles.settingLabel, { color: tc.text }]}
+                            numberOfLines={2}
+                        >
+                            {t('settings.resetToDefault')}
+                        </CompactText>
                     </View>
                 </TouchableOpacity>
             </ScrollView>
@@ -943,10 +1593,10 @@ export function GtdSettingsScreen({
                                 </View>
 
                                 <TouchableOpacity
-                                    style={[styles.taskEditorSheetDoneButton, { backgroundColor: tc.tint }]}
+                                    style={[styles.taskEditorSheetDoneButton, { backgroundColor: filledButton.backgroundColor }]}
                                     onPress={() => setTaskEditorSelectedField(null)}
                                 >
-                                    <Text style={styles.taskEditorSheetDoneButtonText}>{doneLabel}</Text>
+                                    <Text style={[styles.taskEditorSheetDoneButtonText, filledButton.textColor ? { color: filledButton.textColor } : null]}>{doneLabel}</Text>
                                 </TouchableOpacity>
                             </>
                         )}

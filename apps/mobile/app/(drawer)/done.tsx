@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import { View, StyleSheet, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { translateWithFallback } from '@mindwtr/core';
 
-import { TaskList } from '../../components/task-list';
+import { TaskList, type ReferenceGroupBy } from '../../components/task-list';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { useLanguage } from '../../contexts/language-context';
 
@@ -9,13 +11,13 @@ export default function DoneScreen() {
   const tc = useThemeColors();
   const insets = useSafeAreaInsets();
   const { t } = useLanguage();
-  const title = t('nav.done') || t('list.done') || 'Done';
-  const emptyLabel = t('list.done');
-  const emptyText = emptyLabel === 'list.done' ? 'Done' : emptyLabel;
-  const hintLabel = t('done.emptyHint');
-  const emptyHint = hintLabel === 'done.emptyHint'
-    ? 'Completed tasks land here — a running log of what you finished.'
-    : hintLabel;
+  const [groupBy, setGroupBy] = useState<ReferenceGroupBy>('none');
+  const resolveText = (key: string, fallback: string) => {
+    return translateWithFallback(t, key, fallback);
+  };
+  const title = resolveText('nav.done', 'Done');
+  const emptyText = resolveText('list.done', 'Done');
+  const emptyHint = resolveText('done.emptyHint', 'Completed tasks land here — a running log of what you finished.');
   const navBarInset = Platform.OS === 'android' && insets.bottom >= 24 ? insets.bottom : 0;
 
   return (
@@ -23,10 +25,14 @@ export default function DoneScreen() {
       <TaskList
         statusFilter="done"
         title={title}
+        showHeader={false}
         emptyText={emptyText}
         emptyHint={emptyHint}
         allowAdd={false}
         showQuickAddHelp={false}
+        showTimeEstimateFilters={false}
+        groupBy={groupBy}
+        onChangeGroupBy={setGroupBy}
         defaultEditTab="view"
         contentPaddingBottom={navBarInset}
       />

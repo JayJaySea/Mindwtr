@@ -1,18 +1,32 @@
 import { createNextRecurringTask } from './recurrence';
-import { getUsedTaskTokens } from './task-token-usage';
+import { getTaskDateCoherenceIssues } from './task-date-coherence';
+import {
+    collectTaskTokenUsage,
+    getUsedTaskTokensFromUsage,
+} from './task-token-usage';
+import { resolveRelativeStartUpdates } from './task-relative-start';
 import { rescheduleTask } from './task-utils';
-import type { AppData, Area, Project, Section, Task, TaskStatus } from './types';
+import { safeParseDate } from './date';
+import { filterNotDeleted } from './sync-helpers';
+import { nextRevision, normalizeRevision } from './sync-revision';
+import type { AiSettings, AppData, Area, Person, Project, Section, Task, TaskStatus } from './types';
 import { generateUUID as uuidv4 } from './uuid';
 import type { DerivedState, SaveBaseState } from './store-types';
 
+export { MAX_SYNC_REVISION, normalizeRevision, nextRevision } from './sync-revision';
+
 type EntityWithId = { id: string };
+type EntityWithRevision = EntityWithId & {
+    updatedAt?: string;
+    rev?: number;
+    revBy?: string;
+    deletedAt?: string;
+    purgedAt?: string;
+};
 
-let projectOrderCacheRef: Task[] | null = null;
-let projectOrderCacheValue: Map<string, number> | null = null;
-let reservedProjectOrdersRef: Task[] | null = null;
-let reservedProjectOrdersValue: Map<string, number> | null = null;
-
-export const normalizeRevision = (value?: number): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+export const getNextDataChangeAt = (previous: number, now = Date.now()): number => (
+    Math.max(now, previous + 1)
+);
 
 export const ensureDeviceId = (settings: AppData['settings']): { settings: AppData['settings']; deviceId: string; updated: boolean } => {
     if (settings.deviceId) {
@@ -26,11 +40,12 @@ export const getReferenceTaskFieldClears = (): Partial<Task> => ({
     status: 'reference',
     startTime: undefined,
     dueDate: undefined,
+    relativeStartOffset: undefined,
     reviewAt: undefined,
     recurrence: undefined,
     priority: undefined,
     timeEstimate: undefined,
-    checklist: undefined,
+    suppressMindwtrReminders: undefined,
     isFocusedToday: false,
     pushCount: 0,
 });
@@ -49,19 +64,27 @@ export function applyTaskUpdates(oldTask: Task, updates: Partial<Task>, now: str
     let nextRecurringTask: Task | null = null;
     const isCompleteStatus = (status: TaskStatus) => status === 'done' || status === 'archived';
 
+    // A caller-supplied completedAt backdates the completion (e.g. "I actually
+    // finished this yesterday") and must also anchor after-completion recurrence,
+    // because the next instance is spawned here and never recomputed later.
+    const explicitCompletedAt = typeof updates.completedAt === 'string' && safeParseDate(updates.completedAt)
+        ? updates.completedAt
+        : undefined;
+
     if (statusChanged && incomingStatus === 'done') {
+        const completedAt = explicitCompletedAt ?? now;
         finalUpdates = {
             ...updatesToApply,
             status: incomingStatus,
-            completedAt: now,
+            completedAt,
             isFocusedToday: false,
         };
-        nextRecurringTask = createNextRecurringTask(oldTask, now, oldTask.status);
+        nextRecurringTask = createNextRecurringTask(oldTask, completedAt, oldTask.status);
     } else if (statusChanged && incomingStatus === 'archived') {
         finalUpdates = {
             ...updatesToApply,
             status: incomingStatus,
-            completedAt: oldTask.completedAt || now,
+            completedAt: explicitCompletedAt ?? (oldTask.completedAt || now),
             isFocusedToday: false,
         };
     } else if (statusChanged && isCompleteStatus(oldTask.status) && !isCompleteStatus(incomingStatus)) {
@@ -72,8 +95,12 @@ export function applyTaskUpdates(oldTask: Task, updates: Partial<Task>, now: str
         };
     }
 
-    if (Object.prototype.hasOwnProperty.call(updatesToApply, 'dueDate') && incomingStatus !== 'reference') {
-        const rescheduled = rescheduleTask(oldTask, updatesToApply.dueDate);
+    if (incomingStatus !== 'reference') {
+        finalUpdates = resolveRelativeStartUpdates(oldTask, finalUpdates);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(finalUpdates, 'dueDate') && incomingStatus !== 'reference') {
+        const rescheduled = rescheduleTask(oldTask, finalUpdates.dueDate);
         finalUpdates = {
             ...finalUpdates,
             dueDate: rescheduled.dueDate,
@@ -112,7 +139,7 @@ export const isTaskVisible = (task?: Task | null, options?: TaskVisibilityOption
 export const toVisibleTask = (task: Task): Task => {
     const attachments = task.attachments;
     if (!attachments || attachments.length === 0) return task;
-    const visibleAttachments = attachments.filter((attachment) => !attachment.deletedAt);
+    const visibleAttachments = filterNotDeleted(attachments);
     return visibleAttachments.length === attachments.length
         ? task
         : { ...task, attachments: visibleAttachments };
@@ -121,15 +148,221 @@ export const toVisibleTask = (task: Task): Task => {
 export const selectVisibleTasks = (tasks: Task[]): Task[] =>
     tasks.filter((task) => isTaskVisible(task)).map(toVisibleTask);
 
+export const selectVisibleProjects = (projects: Project[]): Project[] =>
+    filterNotDeleted(projects);
+
+export const selectVisibleSections = (sections: Section[]): Section[] =>
+    filterNotDeleted(sections);
+
+export const selectVisibleAreas = (areas: Area[]): Area[] =>
+    filterNotDeleted(areas);
+
+export const selectVisiblePeople = (people: Person[]): Person[] =>
+    filterNotDeleted(people).sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+
+export const completeTaskForProjectArchive = (task: Task, archivedAt: string, deviceId?: string): Task => ({
+    ...task,
+    status: 'done',
+    completedAt: archivedAt,
+    isFocusedToday: false,
+    statusBeforeProjectArchive: task.status,
+    completedAtBeforeProjectArchive: task.completedAt ?? null,
+    isFocusedTodayBeforeProjectArchive: task.isFocusedToday ?? null,
+    projectArchivedAt: archivedAt,
+    updatedAt: archivedAt,
+    rev: nextRevision(task.rev),
+    revBy: deviceId,
+});
+
+export const restoreTaskFromProjectArchive = (task: Task, restoredAt: string, deviceId?: string): Task => {
+    const previousStatus = task.statusBeforeProjectArchive;
+    const archivedAt = task.projectArchivedAt;
+    const shouldRestore =
+        !task.deletedAt &&
+        Boolean(previousStatus) &&
+        previousStatus !== 'done' &&
+        previousStatus !== 'archived' &&
+        task.status === 'done' &&
+        Boolean(archivedAt) &&
+        task.completedAt === archivedAt;
+
+    if (!shouldRestore) {
+        return task;
+    }
+
+    return {
+        ...task,
+        status: previousStatus!,
+        completedAt: task.completedAtBeforeProjectArchive ?? undefined,
+        isFocusedToday: task.isFocusedTodayBeforeProjectArchive ?? false,
+        statusBeforeProjectArchive: undefined,
+        completedAtBeforeProjectArchive: undefined,
+        isFocusedTodayBeforeProjectArchive: undefined,
+        projectArchivedAt: undefined,
+        updatedAt: restoredAt,
+        rev: nextRevision(task.rev),
+        revBy: deviceId,
+    };
+};
+
+const hasTaskProjectArchiveMetadata = (task: Task): boolean => (
+    task.projectArchivedAt !== undefined
+    || task.statusBeforeProjectArchive !== undefined
+    || task.completedAtBeforeProjectArchive !== undefined
+    || task.isFocusedTodayBeforeProjectArchive !== undefined
+);
+
+export const clearDeletedTaskProjectArchiveMetadata = (task: Task): Task => {
+    if (!task.deletedAt || !hasTaskProjectArchiveMetadata(task)) return task;
+    return {
+        ...task,
+        statusBeforeProjectArchive: undefined,
+        completedAtBeforeProjectArchive: undefined,
+        isFocusedTodayBeforeProjectArchive: undefined,
+        projectArchivedAt: undefined,
+    };
+};
+
+export const archiveSectionForProjectArchive = (section: Section, archivedAt: string, deviceId?: string): Section => ({
+    ...section,
+    deletedAt: archivedAt,
+    deletedAtBeforeProjectArchive: section.deletedAt ?? null,
+    projectArchivedAt: archivedAt,
+    updatedAt: archivedAt,
+    rev: nextRevision(section.rev),
+    revBy: deviceId,
+});
+
+export const restoreSectionFromProjectArchive = (section: Section, restoredAt: string, deviceId?: string): Section => {
+    const archivedAt = section.projectArchivedAt;
+    const shouldRestore =
+        Boolean(archivedAt) &&
+        section.deletedAt === archivedAt &&
+        section.deletedAtBeforeProjectArchive === null;
+
+    if (!shouldRestore) {
+        return section;
+    }
+
+    return {
+        ...section,
+        deletedAt: undefined,
+        deletedAtBeforeProjectArchive: undefined,
+        projectArchivedAt: undefined,
+        updatedAt: restoredAt,
+        rev: nextRevision(section.rev),
+        revBy: deviceId,
+    };
+};
+
+export const buildEntityMap = <T extends EntityWithId>(items: readonly T[]): Map<string, T> =>
+    new Map(items.map((item) => [item.id, item] as const));
+
+export const replaceEntityInArray = <T extends EntityWithId>(items: readonly T[], id: string, nextItem: T): T[] => {
+    const index = items.findIndex((item) => item.id === id);
+    if (index < 0) return items as T[];
+    if (items[index] === nextItem) return items as T[];
+    const nextItems = items.slice();
+    nextItems[index] = nextItem;
+    return nextItems;
+};
+
+export const replaceEntitiesInArray = <T extends EntityWithId>(
+    items: readonly T[],
+    nextItems: readonly T[]
+): T[] => {
+    if (nextItems.length === 0) return items as T[];
+    const replacementsById = new Map(nextItems.map((item) => [item.id, item] as const));
+    let patchedItems: T[] | null = null;
+    for (let index = 0; index < items.length; index += 1) {
+        const currentItem = items[index];
+        const nextItem = replacementsById.get(currentItem.id);
+        if (!nextItem || nextItem === currentItem) continue;
+        if (!patchedItems) patchedItems = items.slice();
+        patchedItems[index] = nextItem;
+    }
+    return patchedItems ?? items as T[];
+};
+
+export const replaceEntityInMap = <T extends EntityWithId>(
+    itemsById: Map<string, T>,
+    nextItem: T
+): Map<string, T> => {
+    if (itemsById.get(nextItem.id) === nextItem) return itemsById;
+    const nextItemsById = new Map(itemsById);
+    nextItemsById.set(nextItem.id, nextItem);
+    return nextItemsById;
+};
+
+export const replaceEntitiesInMap = <T extends EntityWithId>(
+    itemsById: Map<string, T>,
+    nextItems: readonly T[]
+): Map<string, T> => {
+    if (nextItems.length === 0) return itemsById;
+    let nextItemsById: Map<string, T> | null = null;
+    for (const nextItem of nextItems) {
+        if (itemsById.get(nextItem.id) === nextItem) continue;
+        if (!nextItemsById) nextItemsById = new Map(itemsById);
+        nextItemsById.set(nextItem.id, nextItem);
+    }
+    return nextItemsById ?? itemsById;
+};
+
+export const reuseArrayIfShallowEqual = <T>(previous: T[], next: T[]): T[] => (
+    previous.length === next.length && previous.every((item, index) => item === next[index])
+        ? previous
+        : next
+);
+
+export const hasSameEntityIdentity = <T extends EntityWithRevision>(existing: T, incoming: T): boolean => (
+    existing.updatedAt === incoming.updatedAt
+    && normalizeRevision(existing.rev) === normalizeRevision(incoming.rev)
+    && existing.revBy === incoming.revBy
+    && existing.deletedAt === incoming.deletedAt
+    && existing.purgedAt === incoming.purgedAt
+);
+
+export const reconcileEntityCollection = <T extends EntityWithRevision>(
+    previousItems: readonly T[],
+    previousById: Map<string, T>,
+    incomingItems: readonly T[]
+): { items: T[]; byId: Map<string, T> } => {
+    let changed = previousItems.length !== incomingItems.length;
+    const nextItems = incomingItems.map((incoming, index) => {
+        const existing = previousById.get(incoming.id);
+        const resolved = existing && hasSameEntityIdentity(existing, incoming) ? existing : incoming;
+        if (!changed && previousItems[index] !== resolved) {
+            changed = true;
+        }
+        return resolved;
+    });
+
+    if (!changed) {
+        return {
+            items: previousItems as T[],
+            byId: previousById,
+        };
+    }
+
+    return {
+        items: nextItems,
+        byId: buildEntityMap(nextItems),
+    };
+};
+
 export const updateVisibleTasks = (visible: Task[], previous?: Task | null, next?: Task | null): Task[] => {
     const wasVisible = isTaskVisible(previous);
     const isVisible = isTaskVisible(next);
     const visibleNext = next && isVisible ? toVisibleTask(next) : next;
     if (wasVisible && isVisible && next) {
-        return visible.map((task) => (task.id === visibleNext!.id ? visibleNext! : task));
+        return replaceEntityInArray(visible, visibleNext!.id, visibleNext!);
     }
     if (wasVisible && !isVisible && previous) {
-        return visible.filter((task) => task.id !== previous.id);
+        const index = visible.findIndex((task) => task.id === previous.id);
+        if (index < 0) return visible;
+        const nextVisible = visible.slice();
+        nextVisible.splice(index, 1);
+        return nextVisible;
     }
     if (!wasVisible && isVisible && next) {
         return [...visible, visibleNext!];
@@ -159,6 +392,7 @@ export const buildSaveSnapshot = (state: SaveBaseState, overrides?: Partial<AppD
     const projects = overrides?.projects ?? state._allProjects;
     const sections = overrides?.sections ?? state._allSections;
     const areas = overrides?.areas ?? state._allAreas;
+    const people = overrides?.people ?? state._allPeople;
     if (overrides?.tasks) {
         assertCollectionSnapshotIncludesExistingItems<Task>('task', tasks, state._allTasks);
     }
@@ -171,11 +405,15 @@ export const buildSaveSnapshot = (state: SaveBaseState, overrides?: Partial<AppD
     if (overrides?.areas) {
         assertCollectionSnapshotIncludesExistingItems<Area>('area', areas, state._allAreas);
     }
+    if (overrides?.people) {
+        assertCollectionSnapshotIncludesExistingItems<Person>('person', people, state._allPeople);
+    }
     return {
         tasks,
         projects,
         sections,
         areas,
+        people,
         settings: overrides?.settings ?? state.settings,
     };
 };
@@ -190,46 +428,109 @@ export const computeDerivedState = (tasks: Task[], projects: Project[]): Derived
     };
 };
 
-export const computeProjectDerivedState = (projects: Project[]): Pick<DerivedState, 'projectMap' | 'sequentialProjectIds'> => {
-    const projectMap = new Map<string, Project>();
+export const computeProjectDerivedState = (
+    projects: Iterable<Project>,
+    projectMap?: Map<string, Project>
+): Pick<DerivedState, 'projectMap' | 'sequentialProjectIds' | 'sequentialWithinSectionProjectIds' | 'focusedProjectCount'> => {
+    const resolvedProjectMap = projectMap ?? new Map<string, Project>();
     const sequentialProjectIds = new Set<string>();
+    const sequentialWithinSectionProjectIds = new Set<string>();
+    let focusedProjectCount = 0;
 
-    projects.forEach((project) => {
-        projectMap.set(project.id, project);
-        if (project.isSequential && !project.deletedAt) {
-            sequentialProjectIds.add(project.id);
+    for (const project of projects) {
+        if (!projectMap) {
+            resolvedProjectMap.set(project.id, project);
         }
-    });
+        if (project.deletedAt) continue;
+        if (project.isSequential) {
+            sequentialProjectIds.add(project.id);
+            if (project.sequentialScope === 'section') {
+                sequentialWithinSectionProjectIds.add(project.id);
+            }
+        }
+        if (project.isFocused) {
+            focusedProjectCount += 1;
+        }
+    }
 
     return {
-        projectMap,
+        projectMap: resolvedProjectMap,
         sequentialProjectIds,
+        sequentialWithinSectionProjectIds,
+        focusedProjectCount,
     };
 };
 
 export const computeTaskDerivedState = (
-    tasks: Task[]
-): Pick<DerivedState, 'tasksById' | 'activeTasksByStatus' | 'allContexts' | 'allTags' | 'focusedCount'> => {
-    const tasksById = new Map<string, Task>();
+    tasks: Task[],
+    tasksById?: Map<string, Task>
+): Pick<DerivedState, 'tasksById' | 'activeTasksByStatus' | 'tasksByProjectId' | 'tasksByContext' | 'tasksByTag' | 'focusedTasks' | 'projectTaskSummaryById' | 'allContexts' | 'allTags' | 'contextTokenUsage' | 'tagTokenUsage' | 'dateCoherenceIssuesByTaskId' | 'focusedCount'> => {
+    const resolvedTasksById = tasksById ?? new Map<string, Task>();
     const activeTasksByStatus = new Map<TaskStatus, Task[]>();
+    const tasksByProjectId = new Map<string, Task[]>();
+    const tasksByContext = new Map<string, Task[]>();
+    const tasksByTag = new Map<string, Task[]>();
+    const focusedTasks: Task[] = [];
+    const projectTaskSummaryById = new Map<string, { activeTaskCount: number; nextAction?: Task }>();
+    const dateCoherenceIssuesByTaskId = new Map<string, ReturnType<typeof getTaskDateCoherenceIssues>>();
+    const contextTokenUsage = collectTaskTokenUsage(tasks, (task) => task.contexts, { prefix: '@' });
+    const tagTokenUsage = collectTaskTokenUsage(tasks, (task) => task.tags, { prefix: '#' });
     let focusedCount = 0;
 
     tasks.forEach((task) => {
-        tasksById.set(task.id, task);
+        if (!tasksById) {
+            resolvedTasksById.set(task.id, task);
+        }
         if (task.deletedAt) return;
         const list = activeTasksByStatus.get(task.status) ?? [];
         list.push(task);
         activeTasksByStatus.set(task.status, list);
+        if (task.projectId) {
+            const projectTasks = tasksByProjectId.get(task.projectId) ?? [];
+            projectTasks.push(task);
+            tasksByProjectId.set(task.projectId, projectTasks);
+
+            if (task.status !== 'done' && task.status !== 'reference' && task.status !== 'archived') {
+                const summary = projectTaskSummaryById.get(task.projectId) ?? { activeTaskCount: 0 };
+                summary.activeTaskCount += 1;
+                if (!summary.nextAction && task.status === 'next') summary.nextAction = task;
+                projectTaskSummaryById.set(task.projectId, summary);
+            }
+        }
+        (task.contexts ?? []).forEach((context) => {
+            const contextTasks = tasksByContext.get(context) ?? [];
+            contextTasks.push(task);
+            tasksByContext.set(context, contextTasks);
+        });
+        (task.tags ?? []).forEach((tag) => {
+            const tagTasks = tasksByTag.get(tag) ?? [];
+            tagTasks.push(task);
+            tasksByTag.set(tag, tagTasks);
+        });
+        const dateCoherenceIssues = getTaskDateCoherenceIssues(task);
+        if (dateCoherenceIssues.length > 0) {
+            dateCoherenceIssuesByTaskId.set(task.id, dateCoherenceIssues);
+        }
+        // Done/reference tasks keep their historical focus flag but should not consume today's focus limit.
         if (task.isFocusedToday && task.status !== 'done' && task.status !== 'reference') {
             focusedCount += 1;
+            focusedTasks.push(task);
         }
     });
 
     return {
-        tasksById,
+        tasksById: resolvedTasksById,
         activeTasksByStatus,
-        allContexts: getUsedTaskTokens(tasks, (task) => task.contexts, { prefix: '@' }),
-        allTags: getUsedTaskTokens(tasks, (task) => task.tags, { prefix: '#' }),
+        tasksByProjectId,
+        tasksByContext,
+        tasksByTag,
+        focusedTasks,
+        projectTaskSummaryById,
+        allContexts: getUsedTaskTokensFromUsage(contextTokenUsage),
+        allTags: getUsedTaskTokensFromUsage(tagTokenUsage),
+        contextTokenUsage,
+        tagTokenUsage,
+        dateCoherenceIssuesByTaskId,
         focusedCount,
     };
 };
@@ -264,9 +565,9 @@ export const stripSensitiveSettings = (settings: AppData['settings']): AppData['
     };
 };
 
-export const normalizeAiSettingsForSync = (ai?: AppData['settings']['ai']): AppData['settings']['ai'] | undefined => {
+export const normalizeAiSettingsForSync = (ai?: AiSettings): AiSettings | undefined => {
     if (!ai) return ai;
-    const { apiKey, ...rest } = ai;
+    const { apiKey: _apiKey, ...rest } = ai;
     if (!rest.speechToText) return rest;
     return {
         ...rest,
@@ -300,9 +601,6 @@ export const getTaskOrder = (task: Pick<Task, 'order' | 'orderNum'>): number | u
 };
 
 const getProjectOrderIndex = (tasks: Task[]): Map<string, number> => {
-    if (projectOrderCacheRef === tasks && projectOrderCacheValue) {
-        return projectOrderCacheValue;
-    }
     const nextCache = new Map<string, number>();
     for (const task of tasks) {
         if (task.deletedAt || !task.projectId) continue;
@@ -311,12 +609,6 @@ const getProjectOrderIndex = (tasks: Task[]): Map<string, number> => {
         if (order > previous) {
             nextCache.set(task.projectId, order);
         }
-    }
-    projectOrderCacheRef = tasks;
-    projectOrderCacheValue = nextCache;
-    if (reservedProjectOrdersRef !== tasks) {
-        reservedProjectOrdersRef = tasks;
-        reservedProjectOrdersValue = null;
     }
     return nextCache;
 };
@@ -329,23 +621,14 @@ export const getNextProjectOrder = (
     return (getProjectOrderIndex(tasks).get(projectId) ?? -1) + 1;
 };
 
-export const reserveNextProjectOrder = (
-    projectId: string | undefined,
-    tasks: Task[]
-): number | undefined => {
-    if (!projectId) return undefined;
-    if (reservedProjectOrdersRef !== tasks || !reservedProjectOrdersValue) {
-        reservedProjectOrdersRef = tasks;
-        reservedProjectOrdersValue = new Map<string, number>();
-    }
-    const snapshotReservations = reservedProjectOrdersValue;
-    const reserved = snapshotReservations.get(projectId);
-    if (typeof reserved === 'number') {
-        snapshotReservations.set(projectId, reserved + 1);
-        return reserved;
-    }
-    const nextOrder = getNextProjectOrder(projectId, tasks);
-    if (typeof nextOrder !== 'number') return undefined;
-    snapshotReservations.set(projectId, nextOrder + 1);
-    return nextOrder;
+export type ProjectOrderReserver = (projectId: string | undefined) => number | undefined;
+
+export const createProjectOrderReserver = (tasks: Task[]): ProjectOrderReserver => {
+    const nextOrders = getProjectOrderIndex(tasks);
+    return (projectId: string | undefined): number | undefined => {
+        if (!projectId) return undefined;
+        const nextOrder = (nextOrders.get(projectId) ?? -1) + 1;
+        nextOrders.set(projectId, nextOrder);
+        return nextOrder;
+    };
 };

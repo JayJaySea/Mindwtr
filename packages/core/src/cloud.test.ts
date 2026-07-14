@@ -1,12 +1,26 @@
 import { describe, expect, it, vi } from 'vitest';
-import { cloudDeleteFile, cloudGetJson, cloudPutJson } from './cloud';
+import { CloudHttpError, cloudDeleteFile, cloudGetFile, cloudGetJson, cloudHeadJson, cloudPutJson, cloudRequestJson } from './cloud';
 
 const okResponse = (text: string) =>
     ({
         ok: true,
         status: 200,
         statusText: 'OK',
+        headers: {
+            get: () => null,
+        },
         text: async () => text,
+    }) as unknown as Response;
+
+const headResponse = (headers: Record<string, string>) =>
+    ({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: {
+            get: (name: string) => headers[name.toLowerCase()] ?? null,
+        },
+        text: async () => '',
     }) as unknown as Response;
 
 const errorResponse = (status: number, statusText: string) =>
@@ -38,6 +52,76 @@ describe('cloud sync http helpers', () => {
         );
     });
 
+    it('allows local HTTP targets without manual override', async () => {
+        const fetcher = vi.fn(async () => ({ ok: false, status: 404, statusText: 'Not Found', text: async () => '' } as Response));
+        await expect(cloudGetJson('http://192.168.1.50:8787/v1/data', { fetcher })).resolves.toBeNull();
+    });
+
+    it('blocks public HTTP targets even when manually overridden', async () => {
+        const fetcher = vi.fn(async () => ({ ok: false, status: 404, statusText: 'Not Found', text: async () => '' } as Response));
+        await expect(cloudGetJson('http://example.com/v1/data', { fetcher })).rejects.toThrow(
+            'Cloud sync requires HTTPS for public URLs',
+        );
+        await expect(cloudGetJson('http://example.com/v1/data', {
+            fetcher,
+            allowInsecureHttp: true,
+        })).rejects.toThrow('Cloud sync requires HTTPS for public URLs');
+        expect(fetcher).not.toHaveBeenCalled();
+    });
+
+    it('sends auth, method, and body on request json', async () => {
+        const fetcher = vi.fn(async () => okResponse(JSON.stringify({ task: { id: 't1' } })));
+        const result = await cloudRequestJson<{ task: { id: string } }>(
+            'POST',
+            'https://example.com/v1/tasks',
+            { title: 'hi' },
+            { fetcher, token: 'abc123' },
+        );
+        expect(result).toEqual({ task: { id: 't1' } });
+        const [, init] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+        expect(init.method).toBe('POST');
+        expect((init.headers as Record<string, string>).Authorization).toBe('Bearer abc123');
+        expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');
+        expect(JSON.parse(String(init.body))).toEqual({ title: 'hi' });
+    });
+
+    it('omits body and content type on request json without a body', async () => {
+        const fetcher = vi.fn(async () => okResponse(JSON.stringify({ ok: true })));
+        await cloudRequestJson('DELETE', 'https://example.com/v1/tasks/t1', undefined, { fetcher });
+        const [, init] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+        expect(init.method).toBe('DELETE');
+        expect(init.body).toBeUndefined();
+        expect((init.headers as Record<string, string>)['Content-Type']).toBeUndefined();
+    });
+
+    it('surfaces server error messages with status on request json failures', async () => {
+        const fetcher = vi.fn(async () => ({
+            ok: false,
+            status: 404,
+            statusText: 'Not Found',
+            text: async () => JSON.stringify({ error: 'Task not found' }),
+        } as unknown as Response));
+        const failure = cloudRequestJson('PATCH', 'https://example.com/v1/tasks/missing', { title: 'x' }, { fetcher });
+        await expect(failure).rejects.toThrow('Task not found');
+        await expect(failure).rejects.toBeInstanceOf(CloudHttpError);
+        await expect(failure).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('falls back to the status line when the error body is not json', async () => {
+        const fetcher = vi.fn(async () => errorResponse(500, 'Internal Server Error'));
+        await expect(
+            cloudRequestJson('POST', 'https://example.com/v1/tasks', {}, { fetcher }),
+        ).rejects.toThrow('Cloud POST failed (500): Internal Server Error');
+    });
+
+    it('enforces the https policy on request json', async () => {
+        const fetcher = vi.fn(async () => okResponse('{}'));
+        await expect(
+            cloudRequestJson('POST', 'http://example.com/v1/tasks', {}, { fetcher }),
+        ).rejects.toThrow('Cloud sync requires HTTPS for public URLs');
+        expect(fetcher).not.toHaveBeenCalled();
+    });
+
     it('sends auth and content type on put json', async () => {
         const fetcher = vi.fn(async () => okResponse(''));
         await cloudPutJson('https://example.com/v1/data', { hello: 'world' }, { fetcher, token: 'abc123' });
@@ -47,9 +131,78 @@ describe('cloud sync http helpers', () => {
         expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');
     });
 
+    it('returns post-write metadata from put json responses', async () => {
+        const fetcher = vi.fn(async () => headResponse({
+            etag: '"sha256-abc"',
+            'last-modified': 'Thu, 07 May 2026 10:00:00 GMT',
+            'content-length': '42',
+        }));
+
+        const metadata = await cloudPutJson('https://example.com/v1/data', { hello: 'world' }, { fetcher });
+
+        expect(metadata).toMatchObject({
+            exists: true,
+            fingerprint: 'cloud:v1:etag="sha256-abc"',
+            etag: '"sha256-abc"',
+        });
+    });
+
+    it('prefers server-returned post-merge fingerprint metadata', async () => {
+        const fetcher = vi.fn(async () => ({
+            ...headResponse({
+                etag: '"response-body"',
+                'last-modified': 'Thu, 07 May 2026 10:00:00 GMT',
+            }),
+            text: async () => JSON.stringify({
+                remoteFingerprint: 'cloud:v1:etag="stored"',
+                etag: '"stored"',
+                contentLength: '123',
+                serverMergedRemoteData: true,
+            }),
+        } as unknown as Response));
+
+        const metadata = await cloudPutJson('https://example.com/v1/data', { hello: 'world' }, { fetcher });
+
+        expect(metadata).toMatchObject({
+            fingerprint: 'cloud:v1:etag="stored"',
+            etag: '"stored"',
+            contentLength: '123',
+            serverMergedRemoteData: true,
+        });
+    });
+
+    it('reads HEAD metadata for fast sync checks', async () => {
+        const fetcher = vi.fn(async () => headResponse({
+            etag: '"sha256-abc"',
+            'last-modified': 'Thu, 07 May 2026 10:00:00 GMT',
+            'content-length': '42',
+        }));
+
+        const metadata = await cloudHeadJson('https://example.com/v1/data', { fetcher, token: 'abc123' });
+
+        expect(metadata).toMatchObject({
+            exists: true,
+            fingerprint: 'cloud:v1:etag="sha256-abc"',
+            etag: '"sha256-abc"',
+        });
+        const [, init] = fetcher.mock.calls[0] as [string, RequestInit];
+        expect(init.method).toBe('HEAD');
+        expect((init.headers as Record<string, string>).Authorization).toBe('Bearer abc123');
+    });
+
     it('treats 404 delete as success', async () => {
         const fetcher = vi.fn(async () => errorResponse(404, 'Not Found'));
         await expect(cloudDeleteFile('https://example.com/v1/file', { fetcher })).resolves.toBeUndefined();
+    });
+
+    it('exposes status on file get failures', async () => {
+        const fetcher = vi.fn(async () => errorResponse(404, 'Not Found'));
+
+        await expect(cloudGetFile('https://example.com/v1/file', { fetcher })).rejects.toMatchObject({
+            message: 'Cloud File GET failed (404): Not Found',
+            status: 404,
+            statusCode: 404,
+        });
     });
 
     it('throws on delete failures', async () => {

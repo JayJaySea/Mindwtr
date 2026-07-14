@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { type Attachment, generateUUID, type Project, validateAttachmentForUpload } from '@mindwtr/core';
-import { resolveAttachmentOpenTarget, toAttachmentBrowserUrl } from '../../../lib/attachment-paths';
+import { type Attachment, type Project } from '@mindwtr/core';
+import { importPickedFileAttachment } from '../../../lib/attachment-import';
+import { openAttachmentTarget } from '../../../lib/open-attachment-target';
 import { isTauriRuntime } from '../../../lib/runtime';
 import { logWarn } from '../../../lib/app-log';
 
@@ -8,14 +9,12 @@ type UseProjectAttachmentActionsParams = {
     t: (key: string) => string;
     selectedProject: Project | undefined;
     updateProject: (projectId: string, updates: Partial<Project>) => void;
-    resolveValidationMessage: (error?: string) => string;
 };
 
 export function useProjectAttachmentActions({
     t,
     selectedProject,
     updateProject,
-    resolveValidationMessage,
 }: UseProjectAttachmentActionsParams) {
     const [attachmentError, setAttachmentError] = useState<string | null>(null);
     const [showLinkPrompt, setShowLinkPrompt] = useState(false);
@@ -26,22 +25,17 @@ export function useProjectAttachmentActions({
     }, [selectedProject?.id]);
 
     const openAttachment = useCallback(async (attachment: Attachment) => {
-        const normalized = toAttachmentBrowserUrl(attachment.uri);
-        const openTarget = resolveAttachmentOpenTarget(attachment.uri);
-        if (isTauriRuntime()) {
-            try {
-                const { invoke } = await import('@tauri-apps/api/core');
-                await invoke('open_path', { path: openTarget });
-                return;
-            } catch (error) {
-                void logWarn('Failed to open attachment', {
-                    scope: 'attachment',
-                    extra: { error: error instanceof Error ? error.message : String(error) },
-                });
-            }
+        try {
+            await openAttachmentTarget(attachment.uri);
+        } catch (error) {
+            void logWarn('Failed to open attachment', {
+                scope: 'attachment',
+                extra: { error: error instanceof Error ? error.message : String(error) },
+            });
+            const message = error instanceof Error ? error.message : String(error);
+            setAttachmentError(message || t('attachments.fileNotSupported'));
         }
-        window.open(normalized, '_blank');
-    }, []);
+    }, [t]);
 
     const addProjectFileAttachment = useCallback(async () => {
         if (!selectedProject) return;
@@ -60,45 +54,16 @@ export function useProjectAttachmentActions({
                 title: t('attachments.addFile'),
             });
             if (!selected || typeof selected !== 'string') return;
-            try {
-                const { size } = await import('@tauri-apps/plugin-fs');
-                const fileSize = await size(selected);
-                const validation = await validateAttachmentForUpload(
-                    {
-                        id: 'pending',
-                        kind: 'file',
-                        title: selected.split(/[/\\]/).pop() || selected,
-                        uri: selected,
-                        createdAt: new Date().toISOString(),
-                        updatedAt: new Date().toISOString(),
-                    },
-                    fileSize
-                );
-                if (!validation.valid) {
-                    setAttachmentError(resolveValidationMessage(validation.error));
-                    return;
-                }
-            } catch (error) {
-                void logWarn('Failed to validate attachment size', {
-                    scope: 'attachment',
-                    extra: { error: error instanceof Error ? error.message : String(error) },
-                });
+            const result = await importPickedFileAttachment(selected);
+            if ('errorKey' in result) {
+                setAttachmentError(t(result.errorKey));
+                return;
             }
-            const now = new Date().toISOString();
-            const title = selected.split(/[/\\]/).pop() || selected;
-            const attachment: Attachment = {
-                id: generateUUID(),
-                kind: 'file',
-                title,
-                uri: selected,
-                createdAt: now,
-                updatedAt: now,
-            };
-            updateProject(selectedProject.id, { attachments: [...(selectedProject.attachments || []), attachment] });
+            updateProject(selectedProject.id, { attachments: [...(selectedProject.attachments || []), result.attachment] });
         } finally {
             setIsProjectAttachmentBusy(false);
         }
-    }, [isProjectAttachmentBusy, resolveValidationMessage, selectedProject, t, updateProject]);
+    }, [isProjectAttachmentBusy, selectedProject, t, updateProject]);
 
     const addProjectLinkAttachment = useCallback(() => {
         if (!selectedProject) return;

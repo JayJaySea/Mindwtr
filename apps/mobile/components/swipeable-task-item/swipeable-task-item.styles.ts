@@ -28,11 +28,15 @@ export const styles = StyleSheet.create({
         flexDirection: 'row',
         alignItems: 'center',
         gap: 8,
+        minWidth: 0,
     },
     taskContent: {
         flex: 1,
+        minWidth: 0,
     },
     taskTitle: {
+        flex: 1,
+        minWidth: 0,
         fontSize: 15,
         fontWeight: '500',
         lineHeight: 20,
@@ -41,17 +45,10 @@ export const styles = StyleSheet.create({
         flex: 1,
     },
     focusButton: {
-        minWidth: 44,
-        minHeight: 44,
-        paddingHorizontal: 8,
-        paddingVertical: 8,
-        borderRadius: 10,
+        width: 44,
+        height: 44,
         justifyContent: 'center',
         alignItems: 'center',
-    },
-    focusButtonText: {
-        fontSize: 16,
-        fontWeight: '600',
     },
     taskDescription: {
         fontSize: 12,
@@ -74,8 +71,11 @@ export const styles = StyleSheet.create({
         maxWidth: '100%',
     },
     metaText: {
+        flexShrink: 1,
         fontSize: 12,
         fontWeight: '500',
+        lineHeight: 16,
+        minWidth: 0,
     },
     metaSeparator: {
         fontSize: 12,
@@ -89,7 +89,14 @@ export const styles = StyleSheet.create({
         color: '#7C3AED',
     },
     dueText: {
-        color: '#EF4444',
+        fontWeight: '600',
+    },
+    projectDeadlineText: {
+        color: '#F59E0B',
+        fontWeight: '600',
+    },
+    dateIssueText: {
+        color: '#F59E0B',
         fontWeight: '600',
     },
     projectDot: {
@@ -149,6 +156,13 @@ export const styles = StyleSheet.create({
         fontWeight: '600',
         textTransform: 'capitalize',
     },
+    statusIconButton: {
+        minWidth: 44,
+        minHeight: 44,
+        marginLeft: 8,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
     swipeActionLeft: {
         backgroundColor: '#10B981',
         justifyContent: 'center',
@@ -197,6 +211,91 @@ export const styles = StyleSheet.create({
         fontWeight: '600',
         marginBottom: 16,
         textAlign: 'center',
+    },
+    nextActionContainer: {
+        width: '100%',
+        maxWidth: 360,
+        maxHeight: '86%',
+        borderRadius: 16,
+        borderWidth: 1,
+        padding: 20,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.25,
+        shadowRadius: 3.84,
+        elevation: 5,
+    },
+    nextActionDescription: {
+        fontSize: 13,
+        lineHeight: 18,
+        marginBottom: 16,
+        textAlign: 'center',
+    },
+    nextActionSection: {
+        gap: 8,
+        marginBottom: 16,
+    },
+    nextActionSectionLabel: {
+        fontSize: 12,
+        fontWeight: '700',
+        textTransform: 'uppercase',
+    },
+    nextActionCandidateList: {
+        maxHeight: 180,
+    },
+    nextActionCandidate: {
+        borderWidth: 1,
+        borderRadius: 10,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        marginBottom: 8,
+    },
+    nextActionCandidateTitle: {
+        fontSize: 14,
+        fontWeight: '600',
+        lineHeight: 19,
+    },
+    nextActionCandidateMeta: {
+        fontSize: 12,
+        marginTop: 2,
+        textTransform: 'capitalize',
+    },
+    nextActionInput: {
+        minHeight: 44,
+        borderWidth: 1,
+        borderRadius: 10,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        fontSize: 15,
+        fontWeight: '500',
+    },
+    nextActionActions: {
+        flexDirection: 'row',
+        gap: 10,
+        justifyContent: 'flex-end',
+    },
+    nextActionSecondaryButton: {
+        minHeight: 44,
+        paddingHorizontal: 16,
+        borderRadius: 10,
+        borderWidth: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    nextActionPrimaryButton: {
+        minHeight: 44,
+        paddingHorizontal: 16,
+        borderRadius: 10,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    nextActionSecondaryText: {
+        fontSize: 14,
+        fontWeight: '700',
+    },
+    nextActionPrimaryText: {
+        fontSize: 14,
+        fontWeight: '700',
     },
     menuGrid: {
         flexDirection: 'row',

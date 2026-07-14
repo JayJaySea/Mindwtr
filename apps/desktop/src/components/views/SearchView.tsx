@@ -1,17 +1,26 @@
-import { useMemo, useCallback, useEffect, useState } from 'react';
+import { useMemo, useCallback, useEffect, useState, useRef, type UIEvent } from 'react';
 import { ErrorBoundary } from '../ErrorBoundary';
-import { shallow, useTaskStore, filterTasksBySearch, sortTasksBy, Project, TaskStatus, Task } from '@mindwtr/core';
-import type { TaskSortBy } from '@mindwtr/core';
-import { TaskItem } from '../TaskItem';
+import { buildBulkOrganizeTaskUpdates, shallow, useTaskStore, filterTasksBySearch, sortTasksBy, TaskStatus, updateRangeSelection } from '@mindwtr/core';
+import type { BulkOrganizeTaskUpdateInput, RangeSelectionOptions, TaskSortBy } from '@mindwtr/core';
 import { useLanguage } from '../../contexts/language-context';
 import { Trash2 } from 'lucide-react';
 import { usePerformanceMonitor } from '../../hooks/usePerformanceMonitor';
 import { checkBudget } from '../../config/performanceBudgets';
 import { ListBulkActions } from './list/ListBulkActions';
+import { BulkSelectionToolbar } from './list/BulkSelectionToolbar';
+import { TaskBulkOrganizeModal } from './list/TaskBulkOrganizeModal';
 import { PromptModal } from '../PromptModal';
 import { cn } from '../../lib/utils';
-import { resolveAreaFilter, taskMatchesAreaFilter } from '../../lib/area-filter';
+import { resolveAreaFilter, taskMatchesAreaFilter } from '@mindwtr/core';
 import { useConfirmDialog } from '../../hooks/useConfirmDialog';
+import { VirtualTaskRow } from './list/VirtualTaskRow';
+import {
+    LIST_VIRTUALIZATION_THRESHOLD,
+    LIST_VIRTUAL_ROW_ESTIMATE,
+    LIST_VIRTUAL_OVERSCAN,
+    useVirtualList,
+} from './list/useVirtualList';
+import { StoreTaskItem } from './list/StoreTaskItem';
 
 interface SearchViewProps {
     savedSearchId: string;
@@ -20,9 +29,10 @@ interface SearchViewProps {
 
 export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
     const perf = usePerformanceMonitor('SearchView');
-    const { tasks, projects, areas, settings, updateSettings, batchUpdateTasks, batchDeleteTasks, batchMoveTasks } = useTaskStore(
+    const { tasks, tasksById, projects, areas, settings, updateSettings, batchUpdateTasks, batchDeleteTasks, batchMoveTasks } = useTaskStore(
         (state) => ({
             tasks: state.tasks,
+            tasksById: state._tasksById,
             projects: state.projects,
             areas: state.areas,
             settings: state.settings,
@@ -42,6 +52,14 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
     const [contextPromptOpen, setContextPromptOpen] = useState(false);
     const [contextPromptMode, setContextPromptMode] = useState<'add' | 'remove'>('add');
     const [contextPromptIds, setContextPromptIds] = useState<string[]>([]);
+    const [bulkOrganizeOpen, setBulkOrganizeOpen] = useState(false);
+    const [isBulkOrganizing, setIsBulkOrganizing] = useState(false);
+    const listScrollRef = useRef<HTMLDivElement>(null);
+    const multiSelectAnchorIdRef = useRef<string | null>(null);
+    const rowHeightsRef = useRef<Map<string, number>>(new Map());
+    const [measureVersion, setMeasureVersion] = useState(0);
+    const [listScrollTop, setListScrollTop] = useState(0);
+    const [listHeight, setListHeight] = useState(0);
     const { requestConfirmation, confirmModal } = useConfirmDialog();
 
     const savedSearch = settings?.savedSearches?.find(s => s.id === savedSearchId);
@@ -55,14 +73,34 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
         return () => window.clearTimeout(timer);
     }, [perf.enabled]);
 
-    const projectMap = useMemo(() => {
-        return projects.reduce((acc, project) => {
-            acc[project.id] = project;
-            return acc;
-        }, {} as Record<string, Project>);
-    }, [projects]);
+    useEffect(() => {
+        const element = listScrollRef.current;
+        if (!element) return;
+        const updateHeight = () => {
+            const nextHeight = element.clientHeight;
+            setListHeight((current) => (current === nextHeight ? current : nextHeight));
+        };
+        updateHeight();
+        window.addEventListener('resize', updateHeight);
+        const resizeObserver = typeof ResizeObserver === 'function'
+            ? new ResizeObserver(() => updateHeight())
+            : null;
+        resizeObserver?.observe(element);
+        return () => {
+            window.removeEventListener('resize', updateHeight);
+            resizeObserver?.disconnect();
+        };
+    }, []);
+
     const projectMapById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
     const areaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
+    const bulkAreaOptions = useMemo(
+        () => [...areas]
+            .filter((area) => !area.deletedAt)
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .map((area) => ({ id: area.id, name: area.name })),
+        [areas],
+    );
     const resolvedAreaFilter = useMemo(
         () => resolveAreaFilter(settings?.filters?.areaId, areas),
         [settings?.filters?.areaId, areas],
@@ -77,26 +115,73 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
             sortBy
         );
     }, [tasks, projects, query, sortBy, resolvedAreaFilter, projectMapById, areaById]);
-
-    const tasksById = useMemo(() => {
-        return tasks.reduce((acc, task) => {
-            acc.set(task.id, task);
-            return acc;
-        }, new Map<string, Task>());
-    }, [tasks]);
+    const shouldVirtualize = filteredTasks.length > LIST_VIRTUALIZATION_THRESHOLD;
+    const handleVirtualRowMeasure = useCallback((id: string, height: number) => {
+        if (rowHeightsRef.current.get(id) === height) return;
+        rowHeightsRef.current.set(id, height);
+        setMeasureVersion((current) => current + 1);
+    }, []);
+    const handleVirtualScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+        setListScrollTop(event.currentTarget.scrollTop);
+    }, []);
+    const { rowOffsets, totalHeight, startIndex, visibleTasks } = useVirtualList({
+        tasks: filteredTasks,
+        shouldVirtualize,
+        rowHeightsRef,
+        measureVersion,
+        listScrollTop,
+        listHeight,
+        rowEstimate: LIST_VIRTUAL_ROW_ESTIMATE,
+        overscan: LIST_VIRTUAL_OVERSCAN,
+    });
 
     const exitSelectionMode = useCallback(() => {
         setSelectionMode(false);
         setMultiSelectedIds(new Set());
+        multiSelectAnchorIdRef.current = null;
     }, []);
 
-    const toggleMultiSelect = useCallback((taskId: string) => {
+    const filteredTaskIds = useMemo(() => filteredTasks.map((task) => task.id), [filteredTasks]);
+    const selectedVisibleCount = useMemo(
+        () => filteredTaskIds.filter((id) => multiSelectedIds.has(id)).length,
+        [filteredTaskIds, multiSelectedIds],
+    );
+    const allVisibleTasksSelected = filteredTaskIds.length > 0 && selectedVisibleCount === filteredTaskIds.length;
+
+    useEffect(() => {
         setMultiSelectedIds((prev) => {
-            const next = new Set(prev);
-            if (next.has(taskId)) next.delete(taskId);
-            else next.add(taskId);
+            const visible = new Set(filteredTaskIds);
+            const next = new Set(Array.from(prev).filter((id) => visible.has(id)));
+            if (next.size === prev.size) return prev;
             return next;
         });
+        if (multiSelectAnchorIdRef.current && !filteredTaskIds.includes(multiSelectAnchorIdRef.current)) {
+            multiSelectAnchorIdRef.current = null;
+        }
+    }, [filteredTaskIds]);
+
+    const toggleMultiSelect = useCallback((taskId: string, options: RangeSelectionOptions = {}) => {
+        setMultiSelectedIds((prev) => {
+            const result = updateRangeSelection({
+                anchorId: multiSelectAnchorIdRef.current,
+                range: options.range,
+                selectedIds: prev,
+                targetId: taskId,
+                visibleIds: filteredTaskIds,
+            });
+            multiSelectAnchorIdRef.current = result.anchorId;
+            return result.selectedIds;
+        });
+    }, [filteredTaskIds]);
+
+    const selectAllVisibleTasks = useCallback(() => {
+        multiSelectAnchorIdRef.current = filteredTaskIds[0] ?? null;
+        setMultiSelectedIds(new Set(filteredTaskIds));
+    }, [filteredTaskIds]);
+
+    const clearTaskSelection = useCallback(() => {
+        multiSelectAnchorIdRef.current = null;
+        setMultiSelectedIds(new Set());
     }, []);
 
     const selectedIdsArray = useMemo(() => Array.from(multiSelectedIds), [multiSelectedIds]);
@@ -106,6 +191,29 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
         await batchMoveTasks(selectedIdsArray, newStatus);
         exitSelectionMode();
     }, [batchMoveTasks, selectedIdsArray, exitSelectionMode]);
+
+    const handleBatchAssignArea = useCallback(async (areaId: string | null) => {
+        if (selectedIdsArray.length === 0) return;
+        await batchUpdateTasks(selectedIdsArray.map((id) => ({
+            id,
+            updates: { areaId: areaId ?? undefined },
+        })));
+        exitSelectionMode();
+    }, [batchUpdateTasks, exitSelectionMode, selectedIdsArray]);
+
+    const handleApplyTaskBulkOrganize = useCallback(async (input: BulkOrganizeTaskUpdateInput) => {
+        if (selectedIdsArray.length === 0 || isBulkOrganizing) return;
+        const updates = buildBulkOrganizeTaskUpdates(selectedIdsArray, tasksById, input);
+        if (updates.length === 0) return;
+        setIsBulkOrganizing(true);
+        try {
+            await batchUpdateTasks(updates);
+            setBulkOrganizeOpen(false);
+            exitSelectionMode();
+        } finally {
+            setIsBulkOrganizing(false);
+        }
+    }, [batchUpdateTasks, exitSelectionMode, isBulkOrganizing, selectedIdsArray, tasksById]);
 
     const handleBatchDelete = useCallback(async () => {
         if (selectedIdsArray.length === 0) return;
@@ -157,7 +265,7 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
 
     return (
         <ErrorBoundary>
-            <div className="space-y-4">
+            <div className={cn("flex flex-col gap-4", shouldVirtualize && "h-full min-h-0")}>
             <header className="flex items-center justify-between">
                 <div className="space-y-1">
                     <h2 className="text-2xl font-bold tracking-tight">
@@ -196,16 +304,31 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
                 )}
             </header>
 
-            {selectionMode && selectedIdsArray.length > 0 && (
-                <ListBulkActions
-                    selectionCount={selectedIdsArray.length}
-                    onMoveToStatus={handleBatchMove}
-                    onAddTag={handleBatchAddTag}
-                    onAddContext={handleBatchAddContext}
-                    onRemoveContext={handleBatchRemoveContext}
-                    onDelete={handleBatchDelete}
-                    t={t}
-                />
+            {selectionMode && (
+                <div className="space-y-3">
+                    <BulkSelectionToolbar
+                        selectionCount={selectedIdsArray.length}
+                        totalCount={filteredTasks.length}
+                        allSelected={allVisibleTasksSelected}
+                        onSelectAll={selectAllVisibleTasks}
+                        onClearSelection={clearTaskSelection}
+                        t={t}
+                    />
+                    {selectedIdsArray.length > 0 && (
+                        <ListBulkActions
+                            selectionCount={selectedIdsArray.length}
+                            onMoveToStatus={handleBatchMove}
+                            onAssignArea={handleBatchAssignArea}
+                            areaOptions={bulkAreaOptions}
+                            onBulkOrganize={() => setBulkOrganizeOpen(true)}
+                            onAddTag={handleBatchAddTag}
+                            onAddContext={handleBatchAddContext}
+                            onRemoveContext={handleBatchRemoveContext}
+                            onDelete={handleBatchDelete}
+                            t={t}
+                        />
+                    )}
+                </div>
             )}
 
             {filteredTasks.length === 0 && query && (
@@ -214,24 +337,49 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
                 </div>
             )}
 
-            <div className="space-y-3">
-                {filteredTasks.map(task => (
-                    <TaskItem
-                        key={task.id}
-                        task={task}
-                        project={task.projectId ? projectMap[task.projectId] : undefined}
-                        selectionMode={selectionMode}
-                        isMultiSelected={multiSelectedIds.has(task.id)}
-                        onToggleSelect={() => toggleMultiSelect(task.id)}
-                    />
-                ))}
+            <div
+                ref={listScrollRef}
+                onScroll={handleVirtualScroll}
+                className={shouldVirtualize ? "flex-1 min-h-0 overflow-y-auto" : "space-y-3"}
+            >
+                {shouldVirtualize ? (
+                    <div style={{ height: totalHeight, position: 'relative' }}>
+                        {visibleTasks.map((task, visibleIndex) => {
+                            const taskIndex = startIndex + visibleIndex;
+                            return (
+                                <VirtualTaskRow
+                                    key={task.id}
+                                    taskId={task.id}
+                                    index={taskIndex}
+                                    top={rowOffsets[taskIndex] ?? 0}
+                                    selectionMode={selectionMode}
+                                    isMultiSelected={multiSelectedIds.has(task.id)}
+                                    onToggleSelectId={toggleMultiSelect}
+                                    onMeasure={handleVirtualRowMeasure}
+                                    gapClassName="pb-3"
+                                    showDivider={false}
+                                />
+                            );
+                        })}
+                    </div>
+                ) : (
+                    filteredTasks.map(task => (
+                        <StoreTaskItem
+                            key={task.id}
+                            taskId={task.id}
+                            selectionMode={selectionMode}
+                            isMultiSelected={multiSelectedIds.has(task.id)}
+                            onToggleSelectId={toggleMultiSelect}
+                        />
+                    ))
+                )}
             </div>
             </div>
             <PromptModal
                 isOpen={tagPromptOpen}
                 title={t('bulk.addTag')}
                 description={t('bulk.addTag')}
-                placeholder="#tag"
+                placeholder={t('bulk.tagPlaceholder')}
                 defaultValue=""
                 confirmLabel={t('common.save')}
                 cancelLabel={t('common.cancel')}
@@ -254,7 +402,7 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
                 isOpen={contextPromptOpen}
                 title={contextPromptMode === 'add' ? t('bulk.addContext') : t('bulk.removeContext')}
                 description={contextPromptMode === 'add' ? t('bulk.addContext') : t('bulk.removeContext')}
-                placeholder="@context"
+                placeholder={t('bulk.contextPlaceholder')}
                 defaultValue=""
                 confirmLabel={t('common.save')}
                 cancelLabel={t('common.cancel')}
@@ -274,6 +422,16 @@ export function SearchView({ savedSearchId, onDelete }: SearchViewProps) {
                     setContextPromptOpen(false);
                     exitSelectionMode();
                 }}
+            />
+            <TaskBulkOrganizeModal
+                isOpen={bulkOrganizeOpen}
+                selectedCount={selectedIdsArray.length}
+                projects={projects}
+                areas={areas}
+                isApplying={isBulkOrganizing}
+                t={t}
+                onCancel={() => setBulkOrganizeOpen(false)}
+                onApply={handleApplyTaskBulkOrganize}
             />
             {confirmModal}
         </ErrorBoundary>

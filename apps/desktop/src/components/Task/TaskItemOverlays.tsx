@@ -1,5 +1,5 @@
 import React from 'react';
-import type { RecurrenceWeekday } from '@mindwtr/core';
+import { translateWithFallback, type RecurrenceWeekday } from '@mindwtr/core';
 import { ConfirmModal } from '../ConfirmModal';
 import { PromptModal } from '../PromptModal';
 import { AttachmentModals } from './AttachmentModals';
@@ -23,24 +23,28 @@ type TaskItemOverlaysProps = {
     customMonthDay: number;
     customOrdinal: '1' | '2' | '3' | '4' | '-1';
     customWeekday: RecurrenceWeekday;
-    deleteTask: (taskId: string) => Promise<unknown>;
     handleAddLinkAttachment: (value: string) => boolean;
     handleAudioError: () => void;
     handleDiscardChanges: () => void;
-    handleOpenDeleteConfirm: (open: boolean) => void;
     handleOpenDiscardConfirm: (open: boolean) => void;
     imageAttachment: any;
     imageSource: string | null;
-    moveTask: (taskId: string, status: any) => Promise<unknown>;
     onOpenImageExternally: () => void;
     onOpenTextExternally: () => void;
     openAudioExternally: () => void;
-    openDeleteConfirm: boolean;
     openDiscardConfirm: boolean;
     openLinkPrompt: boolean;
-    openWaitingDuePrompt: boolean;
-    openWaitingDuePromptSetter: (open: boolean) => void;
-    restoreTask: (taskId: string) => Promise<unknown>;
+    linkPromptDefaultValue: string;
+    linkPromptTitle: string;
+    linkPromptDescription: string;
+    linkPromptPlaceholder: string;
+    linkPromptBrowseLabel?: string;
+    onBrowseLinkFile?: () => Promise<string | null>;
+    openWaitingAssignmentPrompt: boolean;
+    onCancelWaitingAssignmentPrompt: () => void;
+    onConfirmWaitingAssignmentPrompt: (value: string) => void;
+    waitingAssignmentDefaultValue: string;
+    waitingAssignmentSuggestions?: readonly string[];
     retryAudioTranscription: () => void;
     setCustomInterval: (value: number) => void;
     setCustomMode: (value: 'date' | 'nth') => void;
@@ -49,16 +53,11 @@ type TaskItemOverlaysProps = {
     setCustomWeekday: (value: RecurrenceWeekday) => void;
     setShowCustomRecurrence: (value: boolean) => void;
     showCustomRecurrence: boolean;
-    showToast: (message: string, tone?: 'info' | 'error' | 'success', durationMs?: number, action?: { label: string; onClick: () => void }) => void;
     t: (key: string) => string;
-    taskId: string;
     textAttachment: any;
     textContent: string;
     textError: string | null;
     textLoading: boolean;
-    undoNotificationsEnabled: boolean;
-    undoLabel: string;
-    updateTask: (taskId: string, patch: Record<string, any>) => Promise<unknown>;
     weekdayLabels: Record<RecurrenceWeekday, string>;
 };
 
@@ -79,24 +78,28 @@ export function TaskItemOverlays({
     customMonthDay,
     customOrdinal,
     customWeekday,
-    deleteTask,
     handleAddLinkAttachment,
     handleAudioError,
     handleDiscardChanges,
-    handleOpenDeleteConfirm,
     handleOpenDiscardConfirm,
     imageAttachment,
     imageSource,
-    moveTask,
     onOpenImageExternally,
     onOpenTextExternally,
     openAudioExternally,
-    openDeleteConfirm,
     openDiscardConfirm,
     openLinkPrompt,
-    openWaitingDuePrompt,
-    openWaitingDuePromptSetter,
-    restoreTask,
+    linkPromptDefaultValue,
+    linkPromptTitle,
+    linkPromptDescription,
+    linkPromptPlaceholder,
+    linkPromptBrowseLabel,
+    onBrowseLinkFile,
+    openWaitingAssignmentPrompt,
+    onCancelWaitingAssignmentPrompt,
+    onConfirmWaitingAssignmentPrompt,
+    waitingAssignmentDefaultValue,
+    waitingAssignmentSuggestions,
     retryAudioTranscription,
     setCustomInterval,
     setCustomMode,
@@ -105,28 +108,25 @@ export function TaskItemOverlays({
     setCustomWeekday,
     setShowCustomRecurrence,
     showCustomRecurrence,
-    showToast,
     t,
-    taskId,
     textAttachment,
     textContent,
     textError,
     textLoading,
-    undoLabel,
-    undoNotificationsEnabled,
-    updateTask,
     weekdayLabels,
 }: TaskItemOverlaysProps) {
     const resolveText = (key: string, fallback: string) => {
-        const value = t(key);
-        return value === key ? fallback : value;
+        return translateWithFallback(t, key, fallback);
     };
-    const waitingDuePromptTitle = resolveText('task.waitingDuePromptTitle', 'Set follow-up / review date');
-    const waitingDuePromptDescription = resolveText(
-        'task.waitingDuePromptDescription',
-        'This sets the task review date. When should this waiting task resurface?',
+    const waitingAssignmentPromptTitle = resolveText('process.waitingFor', 'Who/what are you waiting for?');
+    const waitingAssignmentPromptDescription = resolveText(
+        'process.waitingForDesc',
+        "Add a note to remember what you're waiting on",
     );
-    const skipLabel = resolveText('common.skip', 'Skip');
+    const waitingAssignmentPlaceholder = resolveText(
+        'taskEdit.assignedToPlaceholder',
+        'Who is this waiting for?',
+    );
 
     return (
         <>
@@ -155,10 +155,12 @@ export function TaskItemOverlays({
             {openLinkPrompt && (
                 <PromptModal
                     isOpen={openLinkPrompt}
-                    title={t('attachments.addLink')}
-                    description={t('attachments.linkInputHint')}
-                    placeholder={t('attachments.linkPlaceholder')}
-                    defaultValue=""
+                    title={linkPromptTitle}
+                    description={linkPromptDescription}
+                    placeholder={linkPromptPlaceholder}
+                    defaultValue={linkPromptDefaultValue}
+                    browseLabel={linkPromptBrowseLabel}
+                    onBrowse={onBrowseLinkFile}
                     confirmLabel={t('common.save')}
                     cancelLabel={t('common.cancel')}
                     onCancel={clearLinkPrompt}
@@ -169,55 +171,19 @@ export function TaskItemOverlays({
                     }}
                 />
             )}
-            {openWaitingDuePrompt && (
+            {openWaitingAssignmentPrompt && (
                 <PromptModal
-                    isOpen={openWaitingDuePrompt}
-                    title={waitingDuePromptTitle}
-                    description={waitingDuePromptDescription}
-                    inputType="date"
-                    defaultValue=""
-                    secondaryLabel={skipLabel}
-                    onSecondary={() => {
-                        openWaitingDuePromptSetter(false);
-                        void moveTask(taskId, 'waiting');
-                    }}
+                    isOpen={openWaitingAssignmentPrompt}
+                    title={waitingAssignmentPromptTitle}
+                    description={waitingAssignmentPromptDescription}
+                    placeholder={waitingAssignmentPlaceholder}
+                    defaultValue={waitingAssignmentDefaultValue}
+                    suggestions={waitingAssignmentSuggestions}
+                    allowEmptyConfirm
                     confirmLabel={t('common.save')}
                     cancelLabel={t('common.cancel')}
-                    onCancel={() => openWaitingDuePromptSetter(false)}
-                    onConfirm={(value) => {
-                        const input = value.trim();
-                        if (!input) return;
-                        openWaitingDuePromptSetter(false);
-                        void moveTask(taskId, 'waiting');
-                        void updateTask(taskId, { reviewAt: input });
-                    }}
-                />
-            )}
-            {openDeleteConfirm && (
-                <ConfirmModal
-                    isOpen={openDeleteConfirm}
-                    title={resolveText('common.delete', 'Delete task')}
-                    description={resolveText('task.deleteConfirmBody', 'Move this task to Trash?')}
-                    confirmLabel={resolveText('common.delete', 'Delete')}
-                    cancelLabel={t('common.cancel')}
-                    onCancel={() => handleOpenDeleteConfirm(false)}
-                    onConfirm={() => {
-                        handleOpenDeleteConfirm(false);
-                        void deleteTask(taskId);
-                        const deletedMessage = resolveText('task.aria.delete', 'Task deleted');
-                        if (!undoNotificationsEnabled) return;
-                        showToast(
-                            deletedMessage,
-                            'info',
-                            5000,
-                            {
-                                label: undoLabel,
-                                onClick: () => {
-                                    void restoreTask(taskId);
-                                },
-                            },
-                        );
-                    }}
+                    onCancel={onCancelWaitingAssignmentPrompt}
+                    onConfirm={onConfirmWaitingAssignmentPrompt}
                 />
             )}
             {openDiscardConfirm && (

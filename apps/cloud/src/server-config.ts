@@ -1,4 +1,4 @@
-import type { Task } from '@mindwtr/core';
+import type { Area, Project, Section, Task } from '@mindwtr/core';
 
 type Flags = Record<string, string | boolean>;
 type LogLevel = 'info' | 'warn' | 'error';
@@ -98,8 +98,10 @@ export const CLOUD_TASK_CREATION_ALLOWED_PROP_KEYS = new Set<keyof Task>([
     'priority',
     'taskMode',
     'startTime',
+    'relativeStartOffset',
     'dueDate',
     'recurrence',
+    'showFutureRecurrence',
     'pushCount',
     'tags',
     'contexts',
@@ -112,14 +114,58 @@ export const CLOUD_TASK_CREATION_ALLOWED_PROP_KEYS = new Set<keyof Task>([
     'sectionId',
     'areaId',
     'isFocusedToday',
+    'energyLevel',
+    'assignedTo',
     'timeEstimate',
+    'timeSpentMinutes',
     'reviewAt',
+    'suppressMindwtrReminders',
+    'repeatReminderMinutes',
 ]);
 export const CLOUD_TASK_PATCH_ALLOWED_PROP_KEYS = new Set<keyof Task>([
     'title',
     'order',
     'orderNum',
     ...CLOUD_TASK_CREATION_ALLOWED_PROP_KEYS,
+]);
+export const CLOUD_PROJECT_CREATION_ALLOWED_PROP_KEYS = new Set<keyof Project>([
+    'status',
+    'color',
+    'order',
+    'tagIds',
+    'isSequential',
+    'isFocused',
+    'supportNotes',
+    'attachments',
+    'dueDate',
+    'reviewAt',
+    'areaId',
+    'areaTitle',
+]);
+export const CLOUD_PROJECT_PATCH_ALLOWED_PROP_KEYS = new Set<keyof Project>([
+    'title',
+    'deletedAt',
+    'purgedAt',
+    ...CLOUD_PROJECT_CREATION_ALLOWED_PROP_KEYS,
+]);
+export const CLOUD_SECTION_CREATION_ALLOWED_PROP_KEYS = new Set<keyof Section>([
+    'description',
+    'order',
+    'isCollapsed',
+]);
+export const CLOUD_SECTION_PATCH_ALLOWED_PROP_KEYS = new Set<keyof Section>([
+    'projectId',
+    'title',
+    ...CLOUD_SECTION_CREATION_ALLOWED_PROP_KEYS,
+]);
+export const CLOUD_AREA_CREATION_ALLOWED_PROP_KEYS = new Set<keyof Area>([
+    'color',
+    'icon',
+    'order',
+]);
+export const CLOUD_AREA_PATCH_ALLOWED_PROP_KEYS = new Set<keyof Area>([
+    'name',
+    ...CLOUD_AREA_CREATION_ALLOWED_PROP_KEYS,
 ]);
 export const CLOUD_API_REV_BY = 'cloud';
 export const BEARER_TOKEN_PATTERN = /^[A-Za-z0-9._~+/=-]{20,512}$/;
@@ -157,15 +203,33 @@ export function parsePagination(searchParams: URLSearchParams): { limit: number;
     return { limit, offset };
 }
 
+const applyCorsHeaders = (headers: Headers): Headers => {
+    headers.set('Access-Control-Allow-Origin', corsOrigin);
+    headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    headers.set('Access-Control-Allow-Methods', 'GET,HEAD,PUT,POST,PATCH,DELETE,OPTIONS');
+    headers.set('Access-Control-Expose-Headers', 'ETag, Last-Modified, Content-Length');
+    return headers;
+};
+
 export function jsonResponse(body: unknown, init: ResponseInit = {}) {
     const headers = new Headers(init.headers);
     headers.set('Content-Type', 'application/json; charset=utf-8');
-    headers.set('Access-Control-Allow-Origin', corsOrigin);
-    headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-    headers.set('Access-Control-Allow-Methods', 'GET,PUT,POST,PATCH,DELETE,OPTIONS');
+    applyCorsHeaders(headers);
     return new Response(JSON.stringify(body, null, 2), { ...init, headers });
+}
+
+export function preflightResponse(init: ResponseInit = {}) {
+    const headers = applyCorsHeaders(new Headers(init.headers));
+    return new Response(null, { status: 204, ...init, headers });
 }
 
 export function errorResponse(message: string, status = 400) {
     return jsonResponse({ error: message }, { status });
+}
+
+export function createInternalServerErrorResponse(message: string, requestId: string): Response {
+    return jsonResponse(
+        { error: message, requestId },
+        { status: 500, headers: { 'X-Request-Id': requestId } },
+    );
 }

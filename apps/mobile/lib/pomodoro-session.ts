@@ -1,21 +1,25 @@
 import {
+  advancePomodoroState,
   createPomodoroState,
+  recordPomodoroFocusSessions,
   sanitizePomodoroDurations,
-  tickPomodoroState,
+  sanitizePomodoroSessionHistory,
+  type PomodoroAutoStartOptions,
   type PomodoroDurations,
+  type PomodoroEvent,
   type PomodoroPhase,
+  type PomodoroSessionHistory,
   type PomodoroState,
 } from '@mindwtr/core';
 
 export const POMODORO_SESSION_STORAGE_KEY = '@mindwtr_pomodoro_state';
-
-export type PomodoroEvent = 'focus-finished' | 'break-finished' | null;
 
 export interface StoredPomodoroSession {
   durations?: Partial<PomodoroDurations>;
   timerState?: Partial<PomodoroState>;
   selectedTaskId?: string;
   phaseEndsAt?: string;
+  sessionHistory?: Partial<PomodoroSessionHistory>;
 }
 
 export interface ResolvedPomodoroSession {
@@ -23,7 +27,8 @@ export interface ResolvedPomodoroSession {
   timerState: PomodoroState;
   selectedTaskId?: string;
   phaseEndsAt?: string;
-  lastEvent: PomodoroEvent;
+  lastEvent: PomodoroEvent | null;
+  sessionHistory: PomodoroSessionHistory;
 }
 
 const isPomodoroPhase = (value: unknown): value is PomodoroPhase => value === 'focus' || value === 'break';
@@ -57,9 +62,21 @@ const getRemainingSecondsFromPhaseEnd = (phaseEndsAt: string, nowMs: number): nu
 export const resolvePomodoroSession = (
   session?: StoredPomodoroSession | null,
   nowMs: number = Date.now(),
+  autoStartOptions: PomodoroAutoStartOptions = {},
 ): ResolvedPomodoroSession => {
   const durations = sanitizePomodoroDurations(session?.durations);
-  const timerState = sanitizePomodoroState(session?.timerState, durations);
+  const sanitizedTimerState = sanitizePomodoroState(session?.timerState, durations);
+  const sessionHistory = sanitizePomodoroSessionHistory(
+    session?.sessionHistory,
+    sanitizedTimerState.completedFocusSessions
+  );
+  const timerState: PomodoroState = {
+    ...sanitizedTimerState,
+    completedFocusSessions: Math.max(
+      sanitizedTimerState.completedFocusSessions,
+      sessionHistory.totalCompletedFocusSessions
+    ),
+  };
   const selectedTaskId = typeof session?.selectedTaskId === 'string' && session.selectedTaskId.trim().length > 0
     ? session.selectedTaskId
     : undefined;
@@ -71,6 +88,7 @@ export const resolvePomodoroSession = (
       selectedTaskId,
       phaseEndsAt: undefined,
       lastEvent: null,
+      sessionHistory,
     };
   }
 
@@ -82,6 +100,7 @@ export const resolvePomodoroSession = (
       selectedTaskId,
       phaseEndsAt: undefined,
       lastEvent: null,
+      sessionHistory,
     };
   }
 
@@ -93,6 +112,7 @@ export const resolvePomodoroSession = (
       selectedTaskId,
       phaseEndsAt: undefined,
       lastEvent: null,
+      sessionHistory,
     };
   }
 
@@ -107,29 +127,47 @@ export const resolvePomodoroSession = (
       selectedTaskId,
       phaseEndsAt,
       lastEvent: null,
+      sessionHistory,
     };
   }
 
-  const finished = tickPomodoroState({
+  const endMs = new Date(phaseEndsAt).getTime();
+  const elapsedSinceEndSeconds = Math.max(0, Math.floor((nowMs - endMs) / 1000));
+  const finished = advancePomodoroState({
     ...timerState,
     isRunning: true,
     remainingSeconds: 1,
-  }, durations);
+  }, durations, elapsedSinceEndSeconds + 1, autoStartOptions);
+  const completedSessionDelta = finished.state.completedFocusSessions - timerState.completedFocusSessions;
+  const nextSessionHistory = completedSessionDelta > 0
+    ? recordPomodoroFocusSessions(sessionHistory, selectedTaskId, completedSessionDelta)
+    : sessionHistory;
+  const nextTimerState = {
+    ...finished.state,
+    completedFocusSessions: Math.max(
+      finished.state.completedFocusSessions,
+      nextSessionHistory.totalCompletedFocusSessions
+    ),
+  };
 
   return {
     durations,
-    timerState: finished.state,
+    timerState: nextTimerState,
     selectedTaskId,
-    phaseEndsAt: undefined,
-    lastEvent: finished.completedFocusSession ? 'focus-finished' : 'break-finished',
+    phaseEndsAt: nextTimerState.isRunning
+      ? new Date(nowMs + nextTimerState.remainingSeconds * 1000).toISOString()
+      : undefined,
+    lastEvent: finished.lastEvent,
+    sessionHistory: nextSessionHistory,
   };
 };
 
 export const startPomodoroSession = (
   session: ResolvedPomodoroSession,
   nowMs: number = Date.now(),
+  autoStartOptions: PomodoroAutoStartOptions = {},
 ): ResolvedPomodoroSession => {
-  const resolved = resolvePomodoroSession(session, nowMs);
+  const resolved = resolvePomodoroSession(session, nowMs, autoStartOptions);
   const remainingSeconds = Math.max(1, resolved.timerState.remainingSeconds);
   return {
     ...resolved,
@@ -146,8 +184,9 @@ export const startPomodoroSession = (
 export const pausePomodoroSession = (
   session: ResolvedPomodoroSession,
   nowMs: number = Date.now(),
+  autoStartOptions: PomodoroAutoStartOptions = {},
 ): ResolvedPomodoroSession => {
-  const resolved = resolvePomodoroSession(session, nowMs);
+  const resolved = resolvePomodoroSession(session, nowMs, autoStartOptions);
   return {
     ...resolved,
     timerState: {
@@ -164,4 +203,5 @@ export const serializePomodoroSession = (session: ResolvedPomodoroSession): Stor
   timerState: session.timerState,
   selectedTaskId: session.selectedTaskId,
   phaseEndsAt: session.phaseEndsAt,
+  sessionHistory: session.sessionHistory,
 });

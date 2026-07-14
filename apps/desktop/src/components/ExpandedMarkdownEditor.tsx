@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
-import { createPortal } from 'react-dom';
+import { useCallback, useEffect, useId, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
 import { X } from 'lucide-react';
 
 import { cn } from '../lib/utils';
 import { MarkdownFormatToolbar } from './MarkdownFormatToolbar';
-import { Markdown } from './Markdown';
 import { MarkdownReferenceAutocompleteMenu, useMarkdownReferenceAutocomplete } from './MarkdownReferenceAutocomplete';
+import { ModalPortal } from './ModalPortal';
+import { RichMarkdown } from './RichMarkdown';
 import type { MarkdownSelection, MarkdownToolbarActionId, MarkdownToolbarResult } from '@mindwtr/core';
 
 type ExpandedMarkdownEditorProps = {
@@ -26,6 +26,8 @@ type ExpandedMarkdownEditorProps = {
     onApplyAction: (actionId: MarkdownToolbarActionId, selection: MarkdownSelection) => MarkdownToolbarResult | void;
     onSelectionChange: (selection: MarkdownSelection) => void;
     onEditorKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+    onEditorPaste?: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
+    currentTaskId?: string;
 };
 
 export function ExpandedMarkdownEditor({
@@ -46,6 +48,8 @@ export function ExpandedMarkdownEditor({
     onApplyAction,
     onSelectionChange,
     onEditorKeyDown,
+    onEditorPaste,
+    currentTaskId,
 }: ExpandedMarkdownEditorProps) {
     const [mode, setMode] = useState<'edit' | 'preview'>(initialMode);
     const modalRef = useRef<HTMLDivElement | null>(null);
@@ -55,6 +59,7 @@ export function ExpandedMarkdownEditor({
     const titleId = useId();
     const resolvedHeaderTitle = (headerTitle || '').trim() || title;
     const autocomplete = useMarkdownReferenceAutocomplete({
+        currentTaskId,
         value,
         selection,
         textareaRef,
@@ -106,9 +111,9 @@ export function ExpandedMarkdownEditor({
     }, [isOpen, mode]);
 
     if (!isOpen) return null;
-    if (typeof document === 'undefined') return null;
 
-    return createPortal(
+    return (
+        <ModalPortal>
         <div
             className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
             role="dialog"
@@ -125,6 +130,7 @@ export function ExpandedMarkdownEditor({
                 onMouseDown={(event) => event.stopPropagation()}
                 onClick={(event) => event.stopPropagation()}
                 onKeyDown={(event) => {
+                    if (event.defaultPrevented) return;
                     if (event.key === 'Escape') {
                         event.preventDefault();
                         handleClose();
@@ -214,7 +220,9 @@ export function ExpandedMarkdownEditor({
                                         }
                                         onEditorKeyDown?.(event);
                                     }}
+                                    onPaste={onEditorPaste}
                                     placeholder={placeholder}
+                                    spellCheck={true}
                                     dir={direction}
                                     className={cn(
                                         'min-h-0 flex-1 resize-none rounded-xl border border-border bg-background px-4 py-3 text-sm leading-6 focus:outline-none focus:ring-2 focus:ring-primary/30',
@@ -227,6 +235,8 @@ export function ExpandedMarkdownEditor({
                                     selectedIndex={autocomplete.selectedIndex}
                                     setSelectedIndex={autocomplete.setSelectedIndex}
                                     applySuggestion={autocomplete.applySuggestion}
+                                    menuRef={autocomplete.menuRef}
+                                    position={autocomplete.position}
                                     t={t}
                                 />
                             </div>
@@ -239,12 +249,12 @@ export function ExpandedMarkdownEditor({
                                 isRtl && 'text-right',
                             )}
                         >
-                            <Markdown markdown={value} className={isRtl ? 'text-right' : undefined} />
+                            <RichMarkdown markdown={value} />
                         </div>
                     )}
                 </div>
             </div>
-        </div>,
-        document.body,
+        </div>
+        </ModalPortal>
     );
 }

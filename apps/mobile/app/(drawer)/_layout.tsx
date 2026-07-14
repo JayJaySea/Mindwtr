@@ -4,7 +4,6 @@ import { Stack } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { MobileHeaderSyncBar } from '@/components/mobile-header-sync-bar';
 import { useLanguage } from '../../contexts/language-context';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 
@@ -15,6 +14,7 @@ function DrawerHeader({
   tintColor,
   backgroundColor,
   borderColor,
+  backAccessibilityLabel,
 }: {
   title: string;
   canGoBack: boolean;
@@ -22,6 +22,7 @@ function DrawerHeader({
   tintColor: string;
   backgroundColor: string;
   borderColor: string;
+  backAccessibilityLabel: string;
 }) {
   const insets = useSafeAreaInsets();
   return (
@@ -38,7 +39,7 @@ function DrawerHeader({
     >
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Back"
+        accessibilityLabel={backAccessibilityLabel}
         disabled={!canGoBack}
         hitSlop={8}
         onPress={onBack}
@@ -50,14 +51,22 @@ function DrawerHeader({
         {title}
       </Text>
       <View style={styles.headerBackButton} />
-      <MobileHeaderSyncBar />
     </View>
   );
 }
 
+// Cold starts and deep links that land directly on a stack screen (session
+// restore to Archive, widget/notification links) must still have the tabs
+// beneath them, so the header back button and Android system back return to
+// the app instead of exiting it (#842).
+export const unstable_settings = {
+  anchor: '(tabs)',
+};
+
 export default function AppLayout() {
   const tc = useThemeColors();
   const { t } = useLanguage();
+  const backAccessibilityLabel = t('common.back');
 
   return (
     <Stack
@@ -74,6 +83,7 @@ export default function AppLayout() {
             }}
             tintColor={tc.text}
             title={getHeaderTitle(options, route.name)}
+            backAccessibilityLabel={backAccessibilityLabel}
           />
         ),
       }}
@@ -86,10 +96,10 @@ export default function AppLayout() {
       <Stack.Screen name="waiting" options={{ title: t('waiting.title') }} />
       <Stack.Screen name="someday" options={{ title: t('someday.title') }} />
       <Stack.Screen name="reference" options={{ title: t('nav.reference') }} />
-      <Stack.Screen name="done" options={{ title: t('nav.done') || t('list.done') || 'Done' }} />
+      <Stack.Screen name="done" options={{ title: t('nav.done') }} />
       <Stack.Screen name="projects-screen" options={{ title: t('projects.title') }} />
-      <Stack.Screen name="archived" options={{ title: t('archived.title') || 'Archived' }} />
-      <Stack.Screen name="trash" options={{ title: t('trash.title') || 'Trash' }} />
+      <Stack.Screen name="archived" options={{ title: t('archived.title') }} />
+      <Stack.Screen name="trash" options={{ title: t('trash.title') }} />
       <Stack.Screen
         name="settings"
         options={{

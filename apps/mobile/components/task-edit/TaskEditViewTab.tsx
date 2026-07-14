@@ -1,7 +1,13 @@
 import React from 'react';
 import { Image, ScrollView, Text, TouchableOpacity, View } from 'react-native';
 import { CheckSquare, Square } from 'lucide-react-native';
-import { getAttachmentDisplayTitle } from '@mindwtr/core';
+import {
+  formatRecurrenceLabel,
+  getAttachmentDisplayTitle,
+  getRecurringTaskPreviewDate,
+  hasTimeComponent,
+  tFallback,
+} from '@mindwtr/core';
 import type {
   Attachment,
   Area,
@@ -9,12 +15,14 @@ import type {
   Section,
   RecurrenceRule,
   RecurrenceStrategy,
+  TaskStatus,
   Task,
   TimeEstimate,
 } from '@mindwtr/core';
 import type { ThemeColors } from '@/hooks/use-theme-colors';
-import { MarkdownText } from '../markdown-text';
+import { MarkdownInlineText, MarkdownText } from '../markdown-text';
 import { AttachmentProgressIndicator } from '../AttachmentProgressIndicator';
+import { TaskStatusBadge } from '../task-status-badge';
 
 type TaskEditViewTabProps = {
   t: (key: string) => string;
@@ -41,9 +49,11 @@ type TaskEditViewTabProps = {
   onProjectPress?: (projectId: string) => void;
   onContextPress?: (context: string) => void;
   onTagPress?: (tag: string) => void;
+  onStatusUpdate?: (status: TaskStatus) => void;
+  showStatusField?: boolean;
 };
 
-export function TaskEditViewTab({
+function TaskEditViewTabComponent({
   t,
   tc,
   styles,
@@ -56,8 +66,6 @@ export function TaskEditViewTab({
   formatTimeEstimateLabel,
   formatDate,
   formatDueDate,
-  getRecurrenceRuleValue,
-  getRecurrenceStrategyValue,
   applyChecklistUpdate,
   visibleAttachments,
   openAttachment,
@@ -68,6 +76,8 @@ export function TaskEditViewTab({
   onProjectPress,
   onContextPress,
   onTagPress,
+  onStatusUpdate,
+  showStatusField = true,
 }: TaskEditViewTabProps) {
   const renderViewRow = (label: string, value?: string, onPress?: () => void, accessibilityLabel?: string) => {
     if (value === undefined || value === null || value === '') return null;
@@ -126,6 +136,7 @@ export function TaskEditViewTab({
 
   const project = projects.find((p) => p.id === mergedTask.projectId);
   const section = sections.find((item) => item.id === mergedTask.sectionId);
+  const title = String(mergedTask.title || '').trim();
   const description = String(mergedTask.description || '').trim();
   const area = areas.find((a) => a.id === mergedTask.areaId);
   const checklist = mergedTask.checklist || [];
@@ -139,11 +150,28 @@ export function TaskEditViewTab({
   const timeEstimateLabel = mergedTask.timeEstimate
     ? (formatTimeEstimateLabel(mergedTask.timeEstimate as TimeEstimate) || String(mergedTask.timeEstimate))
     : undefined;
-  const recurrenceRule = getRecurrenceRuleValue(mergedTask.recurrence);
-  const recurrenceStrategy = getRecurrenceStrategyValue(mergedTask.recurrence);
-  const recurrenceLabel = recurrenceRule
-    ? `${t(`recurrence.${recurrenceRule}`) || recurrenceRule}${recurrenceStrategy === 'fluid' ? ` · ${t('recurrence.afterCompletionShort')}` : ''}`
-    : undefined;
+  const recurrenceLabel = formatRecurrenceLabel({ recurrence: mergedTask.recurrence, t, formatDate }) || undefined;
+  const projectedRecurrenceDateLabel = (() => {
+    if (!recurrenceLabel || !mergedTask.recurrence) return '';
+    const nowIso = new Date().toISOString();
+    const previewTask = {
+      ...mergedTask,
+      id: mergedTask.id ?? 'draft-recurrence-preview',
+      title: String(mergedTask.title ?? ''),
+      status: mergedTask.status ?? 'next',
+      tags: mergedTask.tags ?? [],
+      contexts: mergedTask.contexts ?? [],
+      createdAt: mergedTask.createdAt ?? nowIso,
+      updatedAt: mergedTask.updatedAt ?? nowIso,
+      recurrence: mergedTask.recurrence,
+    } as Task;
+    const previewDate = getRecurringTaskPreviewDate(previewTask, nowIso);
+    return previewDate ? formatDate(previewDate) : '';
+  })();
+  const recurrencePreviewLabel = recurrenceLabel && projectedRecurrenceDateLabel
+    ? `${recurrenceLabel} · ${tFallback(t, 'recurrence.nextCalendarPreview', 'Next calendar preview')}: ${projectedRecurrenceDateLabel}`
+    : recurrenceLabel;
+  const hasReminderHandoffSchedule = hasTimeComponent(mergedTask.startTime) || hasTimeComponent(mergedTask.dueDate);
 
   return (
     <ScrollView
@@ -152,7 +180,24 @@ export function TaskEditViewTab({
       keyboardShouldPersistTaps="handled"
       nestedScrollEnabled={nestedScrollEnabled}
     >
-      {renderViewRow(t('taskEdit.statusLabel'), statusLabel)}
+      {title ? (
+        <View style={[styles.viewRow, { backgroundColor: tc.inputBg, borderColor: tc.border }]}>
+          <Text style={[styles.viewLabel, { color: tc.secondaryText }]}>{t('taskEdit.titleLabel')}</Text>
+          <Text style={[styles.viewTitleValue, { color: tc.text }]}>
+            {title}
+          </Text>
+        </View>
+      ) : null}
+      {showStatusField && statusLabel ? (
+        <View style={[styles.viewRow, { backgroundColor: tc.inputBg, borderColor: tc.border }]}>
+          <Text style={[styles.viewLabel, { color: tc.secondaryText }]}>{t('taskEdit.statusLabel')}</Text>
+          {onStatusUpdate && mergedTask.status ? (
+            <TaskStatusBadge status={mergedTask.status as TaskStatus} onUpdate={onStatusUpdate} />
+          ) : (
+            <Text style={[styles.viewValue, { color: tc.text }]}>{statusLabel}</Text>
+          )}
+        </View>
+      ) : null}
       {!isReference && prioritiesEnabled ? renderViewRow(t('taskEdit.priorityLabel'), priorityLabel) : null}
       {!isReference ? renderViewRow(t('taskEdit.energyLevel'), energyLevelLabel) : null}
       {renderViewRow(t('taskEdit.assignedTo'), mergedTask.assignedTo)}
@@ -166,6 +211,12 @@ export function TaskEditViewTab({
       {!project?.id ? renderViewRow(t('taskEdit.areaLabel'), area?.name) : null}
       {!isReference ? renderViewRow(t('taskEdit.startDateLabel'), mergedTask.startTime ? formatDate(mergedTask.startTime) : undefined) : null}
       {!isReference ? renderViewRow(t('taskEdit.dueDateLabel'), mergedTask.dueDate ? formatDueDate(mergedTask.dueDate) : undefined) : null}
+      {!isReference && hasReminderHandoffSchedule && mergedTask.suppressMindwtrReminders === true
+        ? renderViewRow(
+            tFallback(t, 'taskEdit.suppressMindwtrReminders', 'Use calendar reminder'),
+            tFallback(t, 'taskEdit.suppressMindwtrRemindersViewValue', 'Mindwtr reminders off')
+          )
+        : null}
       {!isReference ? renderViewRow(t('taskEdit.reviewDateLabel'), mergedTask.reviewAt ? formatDate(mergedTask.reviewAt) : undefined) : null}
       {!isReference && timeEstimatesEnabled ? renderViewRow(t('taskEdit.timeEstimateLabel'), timeEstimateLabel) : null}
       {mergedTask.contexts?.length ? (
@@ -181,13 +232,13 @@ export function TaskEditViewTab({
         </View>
       ) : null}
       {mergedTask.location ? renderViewRow(t('taskEdit.locationLabel'), mergedTask.location) : null}
-      {!isReference && recurrenceLabel ? renderViewRow(t('taskEdit.recurrenceLabel'), recurrenceLabel) : null}
+      {!isReference && recurrencePreviewLabel ? renderViewRow(t('taskEdit.recurrenceLabel'), recurrencePreviewLabel) : null}
       {description ? (
         <View style={styles.viewSection}>
           <Text style={[styles.viewLabel, { color: tc.secondaryText }]}>{t('taskEdit.descriptionLabel')}</Text>
           <View style={[styles.viewCard, { borderColor: tc.border, backgroundColor: tc.inputBg }]}
           >
-            <MarkdownText markdown={description} tc={tc} direction={resolvedDirection} />
+            <MarkdownText markdown={description} tc={tc} direction={resolvedDirection} selectable />
           </View>
         </View>
       ) : null}
@@ -214,7 +265,12 @@ export function TaskEditViewTab({
                 ) : (
                   <Square size={18} color={tc.secondaryText} strokeWidth={2} />
                 )}
-                <Text style={[styles.viewChecklistText, textDirectionStyle, { color: tc.text }]}>{item.title}</Text>
+                <MarkdownInlineText
+                  markdown={item.title}
+                  tc={tc}
+                  direction={resolvedDirection}
+                  style={[styles.viewChecklistText, textDirectionStyle, { color: tc.text }]}
+                />
               </TouchableOpacity>
             ))}
           </View>
@@ -269,3 +325,5 @@ export function TaskEditViewTab({
     </ScrollView>
   );
 }
+
+export const TaskEditViewTab = React.memo(TaskEditViewTabComponent);

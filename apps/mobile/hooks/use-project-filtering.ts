@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { type Area, getUsedTaskTokens, type Project, type Task } from '@mindwtr/core';
 
-import { projectMatchesAreaFilter, type AreaFilterValue } from '@/lib/area-filter';
+import { projectMatchesAreaFilter, type AreaFilterValue } from '@mindwtr/core';
 
 export type ProjectSectionItem = { type: 'project'; data: Project };
 
@@ -10,6 +10,61 @@ export type ProjectSection = {
     areaId: string;
     data: ProjectSectionItem[];
 };
+
+export function splitProjectsForMobileProjects(projects: Project[]) {
+    const active: Project[] = [];
+    const deferred: Project[] = [];
+    const archived: Project[] = [];
+
+    projects.forEach((project) => {
+        if (project.status === 'archived') {
+            archived.push(project);
+            return;
+        }
+        if (project.status === 'waiting' || project.status === 'someday') {
+            deferred.push(project);
+            return;
+        }
+        active.push(project);
+    });
+
+    return { active, deferred, archived };
+}
+
+export function groupProjectsIntoSections(
+    projects: Project[],
+    sortedAreas: Area[],
+    areaById: Map<string, Area>,
+    t: (key: string) => string,
+): ProjectSection[] {
+    const groups = new Map<string, Project[]>();
+    projects.forEach((project) => {
+        const areaId = project.areaId && areaById.has(project.areaId) ? project.areaId : 'no-area';
+        if (!groups.has(areaId)) {
+            groups.set(areaId, []);
+        }
+        groups.get(areaId)?.push(project);
+    });
+
+    const sections = sortedAreas
+        .filter((area) => (groups.get(area.id) || []).length > 0)
+        .map((area) => ({
+            title: area.name,
+            areaId: area.id,
+            data: (groups.get(area.id) || []).map((project) => ({ type: 'project' as const, data: project })),
+        }));
+
+    const noAreaProjects = groups.get('no-area') || [];
+    if (noAreaProjects.length > 0) {
+        sections.push({
+            title: t('projects.noArea'),
+            areaId: 'no-area',
+            data: noAreaProjects.map((project) => ({ type: 'project' as const, data: project })),
+        });
+    }
+
+    return sections;
+}
 
 type UseProjectFilteringParams = {
     projects: Project[];
@@ -20,6 +75,7 @@ type UseProjectFilteringParams = {
     selectedAreaFilter: AreaFilterValue;
     allTagsValue: string;
     noTagsValue: string;
+    focusedProjectCount: number;
     t: (key: string) => string;
 };
 
@@ -32,12 +88,10 @@ export function useProjectFiltering({
     selectedAreaFilter,
     allTagsValue,
     noTagsValue,
+    focusedProjectCount,
     t,
 }: UseProjectFilteringParams) {
-    const focusedCount = useMemo(
-        () => projects.filter((project) => project.isFocused).length,
-        [projects],
-    );
+    const focusedCount = focusedProjectCount;
 
     const areaUsage = useMemo(() => {
         const counts = new Map<string, number>();
@@ -74,7 +128,7 @@ export function useProjectFiltering({
         };
     }, [projects]);
 
-    const groupedProjects = useMemo<ProjectSection[]>(() => {
+    const groupedProjects = useMemo(() => {
         const visibleProjects = projects.filter((project) => !project.deletedAt);
         const sortedProjects = [...visibleProjects].sort((a, b) => {
             const orderA = Number.isFinite(a.order) ? a.order : 0;
@@ -93,34 +147,13 @@ export function useProjectFiltering({
         const areaFilteredProjects = tagFilteredProjects.filter((project) => (
             projectMatchesAreaFilter(project, selectedAreaFilter, areaById)
         ));
+        const { active, deferred, archived } = splitProjectsForMobileProjects(areaFilteredProjects);
 
-        const groups = new Map<string, Project[]>();
-        areaFilteredProjects.forEach((project) => {
-            const areaId = project.areaId && areaById.has(project.areaId) ? project.areaId : 'no-area';
-            if (!groups.has(areaId)) {
-                groups.set(areaId, []);
-            }
-            groups.get(areaId)?.push(project);
-        });
-
-        const sections = sortedAreas
-            .filter((area) => (groups.get(area.id) || []).length > 0)
-            .map((area) => ({
-                title: area.name,
-                areaId: area.id,
-                data: (groups.get(area.id) || []).map((project) => ({ type: 'project' as const, data: project })),
-            }));
-
-        const noAreaProjects = groups.get('no-area') || [];
-        if (noAreaProjects.length > 0) {
-            sections.push({
-                title: t('projects.noArea'),
-                areaId: 'no-area',
-                data: noAreaProjects.map((project) => ({ type: 'project' as const, data: project })),
-            });
-        }
-
-        return sections;
+        return {
+            groupedActiveProjects: groupProjectsIntoSections(active, sortedAreas, areaById, t),
+            groupedDeferredProjects: groupProjectsIntoSections(deferred, sortedAreas, areaById, t),
+            groupedArchivedProjects: groupProjectsIntoSections(archived, sortedAreas, areaById, t),
+        };
     }, [
         allTagsValue,
         areaById,
@@ -135,7 +168,9 @@ export function useProjectFiltering({
     return {
         areaUsage,
         focusedCount,
-        groupedProjects,
+        groupedActiveProjects: groupedProjects.groupedActiveProjects,
+        groupedDeferredProjects: groupedProjects.groupedDeferredProjects,
+        groupedArchivedProjects: groupedProjects.groupedArchivedProjects,
         projectTagOptions,
         tagFilterOptions,
     };

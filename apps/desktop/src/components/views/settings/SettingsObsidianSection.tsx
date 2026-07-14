@@ -1,18 +1,31 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { safeFormatDate } from '@mindwtr/core';
+import { ChevronDown, ChevronRight, ExternalLink } from 'lucide-react';
 
 import { cn } from '../../../lib/utils';
+
+const OBSIDIAN_INTEGRATION_GUIDE_URL = 'https://docs.mindwtr.app/power-users/obsidian';
+
+type DetectedObsidianVault = {
+    name: string;
+    path: string;
+};
 
 type Labels = {
     obsidianVault: string;
     obsidianVaultDesc: string;
     obsidianEnable: string;
+    obsidianDetectedVaults: string;
     obsidianVaultPath: string;
     obsidianVaultPathHint: string;
     obsidianScanFolders: string;
     obsidianScanFoldersHint: string;
     obsidianInboxFile: string;
     obsidianInboxFileHint: string;
+    obsidianDataview: string;
+    obsidianDataviewDesc: string;
+    obsidianDataviewMetadata: string;
+    obsidianDataviewMetadataHint: string;
     obsidianTaskNotes: string;
     obsidianTaskNotesDesc: string;
     obsidianTaskNotesIncludeArchived: string;
@@ -42,6 +55,7 @@ type SettingsObsidianSectionProps = {
     obsidianScanFoldersText: string;
     obsidianInboxFile: string;
     obsidianTaskNotesIncludeArchived: boolean;
+    obsidianDataviewMetadataEnabled: boolean;
     obsidianNewTaskFormat: 'auto' | 'inline' | 'tasknotes';
     obsidianLastScannedAt: string | null;
     obsidianHasVaultMarker: boolean | null;
@@ -55,6 +69,7 @@ type SettingsObsidianSectionProps = {
     onObsidianScanFoldersTextChange: (value: string) => void;
     onObsidianInboxFileChange: (value: string) => void;
     onObsidianTaskNotesIncludeArchivedChange: (value: boolean) => void;
+    onObsidianDataviewMetadataEnabledChange: (value: boolean) => void;
     onObsidianNewTaskFormatChange: (value: 'auto' | 'inline' | 'tasknotes') => void;
     onBrowseObsidianVault: () => Promise<void> | void;
     onSaveObsidian: () => Promise<void> | void;
@@ -70,6 +85,7 @@ export function SettingsObsidianSection({
     obsidianScanFoldersText,
     obsidianInboxFile,
     obsidianTaskNotesIncludeArchived,
+    obsidianDataviewMetadataEnabled,
     obsidianNewTaskFormat,
     obsidianLastScannedAt,
     obsidianHasVaultMarker,
@@ -83,6 +99,7 @@ export function SettingsObsidianSection({
     onObsidianScanFoldersTextChange,
     onObsidianInboxFileChange,
     onObsidianTaskNotesIncludeArchivedChange,
+    onObsidianDataviewMetadataEnabledChange,
     onObsidianNewTaskFormatChange,
     onBrowseObsidianVault,
     onSaveObsidian,
@@ -90,29 +107,61 @@ export function SettingsObsidianSection({
     onRescanObsidian,
 }: SettingsObsidianSectionProps) {
     const [open, setOpen] = useState(false);
+    const [detectedVaults, setDetectedVaults] = useState<DetectedObsidianVault[]>([]);
+
+    useEffect(() => {
+        // Obsidian publishes its vault registry, so known vaults are offered
+        // one-click instead of making everyone browse the filesystem.
+        if (!open || !isTauri) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const { invoke } = await import('@tauri-apps/api/core');
+                const vaults = await invoke<DetectedObsidianVault[]>('list_obsidian_vaults');
+                if (!cancelled) setDetectedVaults(Array.isArray(vaults) ? vaults : []);
+            } catch {
+                if (!cancelled) setDetectedVaults([]);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [open, isTauri]);
+    const selectableVaults = detectedVaults.filter((vault) => vault.path !== obsidianVaultPath);
 
     return (
         <div className="bg-card border border-border rounded-lg">
             <div className="p-4 flex items-start justify-between gap-4">
-                <button
-                    type="button"
-                    onClick={() => setOpen((prev) => !prev)}
-                    aria-expanded={open}
-                    className="flex-1 text-left flex items-center justify-between gap-4"
-                >
-                    <div className="min-w-0">
-                        <div className="text-sm font-medium">{t.obsidianVault}</div>
-                        <p className="text-xs text-muted-foreground mt-1">{t.obsidianVaultDesc}</p>
-                    </div>
-                    <span className="text-xs text-muted-foreground">{open ? '▾' : '▸'}</span>
-                </button>
+                <div className="min-w-0 flex-1 space-y-2">
+                    <button
+                        type="button"
+                        onClick={() => setOpen((prev) => !prev)}
+                        aria-expanded={open}
+                        className="w-full text-left flex items-center justify-between gap-4"
+                    >
+                        <div className="min-w-0">
+                            <div className="text-sm font-medium">{t.obsidianVault}</div>
+                            <p className="text-xs text-muted-foreground mt-1">{t.obsidianVaultDesc}</p>
+                        </div>
+                        {open ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                    </button>
+                    <a
+                        href={OBSIDIAN_INTEGRATION_GUIDE_URL}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
+                    >
+                        Obsidian integration guide
+                        <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                    </a>
+                </div>
                 <button
                     type="button"
                     role="switch"
                     aria-checked={obsidianEnabled}
                     onClick={() => onObsidianEnabledChange(!obsidianEnabled)}
                     className={cn(
-                        "relative inline-flex h-5 w-9 items-center rounded-full border transition-colors",
+                        "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
                         obsidianEnabled ? "bg-primary border-primary" : "bg-muted/50 border-border",
                     )}
                 >
@@ -145,6 +194,22 @@ export function SettingsObsidianSection({
                                 {t.browse}
                             </button>
                         </div>
+                        {selectableVaults.length > 0 && (
+                            <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-xs text-muted-foreground">{t.obsidianDetectedVaults}</span>
+                                {selectableVaults.map((vault) => (
+                                    <button
+                                        key={vault.path}
+                                        type="button"
+                                        title={vault.path}
+                                        onClick={() => onObsidianVaultPathChange(vault.path)}
+                                        className="text-xs px-2.5 py-1 rounded-full border border-border bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                                    >
+                                        {vault.name}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
                         <p className="text-xs text-muted-foreground">{t.obsidianVaultPathHint}</p>
                         {obsidianVaultWarning && (
                             <p className="text-xs text-amber-600">
@@ -179,6 +244,37 @@ export function SettingsObsidianSection({
 
                     <div className="space-y-3 rounded-lg border border-border/60 bg-muted/30 p-4">
                         <div className="space-y-1">
+                            <div className="text-sm font-medium">{t.obsidianDataview}</div>
+                            <p className="text-xs text-muted-foreground">{t.obsidianDataviewDesc}</p>
+                        </div>
+
+                        <div className="flex items-start justify-between gap-4">
+                            <div>
+                                <p className="text-sm font-medium">{t.obsidianDataviewMetadata}</p>
+                                <p className="text-xs text-muted-foreground">{t.obsidianDataviewMetadataHint}</p>
+                            </div>
+                            <button
+                                type="button"
+                                role="switch"
+                                aria-checked={obsidianDataviewMetadataEnabled}
+                                onClick={() => onObsidianDataviewMetadataEnabledChange(!obsidianDataviewMetadataEnabled)}
+                                className={cn(
+                                    'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
+                                    obsidianDataviewMetadataEnabled ? 'bg-primary border-primary' : 'bg-muted/50 border-border',
+                                )}
+                            >
+                                <span
+                                    className={cn(
+                                        'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                                        obsidianDataviewMetadataEnabled ? 'translate-x-4' : 'translate-x-1',
+                                    )}
+                                />
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="space-y-3 rounded-lg border border-border/60 bg-muted/30 p-4">
+                        <div className="space-y-1">
                             <div className="text-sm font-medium">{t.obsidianTaskNotes}</div>
                             <p className="text-xs text-muted-foreground">{t.obsidianTaskNotesDesc}</p>
                         </div>
@@ -194,7 +290,7 @@ export function SettingsObsidianSection({
                                 aria-checked={obsidianTaskNotesIncludeArchived}
                                 onClick={() => onObsidianTaskNotesIncludeArchivedChange(!obsidianTaskNotesIncludeArchived)}
                                 className={cn(
-                                    'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                                    'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
                                     obsidianTaskNotesIncludeArchived ? 'bg-primary border-primary' : 'bg-muted/50 border-border',
                                 )}
                             >

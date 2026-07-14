@@ -1,0 +1,4 @@
+- Suivez le temps passe par tache : les sessions Pomodoro liees ajoutent leurs minutes a un champ synchronise et modifiable (optionnel).
+- Supprimer, terminer et archiver utilisent desormais Annuler au lieu de confirmations ; la semaine du calendrier suit votre region.
+- Capturez plus vite avec le jeton %personne, les fichiers partages depuis d'autres apps, le raccourci en arriere-plan "Ajouter a la boite Mindwtr" et les widgets d'ecran verrouille.
+- Les checklists sont independantes des notes, les pieces jointes sont de vraies copies, les conflits de synchronisation sont listes clairement et de nouvelles protections evitent la perte de donnees.

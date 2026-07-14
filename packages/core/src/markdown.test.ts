@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
-    extractChecklistFromMarkdown,
     getActiveMarkdownReferenceQuery,
     insertMarkdownReferenceAtQuery,
     normalizeMarkdownInternalLinks,
+    parseInlineMarkdown,
     parseMarkdownReferenceHref,
     searchMarkdownReferences,
     stripMarkdown,
+    parsePastedChecklistItems,
 } from './markdown';
 import type { Project, Task } from './types';
 
@@ -38,13 +39,70 @@ describe('stripMarkdown', () => {
     });
 });
 
-describe('extractChecklistFromMarkdown', () => {
-    it('extracts markdown task list items', () => {
-        const input = '- [x] Done item\n[ ] Todo item\n+ [X] Another done\n- plain bullet';
-        expect(extractChecklistFromMarkdown(input)).toEqual([
-            { title: 'Done item', isCompleted: true },
-            { title: 'Todo item', isCompleted: false },
-            { title: 'Another done', isCompleted: true },
+describe('parseInlineMarkdown', () => {
+    it('autolinks raw safe URLs outside explicit markdown links', () => {
+        expect(parseInlineMarkdown('See https://example.com/docs.')).toEqual([
+            { type: 'text', text: 'See ' },
+            { type: 'link', text: 'https://example.com/docs', href: 'https://example.com/docs' },
+            { type: 'text', text: '.' },
+        ]);
+    });
+
+    it('keeps explicit markdown link labels and hrefs', () => {
+        expect(parseInlineMarkdown('See [docs](https://example.com/docs).')).toEqual([
+            { type: 'text', text: 'See ' },
+            { type: 'link', text: 'docs', href: 'https://example.com/docs' },
+            { type: 'text', text: '.' },
+        ]);
+    });
+
+    it('autolinks RFC 2392 message-id links', () => {
+        expect(parseInlineMarkdown('Reply later mid:960830.1639@example.com.')).toEqual([
+            { type: 'text', text: 'Reply later ' },
+            { type: 'link', text: 'mid:960830.1639@example.com', href: 'mid:960830.1639@example.com' },
+            { type: 'text', text: '.' },
+        ]);
+    });
+
+    it('keeps explicit RFC 2392 message-id link labels and hrefs', () => {
+        expect(parseInlineMarkdown('See [email](mid:960830.1639@example.com).')).toEqual([
+            { type: 'text', text: 'See ' },
+            { type: 'link', text: 'email', href: 'mid:960830.1639@example.com' },
+            { type: 'text', text: '.' },
+        ]);
+    });
+});
+
+describe('parsePastedChecklistItems', () => {
+    it('splits plain multi-line text into checklist items', () => {
+        expect(parsePastedChecklistItems('buy milk\nbuy bread\ncall mom')).toEqual([
+            { title: 'buy milk', isCompleted: false },
+            { title: 'buy bread', isCompleted: false },
+            { title: 'call mom', isCompleted: false },
+        ]);
+    });
+
+    it('strips bullet, numbered, and checkbox markers and keeps completion state', () => {
+        expect(parsePastedChecklistItems('- [x] done item\n* [ ] open item\n+ plain bullet\n1. numbered\n[X] bare checkbox')).toEqual([
+            { title: 'done item', isCompleted: true },
+            { title: 'open item', isCompleted: false },
+            { title: 'plain bullet', isCompleted: false },
+            { title: 'numbered', isCompleted: false },
+            { title: 'bare checkbox', isCompleted: true },
+        ]);
+    });
+
+    it('drops empty lines and marker-only lines, and handles CRLF', () => {
+        expect(parsePastedChecklistItems('first\r\n\r\n- [ ]\n   \nsecond')).toEqual([
+            { title: 'first', isCompleted: false },
+            { title: 'second', isCompleted: false },
+        ]);
+    });
+
+    it('does not treat hyphenated words as bullets', () => {
+        expect(parsePastedChecklistItems('-nospace\nreal item')).toEqual([
+            { title: '-nospace', isCompleted: false },
+            { title: 'real item', isCompleted: false },
         ]);
     });
 });
@@ -92,6 +150,13 @@ describe('markdown references', () => {
             end: value.length,
             query: 'la',
         });
+    });
+
+    it('does not detect the active [[ query when editor assist is disabled', () => {
+        const value = 'Link to [[la';
+        expect(
+            getActiveMarkdownReferenceQuery(value, { start: value.length, end: value.length }, { assist: false }),
+        ).toBeNull();
     });
 
     it('inserts a stable markdown reference token', () => {
@@ -146,6 +211,34 @@ describe('markdown references', () => {
                 title: 'Launch plan',
                 status: 'active',
                 updatedAt: '2026-04-09T10:00:00.000Z',
+            },
+        ]);
+    });
+
+    it('can exclude the current task from markdown reference results', () => {
+        const results = searchMarkdownReferences(
+            [
+                baseTask,
+                {
+                    ...baseTask,
+                    id: 'task-2',
+                    title: 'Quarterly review follow-up',
+                    updatedAt: '2026-04-11T10:00:00.000Z',
+                },
+            ],
+            [baseProject],
+            'quarterly',
+            8,
+            { excludeTaskIds: ['task-1'] },
+        );
+
+        expect(results).toEqual([
+            {
+                entityType: 'task',
+                id: 'task-2',
+                title: 'Quarterly review follow-up',
+                status: 'next',
+                updatedAt: '2026-04-11T10:00:00.000Z',
             },
         ]);
     });

@@ -1,9 +1,13 @@
 import {
     Task,
+    type Recurrence,
+    type RecurrenceByDay,
     RecurrenceRule,
     type RecurrenceStrategy,
     type RecurrenceWeekday,
     buildRRuleString,
+    getRecurrenceCountValue,
+    getRecurrenceUntilValue,
     parseRRuleString,
     WEEKDAY_ORDER,
 } from '@mindwtr/core';
@@ -27,10 +31,37 @@ export const getRecurrenceStrategyValue = (recurrence: Task['recurrence']): Recu
 
 export const buildRecurrenceValue = (
     rule: RecurrenceRule | '',
-    strategy: RecurrenceStrategy
+    strategy: RecurrenceStrategy,
+    options: {
+        byDay?: RecurrenceByDay[];
+        byMonthDay?: number[];
+        count?: number;
+        until?: string;
+        completedOccurrences?: number;
+        rrule?: string;
+    } = {}
 ): Task['recurrence'] | undefined => {
     if (!rule) return undefined;
-    return { rule, strategy };
+    const recurrence: Recurrence = { rule, strategy };
+    if (options.byDay?.length) {
+        recurrence.byDay = options.byDay;
+    }
+    if (options.byMonthDay?.length) {
+        recurrence.byMonthDay = options.byMonthDay;
+    }
+    if (options.count) {
+        recurrence.count = options.count;
+    }
+    if (options.until) {
+        recurrence.until = options.until;
+    }
+    if (typeof options.completedOccurrences === 'number') {
+        recurrence.completedOccurrences = options.completedOccurrences;
+    }
+    if (options.rrule) {
+        recurrence.rrule = options.rrule;
+    }
+    return recurrence;
 };
 
 export const getRecurrenceByDayValue = (recurrence: Task['recurrence']): RecurrenceWeekday[] => {
@@ -47,7 +78,14 @@ export const getRecurrenceByDayValue = (recurrence: Task['recurrence']): Recurre
 
 export const getRecurrenceRRuleValue = (recurrence: Task['recurrence']): string => {
     if (!recurrence || typeof recurrence === 'string') return '';
+    const count = getRecurrenceCountValue(recurrence);
+    const until = getRecurrenceUntilValue(recurrence);
     if (recurrence.rrule) return recurrence.rrule;
-    if (recurrence.byDay?.length) return buildRRuleString(recurrence.rule, recurrence.byDay);
-    return buildRRuleString(recurrence.rule);
+    if (recurrence.byDay?.length) {
+        return buildRRuleString(recurrence.rule, recurrence.byDay, undefined, { count, until });
+    }
+    if (recurrence.byMonthDay?.length) {
+        return buildRRuleString(recurrence.rule, undefined, undefined, { byMonthDay: recurrence.byMonthDay, count, until });
+    }
+    return buildRRuleString(recurrence.rule, undefined, undefined, { count, until });
 };

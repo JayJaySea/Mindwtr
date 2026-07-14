@@ -17,14 +17,14 @@ import type {
     TaskStatus,
     TimeEstimate,
     MarkdownSelection,
-    MarkdownToolbarActionId,
     MarkdownToolbarResult,
+    Person,
 } from '@mindwtr/core';
 import type { ThemeColors } from '@/hooks/use-theme-colors';
 
 import type { SetEditedTask } from './use-task-edit-state';
 
-export type ShowDatePickerMode = 'start' | 'start-time' | 'due' | 'due-time' | 'review' | null;
+export type ShowDatePickerMode = 'start' | 'start-time' | 'due' | 'due-time' | 'review' | 'recurrence-end' | null;
 
 export type PickerOption<T extends string> = {
     value: T | '';
@@ -40,29 +40,35 @@ export type TaskEditFieldRendererProps = {
     fieldId: TaskEditorFieldId;
     addFileAttachment: () => void | Promise<void>;
     addImageAttachment: () => void | Promise<void>;
+    applyAssignedToSuggestion: (value: string) => void;
     applyContextSuggestion: (token: string) => void;
     applyTagSuggestion: (token: string) => void;
     areas: Area[];
+    assignedToSuggestions: string[];
     availableStatusOptions: TaskStatus[];
+    applyQuickDate: (mode: 'start' | 'due' | 'review', selectedDate: Date | null) => void;
     commitContextDraft: () => void;
     commitTagDraft: () => void;
     contextInputDraft: string;
     contextTokenSuggestions: string[];
+    createAssignedToPerson: (name: string) => Promise<Person | null>;
     customWeekdays: RecurrenceWeekday[];
     dailyInterval: number;
     descriptionDraft: string;
     descriptionInputRef: React.RefObject<TextInput | null>;
     descriptionSelection: MarkdownSelection;
+    descriptionSelectionRestorePending: boolean;
     setDescriptionSelection: (selection: MarkdownSelection) => void;
-    descriptionUndoDepth: number;
+    descriptionToolbarInteractionUntilRef: React.MutableRefObject<number>;
     isDescriptionInputFocused: boolean;
     setIsDescriptionInputFocused: React.Dispatch<React.SetStateAction<boolean>>;
     handleDescriptionChange: (text: string) => void;
-    handleDescriptionUndo: () => MarkdownSelection | undefined;
-    handleDescriptionApplyAction: (actionId: MarkdownToolbarActionId, selection: MarkdownSelection) => MarkdownToolbarResult;
+    handleDescriptionKeyPress: (event: any) => void;
     applyDescriptionResult: (result: MarkdownToolbarResult) => void;
+    applyChecklistUpdate: (checklist: NonNullable<Task['checklist']>) => void;
     openDescriptionExpandedEditor: () => void;
     downloadAttachment: (attachment: Attachment) => void | Promise<void>;
+    editLinkAttachment: (attachment: Attachment) => void | Promise<void>;
     editedTask: Partial<Task>;
     formatDate: (dateStr?: string) => string;
     formatDueDate: (dateStr?: string) => string;
@@ -75,6 +81,7 @@ export type TaskEditFieldRendererProps = {
     monthlyPattern: 'date' | 'custom';
     onDateChange: (event: DateTimePickerEvent, selectedDate?: Date) => void;
     openAttachment: (attachment: Attachment) => void | Promise<void>;
+    openAddLinkAttachment: () => void;
     openCustomRecurrence: () => void;
     pendingDueDate: Date | null;
     pendingStartDate: Date | null;
@@ -88,6 +95,7 @@ export type TaskEditFieldRendererProps = {
     recurrenceRuleValue: RecurrenceRule | '';
     recurrenceStrategyValue: RecurrenceStrategy;
     recurrenceWeekdayButtons: WeekdayButton[];
+    requestStatusChange: (status: TaskStatus) => void;
     removeAttachment: (attachmentId: string) => void | Promise<void>;
     selectedContextTokens: Set<string>;
     selectedTagTokens: Set<string>;
@@ -112,6 +120,7 @@ export type TaskEditFieldRendererProps = {
     tc: ThemeColors;
     timeEstimateOptions: PickerOption<TimeEstimate>[];
     timeEstimatesEnabled: boolean;
+    timeSpentEnabled: boolean;
     titleDraft: string;
     toggleQuickContextToken: (token: string) => void;
     toggleQuickTagToken: (token: string) => void;

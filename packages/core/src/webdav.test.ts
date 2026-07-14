@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { webdavGetJson } from './webdav';
+import { __webdavTestUtils, webdavGetJson, webdavHeadFile, webdavPutFile, webdavPutJson } from './webdav';
+import { consoleLogger, setLogger, type LogPayload } from './logger';
+
+const makeResponse = (overrides: Partial<Response> & { status: number; ok: boolean }): Response => ({
+    statusText: '',
+    headers: {
+        get: () => null,
+    } as unknown as Headers,
+    text: async () => '',
+    ...overrides,
+}) as Response;
 
 describe('webdav http helpers', () => {
     it('allows HTTP for private IP targets', async () => {
@@ -17,11 +27,46 @@ describe('webdav http helpers', () => {
         expect(fetcher).toHaveBeenCalledOnce();
     });
 
+    it('allows HTTP for local hostnames', async () => {
+        const fetcher = vi.fn(
+            async () =>
+                ({
+                    ok: false,
+                    status: 404,
+                    statusText: 'Not Found',
+                    text: async () => '',
+                }) as Response,
+        );
+
+        await expect(webdavGetJson('http://nas.local/dav/data.json', { fetcher })).resolves.toBeNull();
+        expect(fetcher).toHaveBeenCalledOnce();
+    });
+
     it('rejects HTTP for public targets', async () => {
         const fetcher = vi.fn();
         await expect(webdavGetJson('http://8.8.8.8/dav/data.json', { fetcher })).rejects.toThrow(
             'WebDAV requires HTTPS for public URLs',
         );
+        expect(fetcher).not.toHaveBeenCalled();
+    });
+
+    it('rejects explicit insecure HTTP overrides for public targets', async () => {
+        const fetcher = vi.fn(
+            async () =>
+                ({
+                    ok: false,
+                    status: 404,
+                    statusText: 'Not Found',
+                    text: async () => '',
+                }) as Response,
+        );
+
+        await expect(
+            webdavGetJson('http://8.8.8.8/dav/data.json', {
+                fetcher,
+                allowInsecureHttp: true,
+            }),
+        ).rejects.toThrow('WebDAV requires HTTPS for public URLs');
         expect(fetcher).not.toHaveBeenCalled();
     });
 
@@ -51,5 +96,323 @@ describe('webdav http helpers', () => {
         );
 
         await expect(webdavGetJson<{ ok: boolean }>('https://example.com/data.json', { fetcher })).resolves.toEqual({ ok: true });
+    });
+
+    it('bypasses HTTP caches for JSON and metadata reads without URL cache busting', async () => {
+        const getFetcher = vi.fn(
+            async () =>
+                ({
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    text: async () => '{"ok":true}',
+                }) as Response,
+        );
+
+        await expect(webdavGetJson<{ ok: boolean }>('https://example.com/data.json', { fetcher: getFetcher })).resolves.toEqual({ ok: true });
+        expect(getFetcher.mock.calls[0]?.[1]).toMatchObject({
+            method: 'GET',
+            headers: {
+                'Cache-Control': 'no-cache',
+                Pragma: 'no-cache',
+            },
+        });
+        expect(getFetcher.mock.calls[0]?.[1]).not.toHaveProperty('cache');
+
+        const headFetcher = vi.fn(
+            async () =>
+                ({
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    headers: {
+                        get: (name: string) => ({
+                            etag: '"rev-1"',
+                        }[name.toLowerCase()] ?? null),
+                    },
+                    text: async () => '',
+                }) as unknown as Response,
+        );
+
+        await expect(webdavHeadFile('https://example.com/data.json', { fetcher: headFetcher })).resolves.toMatchObject({
+            exists: true,
+            fingerprint: 'webdav:v1:etag="rev-1"',
+        });
+        expect(headFetcher.mock.calls[0]?.[1]).toMatchObject({
+            method: 'HEAD',
+            headers: {
+                'Cache-Control': 'no-cache',
+                Pragma: 'no-cache',
+            },
+        });
+        expect(headFetcher.mock.calls[0]?.[1]).not.toHaveProperty('cache');
+    });
+
+    it('reads HEAD metadata for fast sync checks', async () => {
+        const fetcher = vi.fn(
+            async () =>
+                ({
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    headers: {
+                        get: (name: string) => ({
+                            etag: '"rev-1"',
+                            'last-modified': 'Thu, 07 May 2026 10:00:00 GMT',
+                            'content-length': '42',
+                        }[name.toLowerCase()] ?? null),
+                    },
+                    text: async () => '',
+                }) as unknown as Response,
+        );
+
+        await expect(webdavHeadFile('https://example.com/data.json', { fetcher })).resolves.toMatchObject({
+            exists: true,
+            fingerprint: 'webdav:v1:etag="rev-1"',
+            etag: '"rev-1"',
+            contentLength: '42',
+        });
+        expect(fetcher.mock.calls[0]?.[1]?.method).toBe('HEAD');
+    });
+
+    it('falls back to last-modified and length for ETag-less fast sync checks with a warning', async () => {
+        __webdavTestUtils.resetWeakFingerprintWarnings();
+        const fetcher = vi.fn(
+            async () =>
+                ({
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    headers: {
+                        get: (name: string) => ({
+                            'last-modified': 'Thu, 07 May 2026 10:00:00 GMT',
+                            'content-length': '42',
+                        }[name.toLowerCase()] ?? null),
+                    },
+                    text: async () => '',
+                }) as unknown as Response,
+        );
+        const logs: LogPayload[] = [];
+        setLogger((payload) => logs.push(payload));
+
+        try {
+            await expect(webdavHeadFile('https://example.com/data.json', { fetcher })).resolves.toMatchObject({
+                exists: true,
+                fingerprint: 'webdav:v1:mtime=Thu, 07 May 2026 10:00:00 GMT:len=42',
+                etag: null,
+                lastModified: 'Thu, 07 May 2026 10:00:00 GMT',
+                contentLength: '42',
+            });
+            await webdavHeadFile('https://example.com/data.json', { fetcher });
+        } finally {
+            setLogger(consoleLogger);
+            __webdavTestUtils.resetWeakFingerprintWarnings();
+        }
+
+        expect(logs.filter((entry) => entry.level === 'warn' && entry.message.includes('did not provide ETag'))).toHaveLength(1);
+    });
+
+    it('warns once per WebDAV URL when using weak ETag-less fingerprints', async () => {
+        __webdavTestUtils.resetWeakFingerprintWarnings();
+        const fetcher = vi.fn(
+            async () =>
+                ({
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    headers: {
+                        get: (name: string) => ({
+                            'last-modified': 'Thu, 07 May 2026 10:00:00 GMT',
+                            'content-length': '42',
+                        }[name.toLowerCase()] ?? null),
+                    },
+                    text: async () => '',
+                }) as unknown as Response,
+        );
+        const logs: LogPayload[] = [];
+        setLogger((payload) => logs.push(payload));
+
+        try {
+            await webdavHeadFile('https://EXAMPLE.com/alice/data.json/', { fetcher });
+            await webdavHeadFile('https://example.com/alice/data.json', { fetcher });
+            await webdavHeadFile('https://example.com/bob/data.json', { fetcher });
+        } finally {
+            setLogger(consoleLogger);
+            __webdavTestUtils.resetWeakFingerprintWarnings();
+        }
+
+        expect(logs.filter((entry) => entry.level === 'warn' && entry.message.includes('did not provide ETag'))).toHaveLength(2);
+    });
+
+    it('can disable weak ETag-less fast sync fingerprints', async () => {
+        const fetcher = vi.fn(
+            async () =>
+                ({
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    headers: {
+                        get: (name: string) => ({
+                            'last-modified': 'Thu, 07 May 2026 10:00:00 GMT',
+                            'content-length': '42',
+                        }[name.toLowerCase()] ?? null),
+                    },
+                    text: async () => '',
+                }) as unknown as Response,
+        );
+
+        await expect(webdavHeadFile('https://example.com/data.json', { fetcher, allowWeakFingerprint: false })).resolves.toMatchObject({
+            exists: true,
+            fingerprint: null,
+            etag: null,
+            lastModified: 'Thu, 07 May 2026 10:00:00 GMT',
+            contentLength: '42',
+        });
+    });
+
+    it('creates missing parent collections before retrying a JSON PUT', async () => {
+        const fetcher = vi
+            .fn()
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 409, statusText: 'Conflict', text: async () => 'Conflict' }))
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 409, statusText: 'Conflict' }))
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 404, statusText: 'Not Found' }))
+            .mockResolvedValueOnce(makeResponse({ ok: true, status: 201, statusText: 'Created' }))
+            .mockResolvedValueOnce(makeResponse({ ok: true, status: 201, statusText: 'Created' }))
+            .mockResolvedValueOnce(makeResponse({ ok: true, status: 201, statusText: 'Created' }));
+
+        await expect(
+            webdavPutJson('https://example.com/remote.php/dav/files/user/mindwtr/nested/data.json', { ok: true }, { fetcher }),
+        ).resolves.toMatchObject({ exists: true, fingerprint: null });
+
+        expect(fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({ 'X-NC-WebDAV-AutoMkcol': '1' });
+        expect(fetcher.mock.calls.map(([url, init]) => [url, init?.method])).toEqual([
+            ['https://example.com/remote.php/dav/files/user/mindwtr/nested/data.json', 'PUT'],
+            ['https://example.com/remote.php/dav/files/user/mindwtr/nested/', 'MKCOL'],
+            ['https://example.com/remote.php/dav/files/user/mindwtr/nested/', 'PROPFIND'],
+            ['https://example.com/remote.php/dav/files/user/mindwtr/', 'MKCOL'],
+            ['https://example.com/remote.php/dav/files/user/mindwtr/nested/', 'MKCOL'],
+            ['https://example.com/remote.php/dav/files/user/mindwtr/nested/data.json', 'PUT'],
+        ]);
+    });
+
+    it('returns JSON PUT response metadata for fast sync recording', async () => {
+        const fetcher = vi.fn().mockResolvedValueOnce(makeResponse({
+            ok: true,
+            status: 204,
+            statusText: 'No Content',
+            headers: {
+                get: (name: string) => ({
+                    etag: '"put-rev"',
+                }[name.toLowerCase()] ?? null),
+            } as unknown as Headers,
+        }));
+
+        await expect(
+            webdavPutJson('https://example.com/mindwtr/data.json', { ok: true }, { fetcher }),
+        ).resolves.toMatchObject({
+            exists: true,
+            fingerprint: 'webdav:v1:etag="put-rev"',
+            etag: '"put-rev"',
+        });
+    });
+
+    it('creates missing parent collections before retrying a file PUT', async () => {
+        const fetcher = vi
+            .fn()
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 409, statusText: 'Conflict' }))
+            .mockResolvedValueOnce(makeResponse({ ok: true, status: 201, statusText: 'Created' }))
+            .mockResolvedValueOnce(makeResponse({ ok: true, status: 201, statusText: 'Created' }));
+
+        await expect(
+            webdavPutFile(
+                'https://example.com/remote.php/dav/files/user/mindwtr/attachments/doc.txt',
+                new Uint8Array([1, 2, 3]),
+                'text/plain',
+                { fetcher },
+            ),
+        ).resolves.toBeUndefined();
+
+        expect(fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({ 'X-NC-WebDAV-AutoMkcol': '1' });
+        expect(fetcher.mock.calls.map(([url, init]) => [url, init?.method])).toEqual([
+            ['https://example.com/remote.php/dav/files/user/mindwtr/attachments/doc.txt', 'PUT'],
+            ['https://example.com/remote.php/dav/files/user/mindwtr/attachments/', 'MKCOL'],
+            ['https://example.com/remote.php/dav/files/user/mindwtr/attachments/doc.txt', 'PUT'],
+        ]);
+    });
+
+    it('recovers when a WebDAV server reports 409 for MKCOL on an existing parent collection', async () => {
+        const fetcher = vi
+            .fn()
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 409, statusText: 'Conflict' }))
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 409, statusText: 'Conflict' }))
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 404, statusText: 'Not Found' }))
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 409, statusText: 'Conflict' }))
+            .mockResolvedValueOnce(makeResponse({ ok: true, status: 207, statusText: 'Multi-Status' }))
+            .mockResolvedValueOnce(makeResponse({ ok: true, status: 201, statusText: 'Created' }))
+            .mockResolvedValueOnce(makeResponse({ ok: true, status: 201, statusText: 'Created' }));
+
+        await expect(
+            webdavPutJson('https://example.com/remote.php/dav/files/user/mindwtr/data.json', { ok: true }, { fetcher }),
+        ).resolves.toMatchObject({ exists: true, fingerprint: null });
+
+        expect(fetcher.mock.calls.map(([url, init]) => [url, init?.method])).toEqual([
+            ['https://example.com/remote.php/dav/files/user/mindwtr/data.json', 'PUT'],
+            ['https://example.com/remote.php/dav/files/user/mindwtr/', 'MKCOL'],
+            ['https://example.com/remote.php/dav/files/user/mindwtr/', 'PROPFIND'],
+            ['https://example.com/remote.php/dav/files/user/', 'MKCOL'],
+            ['https://example.com/remote.php/dav/files/user/', 'PROPFIND'],
+            ['https://example.com/remote.php/dav/files/user/mindwtr/', 'MKCOL'],
+            ['https://example.com/remote.php/dav/files/user/mindwtr/data.json', 'PUT'],
+        ]);
+        expect(fetcher.mock.calls[2]?.[1]?.headers).toMatchObject({ Depth: '0' });
+        expect(fetcher.mock.calls[4]?.[1]?.headers).toMatchObject({ Depth: '0' });
+    });
+
+    it('retries a JSON PUT after an unverified MKCOL conflict', async () => {
+        const fetcher = vi
+            .fn()
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 409, statusText: 'Conflict', text: async () => 'Conflict' }))
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 409, statusText: 'Conflict' }))
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 403, statusText: 'Forbidden' }))
+            .mockResolvedValueOnce(makeResponse({ ok: true, status: 201, statusText: 'Created' }));
+
+        await expect(
+            webdavPutJson('https://example.com/mindwtr/data.json', { ok: true }, { fetcher }),
+        ).resolves.toMatchObject({ exists: true, fingerprint: null });
+
+        expect(fetcher.mock.calls.map(([url, init]) => [url, init?.method])).toEqual([
+            ['https://example.com/mindwtr/data.json', 'PUT'],
+            ['https://example.com/mindwtr/', 'MKCOL'],
+            ['https://example.com/mindwtr/', 'PROPFIND'],
+            ['https://example.com/mindwtr/data.json', 'PUT'],
+        ]);
+    });
+
+    it('reports the final PUT failure after an unverified MKCOL conflict', async () => {
+        const fetcher = vi
+            .fn()
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 409, statusText: 'Conflict', text: async () => 'Conflict' }))
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 409, statusText: 'Conflict' }))
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 403, statusText: 'Forbidden' }))
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 409, statusText: 'Conflict', text: async () => 'Conflict' }));
+
+        await expect(
+            webdavPutJson('https://example.com/mindwtr/data.json', { ok: true }, { fetcher }),
+        ).rejects.toThrow('WebDAV PUT failed (409): Conflict');
+    });
+
+    it('caps parent MKCOL creation depth for pathological nested paths', async () => {
+        const nestedSegments = Array.from({ length: 40 }, (_, index) => `level-${index + 1}`).join('/');
+        const url = `https://example.com/remote.php/dav/files/user/mindwtr/${nestedSegments}/data.json`;
+        const fetcher = vi
+            .fn()
+            .mockResolvedValueOnce(makeResponse({ ok: false, status: 409, statusText: 'Conflict' }))
+            .mockImplementation(async () => makeResponse({ ok: false, status: 409, statusText: 'Conflict' }));
+
+        await expect(webdavPutJson(url, { ok: true }, { fetcher })).rejects.toThrow(
+            'WebDAV MKCOL failed (max depth exceeded)',
+        );
+
+        expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'MKCOL')).toHaveLength(33);
     });
 });

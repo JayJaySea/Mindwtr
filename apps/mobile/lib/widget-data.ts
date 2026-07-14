@@ -6,10 +6,13 @@ import {
     safeParseDueDate,
     SUPPORTED_LANGUAGES,
     getTranslationsSync,
+    getSequentialFirstTaskIds,
+    isTaskInActiveProject,
     loadTranslations,
     sortTasksBy,
 } from '@mindwtr/core';
 import type { ColorProp } from 'react-native-android-widget';
+import { THEME_PRESETS, type ThemePresetName } from '../constants/theme-presets';
 
 export const WIDGET_DATA_KEY = 'mindwtr-data';
 export const WIDGET_LANGUAGE_KEY = 'mindwtr-language';
@@ -18,11 +21,14 @@ export const IOS_WIDGET_PAYLOAD_KEY = 'mindwtr-ios-widget-payload';
 export const IOS_WIDGET_PAYLOAD_KEY_SMALL = 'mindwtr-ios-widget-payload-small';
 export const IOS_WIDGET_PAYLOAD_KEY_MEDIUM = 'mindwtr-ios-widget-payload-medium';
 export const IOS_WIDGET_PAYLOAD_KEY_LARGE = 'mindwtr-ios-widget-payload-large';
+export const IOS_WIDGET_PAYLOAD_KEY_EXTRA_LARGE = 'mindwtr-ios-widget-payload-extra-large';
 export const IOS_WIDGET_KIND = 'MindwtrTasksWidget';
+export const IOS_WIDGET_LOCK_KIND = 'MindwtrFocusLockWidget';
 export const WIDGET_FOCUS_URI = 'mindwtr:///focus';
 export const WIDGET_QUICK_CAPTURE_URI = 'mindwtr:///capture-quick?mode=text';
 const DARK_THEME_MODES = new Set(['dark', 'material3-dark', 'nord', 'oled']);
-const LIGHT_THEME_MODES = new Set(['light', 'material3-light', 'eink', 'sepia']);
+const LIGHT_THEME_MODES = new Set(['light', 'material3-light', 'eink']);
+type ConcreteThemePresetName = Exclude<ThemePresetName, 'default'>;
 
 export type WidgetSystemColorScheme = 'light' | 'dark' | null | undefined;
 
@@ -47,6 +53,7 @@ export interface TasksWidgetPayload {
     subtitle: string;
     inboxLabel: string;
     inboxCount: number;
+    focusedCount: number;
     items: WidgetTaskItem[];
     emptyMessage: string;
     captureLabel: string;
@@ -63,47 +70,6 @@ const resolveWidgetTaskSort = (data: AppData): TaskSortBy => {
     return TASK_SORT_OPTIONS.includes(sortBy as TaskSortBy) ? (sortBy as TaskSortBy) : 'default';
 };
 
-const buildSequentialFirstTaskIds = (
-    tasks: AppData['tasks'],
-    sequentialProjectIds: Set<string>
-): Set<string> => {
-    if (sequentialProjectIds.size === 0) return new Set<string>();
-
-    const tasksByProject = new Map<string, AppData['tasks']>();
-    tasks.forEach((task) => {
-        if (!task.projectId) return;
-        if (!sequentialProjectIds.has(task.projectId)) return;
-        const list = tasksByProject.get(task.projectId) ?? [];
-        list.push(task);
-        tasksByProject.set(task.projectId, list);
-    });
-
-    const firstIds = new Set<string>();
-    tasksByProject.forEach((projectTasks) => {
-        const hasOrder = projectTasks.some((task) => Number.isFinite(task.order) || Number.isFinite(task.orderNum));
-        let firstId: string | null = null;
-        let bestKey = Number.POSITIVE_INFINITY;
-
-        projectTasks.forEach((task) => {
-            const orderKey = Number.isFinite(task.order)
-                ? (task.order as number)
-                : Number.isFinite(task.orderNum)
-                    ? (task.orderNum as number)
-                    : Number.POSITIVE_INFINITY;
-            const createdKey = safeParseDate(task.createdAt)?.getTime() ?? Number.POSITIVE_INFINITY;
-            const key = hasOrder ? orderKey : createdKey;
-            if (!firstId || key < bestKey) {
-                firstId = task.id;
-                bestKey = key;
-            }
-        });
-
-        if (firstId) firstIds.add(firstId);
-    });
-
-    return firstIds;
-};
-
 export function resolveWidgetLanguage(saved: string | null, setting?: string): Language {
     const candidate = setting && setting !== 'system' ? setting : saved;
     if (candidate && SUPPORTED_LANGUAGES.includes(candidate as Language)) return candidate as Language;
@@ -115,6 +81,19 @@ const resolveWidgetPalette = (
     systemColorScheme: WidgetSystemColorScheme,
 ): WidgetPalette => {
     const normalizedMode = (themeMode || '').toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(THEME_PRESETS, normalizedMode)) {
+        const preset = THEME_PRESETS[normalizedMode as ConcreteThemePresetName];
+        return {
+            background: preset.cardBg,
+            card: preset.taskItemBg,
+            border: preset.border,
+            text: preset.text,
+            mutedText: preset.secondaryText,
+            accent: preset.tint,
+            onAccent: preset.onTint,
+        };
+    }
+
     const isDark = DARK_THEME_MODES.has(normalizedMode)
         ? true
         : LIGHT_THEME_MODES.has(normalizedMode)
@@ -153,6 +132,7 @@ export function buildWidgetPayload(
     const tr = getTranslationsSync(language);
     const tasks = data.tasks || [];
     const projects = data.projects || [];
+    const projectById = new Map(projects.map((project) => [project.id, project]));
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
     const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
@@ -164,27 +144,24 @@ export function buildWidgetPayload(
     const sequentialProjectIds = new Set(
         projects.filter((project) => project.isSequential && !project.deletedAt).map((project) => project.id)
     );
+    const sequentialWithinSectionProjectIds = new Set(
+        projects
+            .filter((project) => project.isSequential && project.sequentialScope === 'section' && !project.deletedAt)
+            .map((project) => project.id)
+    );
 
     const activeTasks = tasks.filter((task) => {
         if (task.deletedAt) return false;
         if (task.status === 'archived' || task.status === 'done' || task.status === 'reference') return false;
+        if (!isTaskInActiveProject(task, projectById)) return false;
         return true;
     });
 
-    const sequentialFirstTaskIds = buildSequentialFirstTaskIds(activeTasks, sequentialProjectIds);
-    const isSequentialBlocked = (task: AppData['tasks'][number]) => {
-        if (!task.projectId) return false;
-        if (!sequentialProjectIds.has(task.projectId)) return false;
-        return !sequentialFirstTaskIds.has(task.id);
-    };
     const isPlannedForFuture = (task: AppData['tasks'][number]) => {
         const start = safeParseDate(task.startTime);
         return Boolean(start && start > endOfToday);
     };
-
-    const scheduleTasks = activeTasks.filter((task) => {
-        if (task.status !== 'next') return false;
-        if (isSequentialBlocked(task)) return false;
+    const isScheduleCandidate = (task: AppData['tasks'][number]) => {
         const due = safeParseDueDate(task.dueDate);
         const start = safeParseDate(task.startTime);
         const startsToday = Boolean(
@@ -193,6 +170,26 @@ export function buildWidgetPayload(
             && start <= endOfToday
         );
         return Boolean(due && due <= endOfToday) || startsToday;
+    };
+
+    const sequentialFirstTaskIds = getSequentialFirstTaskIds(
+        activeTasks.filter((task) => (
+            task.status === 'next'
+            && (!isPlannedForFuture(task) || isScheduleCandidate(task))
+        )),
+        sequentialProjectIds,
+        { sectionScopedProjectIds: sequentialWithinSectionProjectIds },
+    );
+    const isSequentialBlocked = (task: AppData['tasks'][number]) => {
+        if (!task.projectId) return false;
+        if (!sequentialProjectIds.has(task.projectId)) return false;
+        return !sequentialFirstTaskIds.has(task.id);
+    };
+
+    const scheduleTasks = activeTasks.filter((task) => {
+        if (task.status !== 'next') return false;
+        if (isSequentialBlocked(task)) return false;
+        return isScheduleCandidate(task);
     });
 
     const scheduleTaskIds = new Set(scheduleTasks.map((task) => task.id));
@@ -203,8 +200,22 @@ export function buildWidgetPayload(
         return !scheduleTaskIds.has(task.id);
     });
 
-    const focusTasks = [...scheduleTasks, ...nextTasks];
-    const listSource = sortTasksBy(focusTasks, resolveWidgetTaskSort(data));
+    // Starred tasks mirror core's focusedTasks (activeTasks already excludes
+    // done/reference/archived/deleted and inactive projects) and lead the list,
+    // so "current focused task" surfaces (lock widget, list head) show the task
+    // the user actually starred — including starred waiting/someday tasks,
+    // which keep their status by design.
+    const starredTasks = activeTasks.filter((task) => (
+        task.isFocusedToday === true
+        && (!isPlannedForFuture(task) || isScheduleCandidate(task))
+    ));
+    const starredTaskIds = new Set(starredTasks.map((task) => task.id));
+    const focusTasks = [...scheduleTasks, ...nextTasks].filter((task) => !starredTaskIds.has(task.id));
+    const widgetSort = resolveWidgetTaskSort(data);
+    const listSource = [
+        ...sortTasksBy(starredTasks, widgetSort),
+        ...sortTasksBy(focusTasks, widgetSort),
+    ];
 
     const maxItems = Number.isFinite(options?.maxItems)
         ? Math.max(1, Math.floor(options?.maxItems as number))
@@ -228,8 +239,9 @@ export function buildWidgetPayload(
         subtitle: subtitleParts.join(' · '),
         inboxLabel: tr['nav.inbox'] ?? 'Inbox',
         inboxCount,
+        focusedCount: starredTasks.length,
         items,
-        emptyMessage: tr['agenda.noTasks'] ?? 'No tasks',
+        emptyMessage: tr['agenda.allClear'] ?? 'All clear',
         captureLabel: tr['widget.capture'] ?? 'Quick capture',
         focusUri: WIDGET_FOCUS_URI,
         quickCaptureUri: WIDGET_QUICK_CAPTURE_URI,

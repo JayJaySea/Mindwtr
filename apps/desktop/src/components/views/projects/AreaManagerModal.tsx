@@ -1,8 +1,9 @@
 import { DndContext, type DragEndEvent, closestCenter } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
-import type { Area, StoreActionResult } from '@mindwtr/core';
+import { translateWithFallback, type Area, type StoreActionResult } from '@mindwtr/core';
 import type { ChangeEventHandler, MouseEventHandler } from 'react';
 import { X } from 'lucide-react';
+import { ModalPortal } from '../../ModalPortal';
 import { SortableAreaRow } from './SortableRows';
 import { AreaColorPicker } from './AreaColorPicker';
 
@@ -45,8 +46,7 @@ export function AreaManagerModal({
         event.stopPropagation();
     };
     const resolveText = (key: string, fallback: string) => {
-        const value = t(key);
-        return value === key ? fallback : value;
+        return translateWithFallback(t, key, fallback);
     };
     const manageAreasLabel = resolveText('areas.manage', 'Manage Areas');
     const newAreaLabel = resolveText('areas.new', 'New Area');
@@ -54,6 +54,7 @@ export function AreaManagerModal({
     const loadingLabel = resolveText('common.loading', 'Loading...');
 
     return (
+        <ModalPortal>
         <div
             className="fixed inset-0 bg-black/50 flex items-start justify-center pt-[15vh] z-50"
             role="dialog"
@@ -61,7 +62,7 @@ export function AreaManagerModal({
             onClick={onClose}
         >
             <div
-                className="w-full max-w-lg bg-popover text-popover-foreground rounded-xl border shadow-2xl overflow-hidden flex flex-col"
+                className="w-full max-w-lg bg-popover text-popover-foreground rounded-xl border shadow-2xl overflow-visible flex flex-col"
                 onClick={stopPropagation}
             >
                 <div className="px-4 py-3 border-b flex items-center justify-between gap-2">
@@ -147,5 +148,6 @@ export function AreaManagerModal({
                 </div>
             </div>
         </div>
+        </ModalPortal>
     );
 }

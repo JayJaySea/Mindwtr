@@ -1,8 +1,9 @@
 import { Profiler } from 'react';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { act, render, fireEvent } from '@testing-library/react';
+import { act, render, fireEvent, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { TaskItem } from '../components/TaskItem';
-import { Project, Task, configureDateFormatting, safeFormatDate, useTaskStore } from '@mindwtr/core';
+import { Area, Project, Task, configureDateFormatting, safeFormatDate, useTaskStore } from '@mindwtr/core';
 import { LanguageProvider } from '../contexts/language-context';
 import { useUiStore } from '../store/ui-store';
 
@@ -40,6 +41,71 @@ describe('TaskItem', () => {
         expect(getByText('Test Task')).toBeInTheDocument();
     });
 
+    it('opens the quick action menu after the task details are expanded', async () => {
+        const user = userEvent.setup();
+        const taskWithDescription: Task = {
+            ...mockTask,
+            description: 'Expanded task note',
+        };
+        const { findByRole, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={taskWithDescription} />
+            </LanguageProvider>
+        );
+
+        await user.click(getByRole('button', { name: /toggle task details/i }));
+        expect(await findByRole('button', { name: /more options/i })).toBeInTheDocument();
+        await waitFor(() => expect(document.body).toHaveTextContent('Expanded task note'));
+
+        await user.click(getByRole('button', { name: /more options/i }));
+
+        expect(await findByRole('menu', { name: /more options/i })).toBeInTheDocument();
+    });
+
+    it('stops being a calendar drag source while details are expanded so text stays selectable', async () => {
+        const user = userEvent.setup();
+        const taskWithDescription: Task = {
+            ...mockTask,
+            description: 'Copy me',
+        };
+        const { container, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={taskWithDescription} />
+            </LanguageProvider>
+        );
+
+        const root = container.querySelector('[data-task-id="1"]') as HTMLElement;
+        expect(root.getAttribute('draggable')).toBe('true');
+
+        await user.click(getByRole('button', { name: /toggle task details/i }));
+        await waitFor(() => expect(root.getAttribute('draggable')).toBe('false'));
+
+        await user.click(getByRole('button', { name: /toggle task details/i }));
+        await waitFor(() => expect(root.getAttribute('draggable')).toBe('true'));
+    });
+
+    it('hides the default status selector when the task editor layout hides status', () => {
+        act(() => {
+            useTaskStore.setState({
+                settings: {
+                    gtd: {
+                        taskEditor: {
+                            hidden: ['status'],
+                        },
+                    },
+                },
+            });
+        });
+
+        const { queryByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={mockTask} />
+            </LanguageProvider>
+        );
+
+        expect(queryByRole('combobox', { name: /task status|task\.aria\.status/i })).toBeNull();
+    });
+
     it('enters edit mode when Edit is clicked', () => {
         const { getAllByRole, getByDisplayValue } = render(
             <LanguageProvider>
@@ -51,6 +117,457 @@ describe('TaskItem', () => {
         expect(getByDisplayValue('Test Task')).toBeInTheDocument();
     });
 
+    it('opens the editor in a modal when the setting uses pop-up presentation', async () => {
+        act(() => {
+            useTaskStore.setState({
+                settings: {
+                    gtd: {
+                        taskEditor: {
+                            presentation: 'modal',
+                        },
+                    },
+                },
+            });
+        });
+
+        const { container, getAllByRole, getByRole, getByDisplayValue } = render(
+            <div style={{ transform: 'translateY(120px)' }}>
+                <LanguageProvider>
+                    <TaskItem task={mockTask} />
+                </LanguageProvider>
+            </div>
+        );
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+
+        expect(container.querySelector('[role="dialog"]')).toBeNull();
+        expect(getByRole('dialog', { name: /edit task/i })).toBeInTheDocument();
+        expect(getByDisplayValue('Test Task')).toBeInTheDocument();
+    });
+
+    it('focuses the title input when the pop-up editor opens from an external edit request', async () => {
+        act(() => {
+            useTaskStore.setState({
+                settings: {
+                    gtd: {
+                        taskEditor: {
+                            presentation: 'modal',
+                        },
+                    },
+                },
+            });
+        });
+
+        const { getByDisplayValue, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={mockTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            useUiStore.getState().setEditingTaskId(mockTask.id);
+            await new Promise((resolve) => window.setTimeout(resolve, 0));
+        });
+
+        const dialog = getByRole('dialog', { name: /edit task/i });
+        expect(dialog).toBeInTheDocument();
+        expect(getByDisplayValue('Test Task')).toHaveFocus();
+    });
+
+    it('shows a delete action while editing inbox tasks', async () => {
+        act(() => {
+            useTaskStore.setState({
+                tasks: [mockTask],
+                _allTasks: [mockTask],
+            } as never);
+        });
+        const { getAllByRole, queryByRole, findByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={mockTask} />
+            </LanguageProvider>
+        );
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        const deleteButton = await findByRole('button', { name: /^delete$/i });
+
+        await act(async () => {
+            fireEvent.click(deleteButton);
+        });
+
+        // Deleting is immediate (soft delete to Trash with an undo toast);
+        // no confirmation dialog appears.
+        expect(queryByRole('dialog', { name: /^delete$/i })).not.toBeInTheDocument();
+        await waitFor(() => {
+            const stored = useTaskStore.getState()._allTasks.find((candidate) => candidate.id === mockTask.id);
+            expect(stored?.deletedAt).toBeTruthy();
+        });
+    });
+
+    it('does not show the edit-mode delete action for non-inbox tasks', async () => {
+        const nextTask: Task = {
+            ...mockTask,
+            id: 'next-edit-task',
+            status: 'next',
+        };
+        const { getAllByRole, getByDisplayValue, queryByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={nextTask} />
+            </LanguageProvider>
+        );
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        await waitFor(() => expect(getByDisplayValue('Test Task')).toBeInTheDocument());
+
+        expect(queryByRole('button', { name: /^delete$/i })).not.toBeInTheDocument();
+    });
+
+    it('marks the task done from the edit title action', async () => {
+        const editableTask: Task = {
+            ...mockTask,
+            id: 'editor-done-task',
+            status: 'next',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [editableTask],
+                _allTasks: [editableTask],
+                _tasksById: new Map([[editableTask.id, editableTask]]),
+                projects: [],
+                _allProjects: [],
+                _projectsById: new Map(),
+                sections: [],
+                _allSections: [],
+                _sectionsById: new Map(),
+                areas: [],
+                _allAreas: [],
+                _areasById: new Map(),
+            }));
+        });
+        const { getAllByRole, getByDisplayValue } = render(
+            <LanguageProvider>
+                <TaskItem task={editableTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        await waitFor(() => expect(getByDisplayValue('Test Task')).toBeInTheDocument());
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: 'Done' })[0]);
+        });
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._tasksById.get('editor-done-task');
+            expect(updatedTask?.status).toBe('done');
+            expect(updatedTask?.completedAt).toBeTruthy();
+        });
+    });
+
+    it("stars even an unclarified inbox task for Today's Focus from the editor header", async () => {
+        const editableTask: Task = {
+            ...mockTask,
+            id: 'editor-star-task',
+            status: 'inbox',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [editableTask],
+                _allTasks: [editableTask],
+                _tasksById: new Map([[editableTask.id, editableTask]]),
+                projects: [],
+                _allProjects: [],
+                _projectsById: new Map(),
+                sections: [],
+                _allSections: [],
+                _sectionsById: new Map(),
+                areas: [],
+                _allAreas: [],
+                _areasById: new Map(),
+            }));
+        });
+        const { getAllByRole, getByDisplayValue, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={editableTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        await waitFor(() => expect(getByDisplayValue('Test Task')).toBeInTheDocument());
+
+        await act(async () => {
+            fireEvent.click(getByRole('button', { name: "Add to today's focus" }));
+        });
+
+        // The star is a draft field: nothing is committed until Save, so the
+        // row cannot vanish from the list mid-edit.
+        expect(useTaskStore.getState()._tasksById.get('editor-star-task')?.isFocusedToday).not.toBe(true);
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: 'Save' })[0]);
+        });
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._tasksById.get('editor-star-task');
+            expect(updatedTask?.isFocusedToday).toBe(true);
+            expect(updatedTask?.status).toBe('next');
+        });
+    });
+
+    it('applies accepted title suggestions as metadata without keeping the token in the title', async () => {
+        const editableTask: Task = {
+            ...mockTask,
+            id: 'editor-title-token-task',
+            title: 'Email',
+            status: 'next',
+        };
+        const contextSourceTask: Task = {
+            ...mockTask,
+            id: 'editor-title-context-source',
+            title: 'Context source',
+            contexts: ['@work'],
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [editableTask, contextSourceTask],
+                _allTasks: [editableTask, contextSourceTask],
+                _tasksById: new Map([
+                    [editableTask.id, editableTask],
+                    [contextSourceTask.id, contextSourceTask],
+                ]),
+                projects: [],
+                _allProjects: [],
+                _projectsById: new Map(),
+                sections: [],
+                _allSections: [],
+                _sectionsById: new Map(),
+                areas: [],
+                _allAreas: [],
+                _areasById: new Map(),
+            }));
+        });
+
+        const { findByRole, getAllByRole, getByDisplayValue, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={editableTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        const titleInput = getByDisplayValue('Email') as HTMLInputElement;
+        fireEvent.change(titleInput, { target: { value: 'Email @wo today' } });
+        titleInput.setSelectionRange('Email @wo'.length, 'Email @wo'.length);
+        fireEvent.click(titleInput);
+
+        expect(await findByRole('option', { name: '@work' })).toBeInTheDocument();
+        await act(async () => {
+            fireEvent.keyDown(titleInput, { key: 'Enter' });
+        });
+
+        await waitFor(() => expect(titleInput.value).toBe('Email today'));
+
+        await act(async () => {
+            fireEvent.click(getByRole('button', { name: 'Save' }));
+        });
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'editor-title-token-task');
+            expect(updatedTask?.title).toBe('Email today');
+            expect(updatedTask?.contexts).toEqual(['@work']);
+        });
+    });
+
+    it('applies accepted slash date commands as metadata without keeping the command in the title', async () => {
+        const editableTask: Task = {
+            ...mockTask,
+            id: 'editor-title-slash-date-task',
+            title: 'Email',
+            status: 'next',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [editableTask],
+                _allTasks: [editableTask],
+                _tasksById: new Map([[editableTask.id, editableTask]]),
+                projects: [],
+                _allProjects: [],
+                _projectsById: new Map(),
+                sections: [],
+                _allSections: [],
+                _sectionsById: new Map(),
+                areas: [],
+                _allAreas: [],
+                _areasById: new Map(),
+            }));
+        });
+
+        const { findByRole, getAllByRole, getByDisplayValue, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={editableTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        const titleInput = getByDisplayValue('Email') as HTMLInputElement;
+        fireEvent.change(titleInput, { target: { value: 'Email /due:2026-05-01 today' } });
+        titleInput.setSelectionRange('Email /due:2026-05-01'.length, 'Email /due:2026-05-01'.length);
+        fireEvent.click(titleInput);
+
+        expect(await findByRole('option', { name: '/due:2026-05-01' })).toBeInTheDocument();
+        await act(async () => {
+            fireEvent.keyDown(titleInput, { key: 'Enter' });
+        });
+
+        await waitFor(() => expect(titleInput.value).toBe('Email today'));
+
+        await act(async () => {
+            fireEvent.click(getByRole('button', { name: 'Save' }));
+        });
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'editor-title-slash-date-task');
+            expect(updatedTask?.title).toBe('Email today');
+            expect(updatedTask?.dueDate).toBe('2026-05-01');
+        });
+    });
+
+    it('appends accepted slash notes instead of overwriting an existing description', async () => {
+        const editableTask: Task = {
+            ...mockTask,
+            id: 'editor-title-slash-note-task',
+            title: 'Email',
+            status: 'next',
+            description: 'Existing note',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [editableTask],
+                _allTasks: [editableTask],
+                _tasksById: new Map([[editableTask.id, editableTask]]),
+                projects: [],
+                _allProjects: [],
+                _projectsById: new Map(),
+                sections: [],
+                _allSections: [],
+                _sectionsById: new Map(),
+                areas: [],
+                _allAreas: [],
+                _areasById: new Map(),
+            }));
+        });
+
+        const { findByRole, getAllByRole, getByDisplayValue, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={editableTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        const titleInput = getByDisplayValue('Email') as HTMLInputElement;
+        fireEvent.change(titleInput, { target: { value: 'Email /note:Follow up today' } });
+        titleInput.setSelectionRange('Email /note:Follow up'.length, 'Email /note:Follow up'.length);
+        fireEvent.click(titleInput);
+
+        expect(await findByRole('option', { name: '/note:Follow up' })).toBeInTheDocument();
+        await act(async () => {
+            fireEvent.keyDown(titleInput, { key: 'Enter' });
+        });
+
+        await waitFor(() => expect(titleInput.value).toBe('Email today'));
+
+        await act(async () => {
+            fireEvent.click(getByRole('button', { name: 'Save' }));
+        });
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'editor-title-slash-note-task');
+            expect(updatedTask?.title).toBe('Email today');
+            expect(updatedTask?.description).toBe('Existing note\n\nFollow up');
+        });
+    });
+
+    it('keeps unaccepted quick-add-looking text literal in existing title edits', async () => {
+        const editableTask: Task = {
+            ...mockTask,
+            id: 'editor-title-literal-task',
+            title: 'Email',
+            status: 'next',
+            contexts: [],
+            tags: [],
+        };
+        const project: Project = {
+            id: 'project-home',
+            title: 'Home',
+            status: 'active',
+            color: '#000000',
+            order: 0,
+            tagIds: [],
+            createdAt: editableTask.createdAt,
+            updatedAt: editableTask.updatedAt,
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [editableTask],
+                _allTasks: [editableTask],
+                _tasksById: new Map([[editableTask.id, editableTask]]),
+                projects: [project],
+                _allProjects: [project],
+                _projectsById: new Map([[project.id, project]]),
+                sections: [],
+                _allSections: [],
+                _sectionsById: new Map(),
+                areas: [],
+                _allAreas: [],
+                _areasById: new Map(),
+            }));
+        });
+
+        const { getAllByRole, getByDisplayValue, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={editableTask} />
+            </LanguageProvider>
+        );
+
+        await act(async () => {
+            fireEvent.click(getAllByRole('button', { name: /edit/i })[0]);
+        });
+        const titleInput = getByDisplayValue('Email') as HTMLInputElement;
+        const literalTitle = 'Email @home #note +Home /due:tomorrow';
+        fireEvent.change(titleInput, { target: { value: literalTitle } });
+
+        await act(async () => {
+            fireEvent.click(getByRole('button', { name: 'Save' }));
+        });
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'editor-title-literal-task');
+            expect(updatedTask?.title).toBe(literalTitle);
+            expect(updatedTask?.contexts).toEqual([]);
+            expect(updatedTask?.tags).toEqual([]);
+            expect(updatedTask?.projectId).toBeUndefined();
+            expect(updatedTask?.dueDate).toBeUndefined();
+        });
+    });
+
     it('enters edit mode when task title is double-clicked', () => {
         const { getByRole, getByDisplayValue } = render(
             <LanguageProvider>
@@ -59,6 +576,34 @@ describe('TaskItem', () => {
         );
         fireEvent.doubleClick(getByRole('button', { name: /toggle task details/i }));
         expect(getByDisplayValue('Test Task')).toBeInTheDocument();
+    });
+
+    it('opens a single editor when the same task renders in multiple rows (Focus grouped by tags)', async () => {
+        const multiTagTask: Task = { ...mockTask, tags: ['home', 'errand'] };
+        const { getAllByRole, getAllByDisplayValue } = render(
+            <LanguageProvider>
+                <div>
+                    <TaskItem task={multiTagTask} />
+                    <TaskItem task={multiTagTask} />
+                </div>
+            </LanguageProvider>
+        );
+
+        const toggles = getAllByRole('button', { name: /toggle task details/i });
+        await act(async () => {
+            fireEvent.doubleClick(toggles[0]);
+        });
+
+        // Only the double-clicked row may run the editor; a second instance
+        // would treat clicks inside the first editor as outside clicks and
+        // close the whole session.
+        expect(getAllByDisplayValue('Test Task')).toHaveLength(1);
+
+        const titleInput = getAllByDisplayValue('Test Task')[0];
+        await act(async () => {
+            fireEvent.pointerDown(titleInput);
+        });
+        expect(getAllByDisplayValue('Test Task')).toHaveLength(1);
     });
 
     it('does not render checkbox when not in selection mode', () => {
@@ -102,6 +647,390 @@ describe('TaskItem', () => {
         expect(getByText(safeFormatDate('2026-03-20', 'P'))).toBeInTheDocument();
     });
 
+    it('opens the task quick actions menu on right-click', async () => {
+        const menuTask: Task = {
+            ...mockTask,
+            id: 'quick-actions-task',
+        };
+        const { container, getByRole, getByText, queryByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={menuTask} />
+            </LanguageProvider>
+        );
+
+        const row = container.querySelector('[data-task-id="quick-actions-task"]');
+        expect(row).toBeTruthy();
+        act(() => {
+            fireEvent.contextMenu(row!);
+        });
+
+        expect(getByRole('menu', { name: /more options/i })).toBeInTheDocument();
+        expect(getByRole('menuitem', { name: /due date/i })).toBeInTheDocument();
+        expect(getByRole('menuitem', { name: /review date/i })).toBeInTheDocument();
+        expect(getByRole('menuitem', { name: /area/i })).toBeInTheDocument();
+        expect(getByRole('menuitem', { name: /contexts/i })).toBeInTheDocument();
+        expect(getByRole('menuitem', { name: /duplicate/i })).toBeInTheDocument();
+        expect(getByText('Delete')).toBeInTheDocument();
+
+        act(() => {
+            fireEvent.mouseDown(document.body);
+        });
+        await waitFor(() => {
+            expect(queryByRole('menuitem', { name: /duplicate/i })).toBeNull();
+        });
+    });
+
+    it('opens the task quick actions menu from the visible affordance button', () => {
+        const menuTask: Task = {
+            ...mockTask,
+            id: 'quick-actions-button-task',
+        };
+        const { getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={menuTask} />
+            </LanguageProvider>
+        );
+
+        fireEvent.click(getByRole('button', { name: /more options/i }));
+
+        expect(getByRole('menu', { name: /more options/i })).toBeInTheDocument();
+        expect(getByRole('menuitem', { name: /duplicate/i })).toBeInTheDocument();
+    });
+
+    it('opens duplicated tasks from the quick actions menu', async () => {
+        const menuTask: Task = {
+            ...mockTask,
+            id: 'quick-actions-duplicate-task',
+            status: 'waiting',
+        };
+        act(() => {
+            useTaskStore.setState({
+                tasks: [menuTask],
+                _allTasks: [menuTask],
+                _tasksById: new Map([[menuTask.id, menuTask]]),
+            });
+        });
+        const { findByRole, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={menuTask} />
+            </LanguageProvider>
+        );
+
+        fireEvent.click(getByRole('button', { name: /more options/i }));
+        const duplicateItem = await findByRole('menuitem', { name: /duplicate/i });
+        await act(async () => {
+            fireEvent.click(duplicateItem);
+        });
+
+        const duplicatedTask = useTaskStore.getState()._allTasks.find((task) => task.id !== menuTask.id);
+        expect(duplicatedTask).toMatchObject({
+            title: 'Test Task',
+            status: 'waiting',
+        });
+        expect(useUiStore.getState().editingTaskId).toBe(duplicatedTask?.id);
+        expect(useTaskStore.getState().highlightTaskId).toBe(duplicatedTask?.id);
+    });
+
+    it('adds an eligible next action to today focus from the task quick actions menu', async () => {
+        const nextTask: Task = {
+            ...mockTask,
+            id: 'quick-focus-next-task',
+            status: 'next',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [nextTask],
+                _allTasks: [nextTask],
+                projects: [],
+                _allProjects: [],
+            }));
+        });
+
+        const { container, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={nextTask} />
+            </LanguageProvider>
+        );
+
+        const row = container.querySelector('[data-task-id="quick-focus-next-task"]');
+        expect(row).toBeTruthy();
+        fireEvent.contextMenu(row!);
+        fireEvent.click(getByRole('menuitem', { name: /add to today's focus/i }));
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'quick-focus-next-task');
+            expect(updatedTask?.isFocusedToday).toBe(true);
+            expect(updatedTask?.status).toBe('next');
+        });
+    });
+
+    it('does not add unclarified inbox tasks to today focus from the quick actions menu', () => {
+        const inboxTask: Task = {
+            ...mockTask,
+            id: 'quick-focus-inbox-task',
+            status: 'inbox',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [inboxTask],
+                _allTasks: [inboxTask],
+                projects: [],
+                _allProjects: [],
+            }));
+        });
+
+        const { container, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={inboxTask} />
+            </LanguageProvider>
+        );
+
+        const row = container.querySelector('[data-task-id="quick-focus-inbox-task"]');
+        expect(row).toBeTruthy();
+        fireEvent.contextMenu(row!);
+        const focusAction = getByRole('menuitem', { name: /add to today's focus/i });
+
+        expect(focusAction).toBeDisabled();
+        expect(focusAction).toHaveAttribute('title', 'Clarify this task before adding it to Focus.');
+        expect(useTaskStore.getState()._allTasks.find((task) => task.id === 'quick-focus-inbox-task')?.isFocusedToday)
+            .not.toBe(true);
+    });
+
+    it('focuses review-due tasks from the quick actions menu without changing their status', async () => {
+        const reviewDueTask: Task = {
+            ...mockTask,
+            id: 'quick-focus-review-task',
+            status: 'waiting',
+            reviewAt: '2026-01-01T00:00:00.000Z',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [reviewDueTask],
+                _allTasks: [reviewDueTask],
+                projects: [],
+                _allProjects: [],
+            }));
+        });
+
+        const { container, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={reviewDueTask} />
+            </LanguageProvider>
+        );
+
+        const row = container.querySelector('[data-task-id="quick-focus-review-task"]');
+        expect(row).toBeTruthy();
+        fireEvent.contextMenu(row!);
+        fireEvent.click(getByRole('menuitem', { name: /add to today's focus/i }));
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'quick-focus-review-task');
+            expect(updatedTask?.isFocusedToday).toBe(true);
+            expect(updatedTask?.status).toBe('waiting');
+        });
+    });
+
+    it('updates due date from the task quick actions menu', async () => {
+        const quickDueTask: Task = {
+            ...mockTask,
+            id: 'quick-due-task',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [quickDueTask],
+                _allTasks: [quickDueTask],
+                projects: [],
+                _allProjects: [],
+            }));
+        });
+
+        const { container, getByLabelText, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={quickDueTask} />
+            </LanguageProvider>
+        );
+
+        const row = container.querySelector('[data-task-id="quick-due-task"]');
+        expect(row).toBeTruthy();
+        fireEvent.contextMenu(row!);
+        fireEvent.click(getByRole('menuitem', { name: /due date/i }));
+        fireEvent.change(getByLabelText('Due Date', { selector: 'input' }), { target: { value: '2026-05-01' } });
+        fireEvent.click(getByRole('button', { name: 'Save' }));
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'quick-due-task');
+            expect(updatedTask?.dueDate).toBe('2026-05-01');
+        });
+    });
+
+    it('updates review date from the task quick actions menu', async () => {
+        const quickReviewTask: Task = {
+            ...mockTask,
+            id: 'quick-review-task',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [quickReviewTask],
+                _allTasks: [quickReviewTask],
+                projects: [],
+                _allProjects: [],
+            }));
+        });
+
+        const { container, getByLabelText, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={quickReviewTask} />
+            </LanguageProvider>
+        );
+
+        const row = container.querySelector('[data-task-id="quick-review-task"]');
+        expect(row).toBeTruthy();
+        fireEvent.contextMenu(row!);
+        fireEvent.click(getByRole('menuitem', { name: /review date/i }));
+        fireEvent.change(getByLabelText('Review Date', { selector: 'input' }), { target: { value: '2026-05-03' } });
+        fireEvent.click(getByRole('button', { name: 'Save' }));
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'quick-review-task');
+            expect(updatedTask?.reviewAt).toBe('2026-05-03');
+        });
+    });
+
+    it('updates area from the task quick actions menu', async () => {
+        const quickAreaTask: Task = {
+            ...mockTask,
+            id: 'quick-area-task',
+        };
+        const workArea: Area = {
+            id: 'area-work',
+            name: 'Work',
+            color: '#3b82f6',
+            order: 0,
+            createdAt: '2026-05-01T00:00:00.000Z',
+            updatedAt: '2026-05-01T00:00:00.000Z',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [quickAreaTask],
+                _allTasks: [quickAreaTask],
+                projects: [],
+                _allProjects: [],
+                areas: [workArea],
+                _allAreas: [workArea],
+            }));
+        });
+
+        const { container, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={quickAreaTask} />
+            </LanguageProvider>
+        );
+
+        const row = container.querySelector('[data-task-id="quick-area-task"]');
+        expect(row).toBeTruthy();
+        fireEvent.contextMenu(row!);
+        fireEvent.click(getByRole('menuitem', { name: /area/i }));
+        const areaDialog = getByRole('dialog', { name: 'Area' });
+        fireEvent.click(within(areaDialog).getByRole('button', { name: 'No Area' }));
+        const areaListbox = getByRole('listbox', { name: 'No Area' });
+        fireEvent.click(within(areaListbox).getByRole('option', { name: 'Work' }));
+        fireEvent.click(within(areaDialog).getByRole('button', { name: 'Save' }));
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'quick-area-task');
+            expect(updatedTask?.areaId).toBe('area-work');
+        });
+    });
+
+    it('updates contexts from the task quick actions menu', async () => {
+        const quickContextTask: Task = {
+            ...mockTask,
+            id: 'quick-context-task',
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [quickContextTask],
+                _allTasks: [quickContextTask],
+                projects: [],
+                _allProjects: [],
+            }));
+        });
+
+        const { container, getByLabelText, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={quickContextTask} />
+            </LanguageProvider>
+        );
+
+        const row = container.querySelector('[data-task-id="quick-context-task"]');
+        expect(row).toBeTruthy();
+        fireEvent.contextMenu(row!);
+        fireEvent.click(getByRole('menuitem', { name: /contexts/i }));
+        fireEvent.change(getByLabelText('Contexts', { selector: 'input' }), { target: { value: '@office, @errands' } });
+        fireEvent.click(getByRole('button', { name: 'Save' }));
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'quick-context-task');
+            expect(updatedTask?.contexts).toEqual(['@office', '@errands']);
+        });
+    });
+
+    it('offers full context autocomplete from the task quick actions menu', async () => {
+        const quickContextTask: Task = {
+            ...mockTask,
+            id: 'quick-context-autocomplete-task',
+        };
+        const contextSourceTasks: Task[] = [
+            ['context-alpha', '@alpha', '2026-02-08T00:00:00.000Z'],
+            ['context-beta', '@beta', '2026-02-07T00:00:00.000Z'],
+            ['context-delta', '@delta', '2026-02-06T00:00:00.000Z'],
+            ['context-gamma', '@gamma', '2026-02-05T00:00:00.000Z'],
+            ['context-office', '@office', '2026-02-04T00:00:00.000Z'],
+            ['context-home', '@home', '2026-02-03T00:00:00.000Z'],
+        ].map(([id, context, updatedAt]) => ({
+            ...mockTask,
+            id,
+            contexts: [context],
+            updatedAt,
+        }));
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [quickContextTask, ...contextSourceTasks],
+                _allTasks: [quickContextTask, ...contextSourceTasks],
+                projects: [],
+                _allProjects: [],
+            }));
+        });
+
+        const { container, findByRole, getByLabelText, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={quickContextTask} />
+            </LanguageProvider>
+        );
+
+        const row = container.querySelector('[data-task-id="quick-context-autocomplete-task"]');
+        expect(row).toBeTruthy();
+        fireEvent.contextMenu(row!);
+        fireEvent.click(getByRole('menuitem', { name: /contexts/i }));
+        const input = getByLabelText('Contexts', { selector: 'input' }) as HTMLInputElement;
+        fireEvent.focus(input);
+        fireEvent.change(input, { target: { value: '@ho' } });
+
+        expect(await findByRole('option', { name: '@home' })).toBeInTheDocument();
+
+        fireEvent.keyDown(input, { key: 'Enter' });
+
+        expect(input).toHaveValue('@home');
+    });
+
     it('applies inset ring style when selected to avoid clipped borders', () => {
         const { container } = render(
             <LanguageProvider>
@@ -111,6 +1040,18 @@ describe('TaskItem', () => {
         const root = container.querySelector('[data-task-id="1"]');
         expect(root).toBeTruthy();
         expect(root?.className).toContain('ring-inset');
+    });
+
+    it('shows the selected row treatment while keyboard focus is inside the task card', () => {
+        const { container } = render(
+            <LanguageProvider>
+                <TaskItem task={mockTask} />
+            </LanguageProvider>
+        );
+        const root = container.querySelector('[data-task-id="1"]');
+        expect(root).toBeTruthy();
+        expect(root?.className).toContain('focus-within:ring-2');
+        expect(root?.className).toContain('focus-within:bg-primary/5');
     });
 
     it('includes archived in the task status selector', () => {
@@ -124,33 +1065,167 @@ describe('TaskItem', () => {
         expect(archivedOption).toBeTruthy();
     });
 
-    it('shows quick NEXT to WAITING action and opens due-date picker prompt', () => {
+    it('prompts for assigned to when changing status to waiting', async () => {
         const nextTask: Task = {
             ...mockTask,
-            id: 'next-task',
+            id: 'waiting-select-task',
             status: 'next',
         };
-        const { getByRole, getByText, container } = render(
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [nextTask],
+                _allTasks: [nextTask],
+                projects: [],
+                _allProjects: [],
+            }));
+        });
+
+        const { getByLabelText, getByPlaceholderText, getByRole, getByText } = render(
             <LanguageProvider>
                 <TaskItem task={nextTask} />
             </LanguageProvider>
         );
-        const waitingButton = getByRole('button', { name: /move to waiting and set due date/i });
-        fireEvent.click(waitingButton);
-        expect(getByText('Set follow-up / review date')).toBeInTheDocument();
-        expect(container.querySelector('input[type="date"]')).toBeTruthy();
-        expect(getByRole('button', { name: /skip/i })).toBeInTheDocument();
+
+        const statusSelect = getByLabelText(/task status/i) as HTMLSelectElement;
+        statusSelect.focus();
+        expect(statusSelect).toHaveFocus();
+
+        fireEvent.change(statusSelect, { target: { value: 'waiting' } });
+
+        expect(getByText('Who/what are you waiting for?')).toBeInTheDocument();
+        expect(statusSelect).not.toHaveFocus();
+        fireEvent.change(getByPlaceholderText('Who is this waiting for?'), { target: { value: 'Alex' } });
+        fireEvent.click(getByRole('button', { name: 'Save' }));
+
+        await waitFor(() => {
+            const updatedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'waiting-select-task');
+            expect(updatedTask?.status).toBe('waiting');
+            expect(updatedTask?.assignedTo).toBe('Alex');
+        });
     });
 
-    it('shows today focus toggle outside focus view for active tasks', () => {
+    it('prompts for a new next action after completing the last next project task', async () => {
+        const projectTask: Task = {
+            ...mockTask,
+            id: 'project-last-next',
+            title: 'Finish current step',
+            status: 'next',
+            projectId: 'project-1',
+        };
+        const project: Project = {
+            id: 'project-1',
+            title: 'Launch plan',
+            status: 'active',
+            color: '#3b82f6',
+            order: 0,
+            tagIds: [],
+            createdAt: projectTask.createdAt,
+            updatedAt: projectTask.updatedAt,
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [projectTask],
+                _allTasks: [projectTask],
+                projects: [project],
+                _allProjects: [project],
+                sections: [],
+                _allSections: [],
+                areas: [],
+                _allAreas: [],
+            }));
+        });
+
+        const { getByPlaceholderText, getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={projectTask} />
+            </LanguageProvider>
+        );
+
+        fireEvent.click(getByRole('button', { name: 'Done' }));
+
+        await waitFor(() => {
+            expect(getByRole('dialog', { name: /what's the next action/i })).toBeInTheDocument();
+        });
+        fireEvent.change(getByPlaceholderText('New next action...'), { target: { value: 'Call Alex' } });
+        fireEvent.click(getByRole('button', { name: 'Add next action' }));
+
+        await waitFor(() => {
+            const createdTask = useTaskStore.getState()._allTasks.find((task) => task.title === 'Call Alex');
+            expect(createdTask).toMatchObject({
+                status: 'next',
+                projectId: 'project-1',
+            });
+        });
+    });
+
+    it('can promote an existing project task from the next-action prompt', async () => {
+        const projectTask: Task = {
+            ...mockTask,
+            id: 'project-complete-next',
+            title: 'Finish current step',
+            status: 'next',
+            projectId: 'project-1',
+        };
+        const candidateTask: Task = {
+            ...mockTask,
+            id: 'project-candidate',
+            title: 'Draft follow-up',
+            status: 'someday',
+            projectId: 'project-1',
+            order: 2,
+        };
+        const project: Project = {
+            id: 'project-1',
+            title: 'Launch plan',
+            status: 'active',
+            color: '#3b82f6',
+            order: 0,
+            tagIds: [],
+            createdAt: projectTask.createdAt,
+            updatedAt: projectTask.updatedAt,
+        };
+        act(() => {
+            useTaskStore.setState((state) => ({
+                ...state,
+                tasks: [projectTask, candidateTask],
+                _allTasks: [projectTask, candidateTask],
+                projects: [project],
+                _allProjects: [project],
+                sections: [],
+                _allSections: [],
+                areas: [],
+                _allAreas: [],
+            }));
+        });
+
         const { getByRole } = render(
+            <LanguageProvider>
+                <TaskItem task={projectTask} />
+            </LanguageProvider>
+        );
+
+        fireEvent.click(getByRole('button', { name: 'Done' }));
+
+        await waitFor(() => {
+            expect(getByRole('button', { name: /draft follow-up/i })).toBeInTheDocument();
+        });
+        fireEvent.click(getByRole('button', { name: /draft follow-up/i }));
+
+        await waitFor(() => {
+            const promotedTask = useTaskStore.getState()._allTasks.find((task) => task.id === 'project-candidate');
+            expect(promotedTask?.status).toBe('next');
+        });
+    });
+
+    it('does not show today focus toggle unless a view provides it', () => {
+        const { queryByRole } = render(
             <LanguageProvider>
                 <TaskItem task={mockTask} />
             </LanguageProvider>
         );
-        const button = getByRole('button', { name: /add.*focus/i });
-        expect(button).toBeInTheDocument();
-        expect(button.className).toContain('opacity-0');
+        expect(queryByRole('button', { name: /add.*focus/i })).not.toBeInTheDocument();
     });
 
     it('keeps focus toggle visible when a view requests always-visible mode', () => {
@@ -179,7 +1254,16 @@ describe('TaskItem', () => {
         try {
             const { getByRole } = render(
                 <LanguageProvider>
-                    <TaskItem task={mockTask} />
+                    <TaskItem
+                        task={mockTask}
+                        focusToggle={{
+                            isFocused: false,
+                            canToggle: true,
+                            onToggle: vi.fn(),
+                            title: 'Add to focus',
+                            ariaLabel: 'Add to focus',
+                        }}
+                    />
                 </LanguageProvider>
             );
             fireEvent.click(getByRole('button', { name: /add.*focus/i }));
@@ -264,11 +1348,10 @@ describe('TaskItem', () => {
         act(() => {
             useTaskStore.setState((state) => ({
                 ...state,
-                tasks: [task],
                 _allTasks: [task],
-                projects: [project, otherProject],
-                sections: [],
-                areas: [],
+                _allProjects: [project, otherProject],
+                _allSections: [],
+                _allAreas: [],
             }));
         });
 
@@ -285,7 +1368,7 @@ describe('TaskItem', () => {
         act(() => {
             useTaskStore.setState((state) => ({
                 ...state,
-                projects: [
+                _allProjects: [
                     project,
                     {
                         ...otherProject,
@@ -320,11 +1403,10 @@ describe('TaskItem', () => {
         act(() => {
             useTaskStore.setState((state) => ({
                 ...state,
-                tasks: [task],
                 _allTasks: [task],
-                projects: [project],
-                sections: [],
-                areas: [],
+                _allProjects: [project],
+                _allSections: [],
+                _allAreas: [],
             }));
         });
 
@@ -341,7 +1423,7 @@ describe('TaskItem', () => {
         act(() => {
             useTaskStore.setState((state) => ({
                 ...state,
-                projects: [{
+                _allProjects: [{
                     ...project,
                     title: 'Renamed primary project',
                     updatedAt: new Date(Date.parse(project.updatedAt) + 1_000).toISOString(),

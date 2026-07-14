@@ -62,6 +62,51 @@ describe('widget-data', () => {
         expect(payload.subtitle).toBe('Inbox: 0');
     });
 
+    it('puts starred tasks first and counts them in focusedCount regardless of maxItems (#821)', () => {
+        const now = new Date().toISOString();
+        const data: AppData = {
+            ...baseData,
+            tasks: [
+                { id: '1', title: 'Next A', status: 'next', isFocusedToday: false, tags: [], contexts: [], createdAt: now, updatedAt: now },
+                { id: '2', title: 'Starred next', status: 'next', isFocusedToday: true, tags: [], contexts: [], createdAt: now, updatedAt: now },
+                { id: '3', title: 'Starred waiting', status: 'waiting', isFocusedToday: true, tags: [], contexts: [], createdAt: now, updatedAt: now },
+                { id: '4', title: 'Next B', status: 'next', isFocusedToday: false, tags: [], contexts: [], createdAt: now, updatedAt: now },
+            ],
+        };
+        const payload = buildWidgetPayload(data, 'en', { maxItems: 2 });
+        expect(payload.items.map((item) => item.title)).toEqual(['Starred next', 'Starred waiting']);
+        expect(payload.focusedCount).toBe(2);
+    });
+
+    it('reports zero focusedCount when nothing is starred while still listing next actions (#821)', () => {
+        const now = new Date().toISOString();
+        const data: AppData = {
+            ...baseData,
+            tasks: [
+                { id: '1', title: 'Test1', status: 'next', isFocusedToday: false, tags: [], contexts: [], createdAt: now, updatedAt: now },
+                { id: '2', title: 'Test 2', status: 'next', isFocusedToday: false, tags: [], contexts: [], createdAt: now, updatedAt: now },
+            ],
+        };
+        const payload = buildWidgetPayload(data, 'en');
+        expect(payload.items.map((item) => item.title)).toEqual(['Test1', 'Test 2']);
+        expect(payload.focusedCount).toBe(0);
+    });
+
+    it('keeps the widget palette aligned with Sepia theme settings', () => {
+        const payload = buildWidgetPayload(
+            {
+                ...baseData,
+                settings: { theme: 'sepia' },
+            },
+            'en'
+        );
+
+        expect(payload.palette.background).toBe('#FAF3E3');
+        expect(payload.palette.text).toBe('#3B2F2F');
+        expect(payload.palette.mutedText).toBe('#7A5C3E');
+        expect(payload.palette.accent).toBe('#9C6F3C');
+    });
+
     it('includes focus-page schedule/next tasks even when none are explicitly focused', () => {
         const now = new Date().toISOString();
         const data: AppData = {
@@ -100,6 +145,188 @@ describe('widget-data', () => {
         };
         const payload = buildWidgetPayload(data, 'en');
         expect(payload.items.map((item) => item.id)).toEqual(['next-due', 'next-now']);
+    });
+
+    it('keeps deferred project tasks out of widget focus items and inbox count', () => {
+        const now = new Date().toISOString();
+        const data: AppData = {
+            ...baseData,
+            projects: [
+                {
+                    id: 'active-project',
+                    title: 'Active project',
+                    status: 'active',
+                    color: '#123456',
+                    order: 0,
+                    tagIds: [],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+                {
+                    id: 'someday-project',
+                    title: 'Someday project',
+                    status: 'someday',
+                    color: '#654321',
+                    order: 1,
+                    tagIds: [],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+            ],
+            tasks: [
+                {
+                    id: 'active-next',
+                    title: 'Active next',
+                    status: 'next',
+                    projectId: 'active-project',
+                    tags: [],
+                    contexts: [],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+                {
+                    id: 'deferred-next',
+                    title: 'Deferred next',
+                    status: 'next',
+                    projectId: 'someday-project',
+                    tags: [],
+                    contexts: [],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+                {
+                    id: 'deferred-inbox',
+                    title: 'Deferred inbox',
+                    status: 'inbox',
+                    projectId: 'someday-project',
+                    tags: [],
+                    contexts: [],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+            ],
+        };
+
+        const payload = buildWidgetPayload(data, 'en');
+
+        expect(payload.items.map((item) => item.id)).toEqual(['active-next']);
+        expect(payload.inboxCount).toBe(0);
+    });
+
+    it('does not let earlier non-widget tasks block a sequential project next task', () => {
+        const now = new Date().toISOString();
+        const data: AppData = {
+            ...baseData,
+            projects: [
+                {
+                    id: 'project-1',
+                    title: 'Sequential project',
+                    status: 'active',
+                    isSequential: true,
+                    color: '#123456',
+                    order: 0,
+                    tagIds: [],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+            ],
+            tasks: [
+                {
+                    id: 'inbox-before',
+                    title: 'Inbox before',
+                    status: 'inbox',
+                    projectId: 'project-1',
+                    order: 0,
+                    orderNum: 0,
+                    tags: [],
+                    contexts: [],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+                {
+                    id: 'available-next',
+                    title: 'Available next',
+                    status: 'next',
+                    projectId: 'project-1',
+                    order: 1,
+                    orderNum: 1,
+                    tags: [],
+                    contexts: [],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+            ],
+        };
+
+        const payload = buildWidgetPayload(data, 'en');
+
+        expect(payload.items.map((item) => item.id)).toEqual(['available-next']);
+    });
+
+    it('includes the first widget task from each section for section-scoped sequential projects', () => {
+        const now = new Date().toISOString();
+        const data: AppData = {
+            ...baseData,
+            projects: [
+                {
+                    id: 'project-1',
+                    title: 'Sequential project',
+                    status: 'active',
+                    isSequential: true,
+                    sequentialScope: 'section',
+                    color: '#123456',
+                    order: 0,
+                    tagIds: [],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+            ],
+            tasks: [
+                {
+                    id: 'section-a-first',
+                    title: 'Section A first',
+                    status: 'next',
+                    projectId: 'project-1',
+                    sectionId: 'section-a',
+                    order: 0,
+                    orderNum: 0,
+                    tags: [],
+                    contexts: [],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+                {
+                    id: 'section-a-second',
+                    title: 'Section A second',
+                    status: 'next',
+                    projectId: 'project-1',
+                    sectionId: 'section-a',
+                    order: 1,
+                    orderNum: 1,
+                    tags: [],
+                    contexts: [],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+                {
+                    id: 'section-b-first',
+                    title: 'Section B first',
+                    status: 'next',
+                    projectId: 'project-1',
+                    sectionId: 'section-b',
+                    order: 2,
+                    orderNum: 2,
+                    tags: [],
+                    contexts: [],
+                    createdAt: now,
+                    updatedAt: now,
+                },
+            ],
+        };
+
+        const payload = buildWidgetPayload(data, 'en');
+
+        expect(payload.items.map((item) => item.id)).toEqual(['section-a-first', 'section-b-first']);
     });
 
     it('keeps future-start tasks out of the widget payload even when focused', () => {

@@ -1,8 +1,6 @@
 import React, { useCallback } from 'react';
 import { Alert, Share } from 'react-native';
 import {
-    Area,
-    Project,
     type RecurrenceRule,
     Task,
     TaskStatus,
@@ -14,18 +12,20 @@ import {
     type RecurrenceStrategy,
     type RecurrenceWeekday,
     buildRRuleString,
+    getRecurrenceCompletedOccurrencesValue,
     parseRRuleString,
-    parseQuickAdd,
-    DEFAULT_PROJECT_COLOR,
     getUsedTaskTokens,
+    tFallback,
+    type StoreActionResult,
 } from '@mindwtr/core';
 
 import type { AIResponseAction } from '../ai-response-modal';
 import { buildAIConfig, isAIKeyRequired, loadAIKey } from '../../lib/ai-config';
 import { areTaskFieldValuesEqual } from './task-edit-modal.helpers';
-import { logTaskError, logTaskWarn } from './task-edit-modal.utils';
-import { applyMarkdownChecklistToTask, parseTokenList } from './task-edit-token-utils';
+import { getEditedTaskValue, logTaskError, logTaskWarn } from './task-edit-modal.utils';
+import { parseTokenList } from './task-edit-token-utils';
 import { buildRecurrenceValue } from './recurrence-utils';
+import { openProjectScreen, openTaskScreen } from '../../lib/task-meta-navigation';
 
 type AIResponseModalState = {
     title: string;
@@ -38,12 +38,12 @@ type ShowToast = (options: {
     message: string;
     tone: 'warning' | 'error' | 'success' | 'info';
     durationMs?: number;
+    actionLabel?: string;
+    onAction?: () => void | Promise<void>;
 }) => void;
 
 type TaskEditActionsParams = {
-    addProject: (title: string, color: string, options?: { areaId?: string }) => Promise<{ id?: string } | null>;
     aiEnabled: boolean;
-    areas: Area[];
     baseTaskRef: React.MutableRefObject<Task | null>;
     closeAIModal: () => void;
     contextInputDraft: string;
@@ -52,7 +52,8 @@ type TaskEditActionsParams = {
     descriptionDebounceRef: React.MutableRefObject<ReturnType<typeof setTimeout> | null>;
     descriptionDraft: string;
     descriptionDraftRef: React.MutableRefObject<string>;
-    duplicateTask: (taskId: string, includeDoneSubtasks?: boolean) => Promise<unknown>;
+    duplicateTask: (taskId: string, includeDoneSubtasks?: boolean) => Promise<StoreActionResult>;
+    promoteTaskToProject?: (taskId: string, options?: { title?: string; color?: string; areaId?: string }) => Promise<StoreActionResult>;
     editedTask: Partial<Task>;
     formatDate: (dateStr?: string) => string;
     formatDueDate: (dateStr?: string) => string;
@@ -64,12 +65,11 @@ type TaskEditActionsParams = {
     onSave: (taskId: string, updates: Partial<Task>) => void;
     prioritiesEnabled: boolean;
     projectContext?: Record<string, unknown> | null;
-    projectFilterAreaId?: string;
-    projects: Project[];
     recurrenceRRuleValue: string;
     recurrenceRuleValue: RecurrenceRule | '';
     recurrenceStrategyValue: RecurrenceStrategy;
     resetTaskChecklist: (taskId: string) => Promise<unknown>;
+    restoreTask: (taskId: string) => Promise<unknown>;
     sections: Array<{ id: string; projectId?: string; deletedAt?: string | null }>;
     setAiModal: React.Dispatch<React.SetStateAction<AIResponseModalState>>;
     setEditedTask: React.Dispatch<React.SetStateAction<Partial<Task>>>;
@@ -87,9 +87,7 @@ type TaskEditActionsParams = {
 };
 
 export function useTaskEditActions({
-    addProject,
     aiEnabled,
-    areas,
     baseTaskRef,
     closeAIModal,
     contextInputDraft,
@@ -99,6 +97,7 @@ export function useTaskEditActions({
     descriptionDraft,
     descriptionDraftRef,
     duplicateTask,
+    promoteTaskToProject,
     editedTask,
     formatDate,
     formatDueDate,
@@ -110,12 +109,11 @@ export function useTaskEditActions({
     onSave,
     prioritiesEnabled,
     projectContext,
-    projectFilterAreaId,
-    projects,
     recurrenceRuleValue,
     recurrenceRRuleValue,
     recurrenceStrategyValue,
     resetTaskChecklist,
+    restoreTask,
     sections,
     setAiModal,
     setEditedTask,
@@ -172,104 +170,66 @@ export function useTaskEditActions({
         }
 
         const rawTitle = String(titleDraftRef.current ?? '');
-        const { title: parsedTitle, props: parsedProps, projectTitle, invalidDateCommands } = parseQuickAdd(
-            rawTitle,
-            projects,
-            new Date(),
-            areas,
-        );
-        if (invalidDateCommands && invalidDateCommands.length > 0) {
-            showToast({
-                title: t('common.notice'),
-                message: `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`,
-                tone: 'warning',
-                durationMs: 4200,
-            });
-            return;
-        }
-
-        const existingProjectId = editedTask.projectId ?? task?.projectId;
-        const hasProjectCommand = Boolean(parsedProps.projectId || projectTitle);
-        let resolvedProjectId = parsedProps.projectId;
-        if (!resolvedProjectId && projectTitle) {
-            try {
-                const created = await addProject(
-                    projectTitle,
-                    DEFAULT_PROJECT_COLOR,
-                    projectFilterAreaId ? { areaId: projectFilterAreaId } : undefined,
-                );
-                resolvedProjectId = created?.id;
-            } catch (error) {
-                logTaskError('Failed to create project from quick add', error);
-            }
-        }
-        if (!resolvedProjectId) {
-            resolvedProjectId = existingProjectId;
-        }
-
         const fallbackTitle = editedTask.title ?? task.title ?? rawTitle;
-        const cleanedTitle = parsedTitle.trim() ? parsedTitle : fallbackTitle;
+        const cleanedTitle = rawTitle.trim() ? rawTitle.trim() : fallbackTitle;
         const baseDescription = descriptionDraftRef.current;
-        const resolvedDescription = parsedProps.description
-            ? (baseDescription ? `${baseDescription}\n${parsedProps.description}` : parsedProps.description)
-            : baseDescription;
-        const mergedContexts = parsedProps.contexts
-            ? Array.from(new Set([...(editedTask.contexts || []), ...parsedProps.contexts]))
-            : editedTask.contexts;
-        const mergedTags = parsedProps.tags
-            ? Array.from(new Set([...(editedTask.tags || []), ...parsedProps.tags]))
-            : editedTask.tags;
         const updates: Partial<Task> = {
             ...editedTask,
             title: cleanedTitle,
-            description: resolvedDescription,
-            contexts: mergedContexts,
-            tags: mergedTags,
+            description: baseDescription,
+            contexts: editedTask.contexts,
+            tags: editedTask.tags,
         };
-        updates.checklist = applyMarkdownChecklistToTask(resolvedDescription, updates.checklist);
-        if (parsedProps.status) updates.status = parsedProps.status;
-        if (parsedProps.startTime) updates.startTime = parsedProps.startTime;
-        if (parsedProps.dueDate) updates.dueDate = parsedProps.dueDate;
-        if (parsedProps.reviewAt) updates.reviewAt = parsedProps.reviewAt;
-        if (hasProjectCommand && resolvedProjectId && resolvedProjectId !== existingProjectId) {
-            updates.projectId = resolvedProjectId;
-            updates.sectionId = undefined;
-            updates.areaId = undefined;
-        }
+        updates.location = String(updates.location ?? '').trim() || undefined;
 
         const recurrenceRule = recurrenceRuleValue || undefined;
         if (recurrenceRule) {
+            const completedOccurrences = getRecurrenceCompletedOccurrencesValue(editedTask.recurrence)
+                ?? getRecurrenceCompletedOccurrencesValue(task.recurrence);
             if (recurrenceRule === 'weekly' && customWeekdays.length > 0) {
-                const rrule = buildRRuleString('weekly', customWeekdays);
-                updates.recurrence = { rule: 'weekly', strategy: recurrenceStrategyValue, byDay: customWeekdays, rrule };
+                const parsed = parseRRuleString(recurrenceRRuleValue);
+                const rrule = buildRRuleString('weekly', customWeekdays, parsed.interval, {
+                    count: parsed.count,
+                    until: parsed.until,
+                });
+                updates.recurrence = buildRecurrenceValue('weekly', recurrenceStrategyValue, {
+                    byDay: customWeekdays,
+                    count: parsed.count,
+                    until: parsed.until,
+                    completedOccurrences,
+                    rrule,
+                });
             } else if (recurrenceRRuleValue) {
                 const parsed = parseRRuleString(recurrenceRRuleValue);
-                if (parsed.byDay?.length) {
-                    updates.recurrence = {
-                        rule: recurrenceRule,
-                        strategy: recurrenceStrategyValue,
-                        byDay: parsed.byDay,
-                        rrule: recurrenceRRuleValue,
-                    };
-                } else {
-                    updates.recurrence = { rule: recurrenceRule, strategy: recurrenceStrategyValue, rrule: recurrenceRRuleValue };
-                }
+                updates.recurrence = buildRecurrenceValue(recurrenceRule, recurrenceStrategyValue, {
+                    byDay: parsed.byDay,
+                    byMonthDay: parsed.byMonthDay,
+                    count: parsed.count,
+                    until: parsed.until,
+                    completedOccurrences,
+                    rrule: recurrenceRRuleValue,
+                });
             } else {
-                updates.recurrence = buildRecurrenceValue(recurrenceRule, recurrenceStrategyValue);
+                updates.recurrence = buildRecurrenceValue(recurrenceRule, recurrenceStrategyValue, {
+                    completedOccurrences,
+                });
             }
         } else {
             updates.recurrence = undefined;
         }
+        updates.showFutureRecurrence = updates.recurrence && editedTask.showFutureRecurrence === true
+            ? true
+            : undefined;
 
         const baseTask = baseTaskRef.current ?? task;
-        const nextProjectId = updates.projectId ?? baseTask.projectId;
+        const nextProjectId = getEditedTaskValue(updates, baseTask, 'projectId');
         if (nextProjectId) {
             updates.areaId = undefined;
         } else {
             updates.sectionId = undefined;
         }
         if (nextProjectId) {
-            const nextSectionId = updates.sectionId ?? baseTask.sectionId;
+            const nextSectionId = getEditedTaskValue(updates, baseTask, 'sectionId');
             if (nextSectionId) {
                 const isValid = sections.some((section) =>
                     section.id === nextSectionId && section.projectId === nextProjectId && !section.deletedAt
@@ -300,8 +260,6 @@ export function useTaskEditActions({
         onSave(task.id, trimmedUpdates);
         onClose();
     }, [
-        areas,
-        addProject,
         baseTaskRef,
         customWeekdays,
         descriptionDebounceRef,
@@ -309,14 +267,10 @@ export function useTaskEditActions({
         editedTask,
         onClose,
         onSave,
-        projectFilterAreaId,
-        projects,
         recurrenceRuleValue,
         recurrenceRRuleValue,
         recurrenceStrategyValue,
         sections,
-        showToast,
-        t,
         task,
         titleDebounceRef,
         titleDraftRef,
@@ -467,15 +421,73 @@ export function useTaskEditActions({
 
     const handleDuplicateTask = useCallback(async () => {
         if (!task) return;
-        await duplicateTask(task.id, false).catch((error) => logTaskError('Failed to duplicate task', error));
-        Alert.alert(t('taskEdit.duplicateDoneTitle'), t('taskEdit.duplicateDoneBody'));
-    }, [duplicateTask, t, task]);
+        try {
+            const result = await duplicateTask(task.id, false);
+            if (!result.success || !result.id) {
+                showToast({
+                    title: tFallback(t, 'common.error', 'Error'),
+                    message: result.error || t('task.duplicateFailed'),
+                    tone: 'error',
+                });
+                return;
+            }
+            onClose();
+            openTaskScreen(result.id, task.projectId, 'task');
+        } catch (error) {
+            logTaskError('Failed to duplicate task', error);
+            showToast({
+                title: tFallback(t, 'common.error', 'Error'),
+                message: t('task.duplicateFailed'),
+                tone: 'error',
+            });
+        }
+    }, [duplicateTask, onClose, showToast, t, task]);
+
+    const handlePromoteTaskToProject = useCallback(async () => {
+        if (!task || !promoteTaskToProject) return;
+        try {
+            const title = String(titleDraftRef.current || editedTask.title || task.title || '').trim();
+            const result = await promoteTaskToProject(task.id, { title });
+            if (!result.success || !result.id) {
+                showToast({
+                    title: tFallback(t, 'common.error', 'Error'),
+                    message: result.error || t('task.promoteToProjectFailed'),
+                    tone: 'error',
+                });
+                return;
+            }
+            showToast({
+                title: tFallback(t, 'common.success', 'Success'),
+                message: result.reused
+                    ? t('task.promoteToProjectMoved')
+                    : t('task.promoteToProjectCreated'),
+                tone: 'success',
+            });
+            onClose();
+            openProjectScreen(result.id);
+        } catch (error) {
+            logTaskError('Failed to create project from task', error);
+            showToast({
+                title: tFallback(t, 'common.error', 'Error'),
+                message: t('task.promoteToProjectFailed'),
+                tone: 'error',
+            });
+        }
+    }, [editedTask.title, onClose, promoteTaskToProject, showToast, t, task, titleDraftRef]);
 
     const handleDeleteTask = useCallback(async () => {
         if (!task) return;
         await deleteTask(task.id).catch((error) => logTaskError('Failed to delete task', error));
+        showToast({
+            title: t('common.notice') || 'Notice',
+            message: t('list.taskDeleted') || 'Task deleted',
+            tone: 'info',
+            actionLabel: t('common.undo') || 'Undo',
+            onAction: () => { void restoreTask(task.id); },
+            durationMs: 5200,
+        });
         onClose();
-    }, [deleteTask, onClose, task]);
+    }, [deleteTask, onClose, restoreTask, showToast, t, task]);
 
     const handleConvertToReference = useCallback(() => {
         if (!task) return;
@@ -485,9 +497,9 @@ export function useTaskEditActions({
             dueDate: undefined,
             reviewAt: undefined,
             recurrence: undefined,
+            showFutureRecurrence: undefined,
             priority: undefined,
             timeEstimate: undefined,
-            checklist: undefined,
             isFocusedToday: false,
             pushCount: 0,
         };
@@ -544,6 +556,9 @@ export function useTaskEditActions({
             const response = await provider.clarifyTask({
                 title,
                 contexts: contextOptions,
+                startTime: editedTask.startTime ?? task.startTime,
+                dueDate: editedTask.dueDate ?? task.dueDate,
+                reviewAt: editedTask.reviewAt ?? task.reviewAt,
                 ...(projectContext ?? {}),
             });
             const actions: AIResponseAction[] = response.options.slice(0, 3).map((option) => ({
@@ -644,6 +659,7 @@ export function useTaskEditActions({
         closeAIModal,
         descriptionDraft,
         editedTask.checklist,
+        editedTask.title,
         getAIProvider,
         isAIWorking,
         projectContext,
@@ -663,6 +679,7 @@ export function useTaskEditActions({
         handleDeleteTask,
         handleDone,
         handleDuplicateTask,
+        handlePromoteTaskToProject,
         handleResetChecklist,
         handleSave,
         handleShare,

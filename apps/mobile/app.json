@@ -2,7 +2,7 @@
   "expo": {
     "name": "Mindwtr",
     "slug": "mindwtr",
-    "version": "0.8.3",
+    "version": "1.1.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "mindwtr",
@@ -16,7 +16,16 @@
         "NSMicrophoneUsageDescription": "Mindwtr uses the microphone to capture voice notes.",
         "ITSAppUsesNonExemptEncryption": false,
         "LSSupportsOpeningDocumentsInPlace": true,
-        "UIFileSharingEnabled": true
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        },
+        "UIFileSharingEnabled": true,
+        "UIBackgroundModes": [
+          "processing"
+        ],
+        "BGTaskSchedulerPermittedIdentifiers": [
+          "com.expo.modules.backgroundtask.processing"
+        ]
       },
       "buildNumber": "4"
     },
@@ -27,11 +36,14 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "versionCode": 57,
+      "versionCode": 98,
       "package": "tech.dongdongbh.mindwtr",
       "permissions": [
         "RECORD_AUDIO",
-        "POST_NOTIFICATIONS"
+        "POST_NOTIFICATIONS",
+        "SCHEDULE_EXACT_ALARM",
+        "READ_CALENDAR",
+        "WRITE_CALENDAR"
       ],
       "blockedPermissions": [
         "android.permission.CAMERA",
@@ -72,7 +84,9 @@
               "description": "Inbox, focus, and quick capture",
               "minWidth": "120dp",
               "minHeight": "120dp",
-              "targetCellWidth": 2,
+              "minResizeWidth": "120dp",
+              "minResizeHeight": "120dp",
+              "targetCellWidth": 3,
               "targetCellHeight": 2,
               "resizeMode": "horizontal|vertical",
               "previewImage": "./assets/images/widget-preview.png"
@@ -98,10 +112,23 @@
           "iosAppGroupIdentifier": "group.tech.dongdongbh.mindwtr",
           "iosActivationRules": {
             "NSExtensionActivationSupportsText": true,
-            "NSExtensionActivationSupportsWebURLWithMaxCount": 1
+            "NSExtensionActivationSupportsWebURLWithMaxCount": 1,
+            "NSExtensionActivationSupportsImageWithMaxCount": 6,
+            "NSExtensionActivationSupportsMovieWithMaxCount": 6,
+            "NSExtensionActivationSupportsFileWithMaxCount": 6
           },
           "androidIntentFilters": [
-            "text/*"
+            "text/*",
+            "image/*",
+            "audio/*",
+            "video/*",
+            "application/*"
+          ],
+          "androidMultiIntentFilters": [
+            "image/*",
+            "audio/*",
+            "video/*",
+            "application/*"
           ]
         }
       ],
@@ -117,12 +144,23 @@
       [
         "expo-calendar",
         {
-          "calendarPermission": "Mindwtr needs calendar access to show your events alongside tasks."
+          "calendarPermission": "Mindwtr needs calendar access to show your events alongside tasks.",
+          "remindersPermission": "Mindwtr needs reminders access to import your chosen Apple Reminders capture list into Inbox."
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Mindwtr uses Face ID to unlock the app when app lock is enabled."
         }
       ],
       "expo-secure-store",
       "./plugins/android-app-shortcuts",
+      "./plugins/android-quick-settings-tile",
+      "./plugins/android-legacy-text-metrics",
       "./plugins/android-manifest-fixes",
+      "./plugins/android-monochrome-icon",
+      "./plugins/android-system-bars",
       "./plugins/android-startup-trace",
       "./plugins/patch-alarm-notification-gradle"
     ],

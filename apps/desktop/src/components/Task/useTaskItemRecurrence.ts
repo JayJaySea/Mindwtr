@@ -1,26 +1,26 @@
 import { useCallback, useMemo, useState } from 'react';
-import type { RecurrenceByDay, RecurrenceRule, RecurrenceWeekday, Task } from '@mindwtr/core';
+import type { RecurrenceByDay, RecurrenceWeekday, Task, TaskDraft, TaskDraftSetter } from '@mindwtr/core';
 import { buildRRuleString, parseRRuleString, safeParseDate } from '@mindwtr/core';
 import { WEEKDAY_ORDER } from './recurrence-constants';
 
 type UseTaskItemRecurrenceProps = {
     task: Task;
-    editDueDate: string;
-    editRecurrence: RecurrenceRule | '';
-    editRecurrenceRRule: string;
-    setEditRecurrence: (value: RecurrenceRule | '') => void;
-    setEditRecurrenceRRule: (value: string) => void;
+    draft: TaskDraft;
+    setField: TaskDraftSetter;
 };
 
 export function useTaskItemRecurrence({
     task,
-    editDueDate,
-    editRecurrence,
-    editRecurrenceRRule,
-    setEditRecurrence,
-    setEditRecurrenceRRule,
+    draft,
+    setField,
 }: UseTaskItemRecurrenceProps) {
-    const monthlyAnchorDate = safeParseDate(editDueDate) ?? safeParseDate(task.dueDate) ?? new Date();
+    const {
+        startTime: editStartTime,
+        dueDate: editDueDate,
+        recurrence: editRecurrence,
+        recurrenceRRule: editRecurrenceRRule,
+    } = draft;
+    const monthlyAnchorDate = safeParseDate(editDueDate || editStartTime || task.dueDate || task.startTime) ?? new Date();
     const monthlyWeekdayCode = WEEKDAY_ORDER[monthlyAnchorDate.getDay()];
 
     const monthlyRecurrence = useMemo(() => {
@@ -33,7 +33,7 @@ export function useTaskItemRecurrence({
         const hasByMonthDay = parsed.byMonthDay && parsed.byMonthDay.length > 0;
         const interval = parsed.interval && parsed.interval > 0 ? parsed.interval : 1;
         const isCustomDay = hasByMonthDay && parsed.byMonthDay?.[0] !== monthlyAnchorDate.getDate();
-        const pattern: 'custom' | 'date' = hasNth || hasLast || interval > 1 || isCustomDay ? 'custom' : 'date';
+        const pattern: 'custom' | 'date' = hasNth || hasLast || isCustomDay ? 'custom' : 'date';
         return { pattern, interval };
     }, [editRecurrence, editRecurrenceRRule, monthlyAnchorDate]);
 
@@ -75,20 +75,32 @@ export function useTaskItemRecurrence({
     }, [editRecurrenceRRule, monthlyAnchorDate, monthlyWeekdayCode]);
 
     const applyCustomRecurrence = useCallback(() => {
+        const parsed = parseRRuleString(editRecurrenceRRule);
         const intervalValue = Number(customInterval);
         const safeInterval = Number.isFinite(intervalValue) && intervalValue > 0 ? intervalValue : 1;
         const safeMonthDay = Math.min(Math.max(Math.round(customMonthDay || 1), 1), 31);
         const rrule = customMode === 'nth'
-            ? buildRRuleString('monthly', [`${customOrdinal}${customWeekday}` as RecurrenceByDay], safeInterval)
-            : [
-                'FREQ=MONTHLY',
-                safeInterval > 1 ? `INTERVAL=${safeInterval}` : null,
-                `BYMONTHDAY=${safeMonthDay}`,
-            ].filter(Boolean).join(';');
-        setEditRecurrence('monthly');
-        setEditRecurrenceRRule(rrule);
+            ? buildRRuleString('monthly', [`${customOrdinal}${customWeekday}` as RecurrenceByDay], safeInterval, {
+                count: parsed.count,
+                until: parsed.until,
+            })
+            : buildRRuleString('monthly', undefined, safeInterval, {
+                byMonthDay: [safeMonthDay],
+                count: parsed.count,
+                until: parsed.until,
+            });
+        setField('recurrence', 'monthly');
+        setField('recurrenceRRule', rrule);
         setShowCustomRecurrence(false);
-    }, [customInterval, customMode, customOrdinal, customWeekday, customMonthDay, setEditRecurrence, setEditRecurrenceRRule]);
+    }, [
+        customInterval,
+        customMode,
+        customMonthDay,
+        customOrdinal,
+        customWeekday,
+        editRecurrenceRRule,
+        setField,
+    ]);
 
     return {
         monthlyRecurrence,

@@ -1,73 +1,158 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { corsOrigin, errorResponse } from './server-config';
-import { __cloudTestUtils, startCloudServer } from './server';
+import { cloudHeadJson, cloudPutJson, type AppData, type Task } from '@mindwtr/core';
+import {
+    getAuthFailureRateKey,
+    getAuthFailureTokenRateKey,
+    getClientIp,
+    getToken,
+    isAuthorizedToken,
+    parseAllowedAuthTokens,
+    parseTrustedProxyIps,
+    resolveAllowedAuthTokensFromEnv,
+    toRateLimitRoute,
+    tokenToKey,
+} from './server-auth';
+import {
+    corsOrigin,
+    createInternalServerErrorResponse,
+    errorResponse,
+    preflightResponse,
+} from './server-config';
+import {
+    __serverDataCacheTestUtils,
+    dataMetadataResponse,
+    isTrustedValidatedDataFile,
+    loadAppData,
+    writeCloudData,
+} from './server-data-cache';
+import {
+    createWriteLockRunner,
+    isBodyReadError,
+    isPathWithinRoot,
+    normalizeAttachmentRelativePath,
+    pathContainsSymlink,
+    readJsonBody,
+    resolveAttachmentPath,
+    writeData,
+} from './server-storage';
+import {
+    asStatus,
+    validateAppData,
+    validateTaskCreationProps,
+    validateTaskPatchProps,
+} from './server-validation';
+import { resolveServerMergeTimestamp, startCloudServer } from './server';
+
+const expireFileForOrphanGc = (path: string): void => {
+    const staleTime = new Date(Date.now() - 10 * 60 * 1000);
+    utimesSync(path, staleTime, staleTime);
+};
+
+const makeTestTask = (overrides: Pick<Task, 'id' | 'title'> & Partial<Task>): Task => ({
+    status: 'inbox',
+    tags: [],
+    contexts: [],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+});
 
 describe('cloud server utils', () => {
     test('parses bearer token and hashes it', () => {
         const req = new Request('http://localhost/v1/data', {
             headers: { Authorization: 'Bearer demo-token-1234567890' },
         });
-        const token = __cloudTestUtils.getToken(req);
+        const token = getToken(req);
         expect(token).toBe('demo-token-1234567890');
-        expect(__cloudTestUtils.tokenToKey(token!)).toHaveLength(64);
+        expect(tokenToKey(token!)).toHaveLength(64);
 
         const base64TokenReq = new Request('http://localhost/v1/data', {
             headers: { Authorization: 'Bearer YWxhZGRpbjpvcGVuL3Nlc2FtZT0=' },
         });
-        expect(__cloudTestUtils.getToken(base64TokenReq)).toBe('YWxhZGRpbjpvcGVuL3Nlc2FtZT0=');
+        expect(getToken(base64TokenReq)).toBe('YWxhZGRpbjpvcGVuL3Nlc2FtZT0=');
 
         const shortTokenReq = new Request('http://localhost/v1/data', {
             headers: { Authorization: 'Bearer short' },
         });
-        expect(__cloudTestUtils.getToken(shortTokenReq)).toBeNull();
+        expect(getToken(shortTokenReq)).toBeNull();
 
         const tokenWithWhitespaceReq = new Request('http://localhost/v1/data', {
             headers: { Authorization: 'Bearer token with spaces' },
         });
-        expect(__cloudTestUtils.getToken(tokenWithWhitespaceReq)).toBeNull();
+        expect(getToken(tokenWithWhitespaceReq)).toBeNull();
     });
 
     test('parses optional auth token allowlist', () => {
-        expect(__cloudTestUtils.parseAllowedAuthTokens('')).toBeNull();
-        const tokens = __cloudTestUtils.parseAllowedAuthTokens('alpha, beta ,gamma');
+        expect(parseAllowedAuthTokens('')).toBeNull();
+        const tokens = parseAllowedAuthTokens('alpha, beta ,gamma');
         expect(tokens?.size).toBe(3);
-        expect(__cloudTestUtils.isAuthorizedToken('beta', tokens || null)).toBe(true);
-        expect(__cloudTestUtils.isAuthorizedToken('delta', tokens || null)).toBe(false);
-        expect(__cloudTestUtils.isAuthorizedToken('any', null)).toBe(true);
+        expect(tokens?.digests.every((digest) => digest.length === 32)).toBe(true);
+        expect(isAuthorizedToken('beta', tokens || null)).toBe(true);
+        expect(isAuthorizedToken('delta', tokens || null)).toBe(false);
+        expect(isAuthorizedToken('any', null)).toBe(true);
     });
 
     test('resolves auth tokens from both current and legacy env var names', () => {
-        const primaryOnly = __cloudTestUtils.resolveAllowedAuthTokensFromEnv({
-            MINDWTR_CLOUD_AUTH_TOKENS: 'alpha,beta',
-        });
-        expect(primaryOnly).not.toBeNull();
-        expect(primaryOnly?.has('alpha')).toBe(true);
-        expect(primaryOnly?.has('beta')).toBe(true);
+        const tempDir = mkdtempSync(join(tmpdir(), 'mindwtr-cloud-auth-'));
+        const authTokensFile = join(tempDir, 'auth-tokens.txt');
+        const legacyTokenFile = join(tempDir, 'legacy-token.txt');
+        try {
+            writeFileSync(authTokensFile, 'file-alpha,file-beta\n');
+            writeFileSync(legacyTokenFile, 'legacy-file-token\n');
 
-        const legacyOnly = __cloudTestUtils.resolveAllowedAuthTokensFromEnv({
-            MINDWTR_CLOUD_TOKEN: 'legacy-token',
-        });
-        expect(legacyOnly).not.toBeNull();
-        expect(legacyOnly?.has('legacy-token')).toBe(true);
+            const primaryOnly = resolveAllowedAuthTokensFromEnv({
+                MINDWTR_CLOUD_AUTH_TOKENS: 'alpha,beta',
+            });
+            expect(primaryOnly).not.toBeNull();
+            expect(isAuthorizedToken('alpha', primaryOnly)).toBe(true);
+            expect(isAuthorizedToken('beta', primaryOnly)).toBe(true);
 
-        const combined = __cloudTestUtils.resolveAllowedAuthTokensFromEnv({
-            MINDWTR_CLOUD_AUTH_TOKENS: 'new-token',
-            MINDWTR_CLOUD_TOKEN: 'legacy-token',
-        });
-        expect(combined?.has('new-token')).toBe(true);
-        expect(combined?.has('legacy-token')).toBe(true);
+            const legacyOnly = resolveAllowedAuthTokensFromEnv({
+                MINDWTR_CLOUD_TOKEN: 'legacy-token',
+            });
+            expect(legacyOnly).not.toBeNull();
+            expect(isAuthorizedToken('legacy-token', legacyOnly)).toBe(true);
 
-        const allowAny = __cloudTestUtils.resolveAllowedAuthTokensFromEnv({
-            MINDWTR_CLOUD_ALLOW_ANY_TOKEN: 'true',
-        });
-        expect(allowAny).toBeNull();
+            const combined = resolveAllowedAuthTokensFromEnv({
+                MINDWTR_CLOUD_AUTH_TOKENS: 'new-token',
+                MINDWTR_CLOUD_TOKEN: 'legacy-token',
+            });
+            expect(isAuthorizedToken('new-token', combined)).toBe(true);
+            expect(isAuthorizedToken('legacy-token', combined)).toBe(true);
 
-        expect(() => __cloudTestUtils.resolveAllowedAuthTokensFromEnv({})).toThrow(
-            'Cloud auth is not configured.'
-        );
+            const fileOnly = resolveAllowedAuthTokensFromEnv({
+                MINDWTR_CLOUD_AUTH_TOKENS_FILE: authTokensFile,
+            });
+            expect(isAuthorizedToken('file-alpha', fileOnly)).toBe(true);
+            expect(isAuthorizedToken('file-beta', fileOnly)).toBe(true);
+
+            const legacyFileOnly = resolveAllowedAuthTokensFromEnv({
+                MINDWTR_CLOUD_TOKEN_FILE: legacyTokenFile,
+            });
+            expect(isAuthorizedToken('legacy-file-token', legacyFileOnly)).toBe(true);
+
+            const mixedWithFile = resolveAllowedAuthTokensFromEnv({
+                MINDWTR_CLOUD_AUTH_TOKENS: 'inline-token',
+                MINDWTR_CLOUD_AUTH_TOKENS_FILE: authTokensFile,
+            });
+            expect(isAuthorizedToken('inline-token', mixedWithFile)).toBe(true);
+            expect(isAuthorizedToken('file-alpha', mixedWithFile)).toBe(true);
+            expect(isAuthorizedToken('file-beta', mixedWithFile)).toBe(true);
+
+            const allowAny = resolveAllowedAuthTokensFromEnv({
+                MINDWTR_CLOUD_ALLOW_ANY_TOKEN: 'true',
+            });
+            expect(allowAny).toBeNull();
+
+            expect(() => resolveAllowedAuthTokensFromEnv({})).toThrow(
+                'Cloud auth is not configured.'
+            );
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true });
+        }
     });
 
     test('ignores proxy IP headers unless explicitly trusted', () => {
@@ -79,8 +164,25 @@ describe('cloud server utils', () => {
             },
         });
 
-        expect(__cloudTestUtils.getClientIp(req)).toBe('unknown');
-        expect(__cloudTestUtils.getClientIp(req, true)).toBe('203.0.113.10');
+        expect(getClientIp(req)).toBe('unknown');
+        expect(getClientIp(req, true)).toBe('unknown');
+        expect(getClientIp(req, {
+            trustProxyHeaders: true,
+            requestIpAddress: '198.51.100.1',
+            trustedProxyIps: new Set(['10.0.0.1']),
+        })).toBe('unknown');
+        expect(getClientIp(req, {
+            trustProxyHeaders: true,
+            requestIpAddress: '10.0.0.1',
+            trustedProxyIps: new Set(['10.0.0.1']),
+        })).toBe('203.0.113.10');
+    });
+
+    test('parses trusted proxy IP allowlists', () => {
+        expect(Array.from(parseTrustedProxyIps(' 10.0.0.1, ::ffff:127.0.0.1 ,, '))).toEqual([
+            '10.0.0.1',
+            '127.0.0.1',
+        ]);
     });
 
     test('derives auth failure rate keys from the best available client identity', () => {
@@ -92,37 +194,49 @@ describe('cloud server utils', () => {
             },
         });
 
-        expect(__cloudTestUtils.getAuthFailureRateKey(req, {
+        expect(getAuthFailureRateKey(req, {
             trustProxyHeaders: true,
+            trustedProxyIps: new Set(['127.0.0.1']),
             requestIpAddress: '127.0.0.1',
-            token,
         })).toBe('auth-failure:ip:203.0.113.10');
 
-        expect(__cloudTestUtils.getAuthFailureRateKey(req, {
-            trustProxyHeaders: false,
+        expect(getAuthFailureRateKey(req, {
+            trustProxyHeaders: true,
+            trustedProxyIps: new Set(['10.0.0.1']),
             requestIpAddress: '127.0.0.1',
-            token,
         })).toBe('auth-failure:ip:127.0.0.1');
 
-        expect(__cloudTestUtils.getAuthFailureRateKey(req, {
+        expect(getAuthFailureRateKey(req, {
             trustProxyHeaders: false,
-            requestIpAddress: null,
-            token,
-        })).toBe(`auth-failure:token:${__cloudTestUtils.tokenToKey(token)}`);
+            requestIpAddress: '127.0.0.1',
+        })).toBe('auth-failure:ip:127.0.0.1');
 
-        expect(__cloudTestUtils.getAuthFailureRateKey(new Request('http://localhost/v1/data', {
-            headers: {
-                authorization: 'Bearer malformed',
-            },
+        expect(getAuthFailureRateKey(req, {
+            trustProxyHeaders: false,
+            requestIpAddress: '127.0.0.1',
+        })).toBe(getAuthFailureRateKey(new Request('http://localhost/v1/data', {
+            headers: { authorization: 'Bearer another-invalid-token-1234567890' },
         }), {
             trustProxyHeaders: false,
+            requestIpAddress: '127.0.0.1',
+        }));
+
+        expect(getAuthFailureRateKey(req, {
+            trustProxyHeaders: false,
             requestIpAddress: null,
+        })).toBe('auth-failure:ip:unknown');
+
+        expect(getAuthFailureTokenRateKey({ token })).toBe(
+            `auth-failure:token:${tokenToKey(token)}`
+        );
+
+        expect(getAuthFailureTokenRateKey({
             authHeader: 'Bearer malformed',
-        })).toBe(`auth-failure:header:${__cloudTestUtils.tokenToKey('Bearer malformed')}`);
+        })).toBe(`auth-failure:header:${tokenToKey('Bearer malformed')}`);
     });
 
     test('rejects invalid app data payload', () => {
-        const result = __cloudTestUtils.validateAppData({ tasks: 'invalid', projects: [] });
+        const result = validateAppData({ tasks: 'invalid', projects: [] });
         expect(result.ok).toBe(false);
     });
 
@@ -133,11 +247,21 @@ describe('cloud server utils', () => {
         expect(response.headers.get('Content-Type')).toBe('application/json; charset=utf-8');
         expect(response.headers.get('Access-Control-Allow-Origin')).toBe(corsOrigin);
         expect(response.headers.get('Access-Control-Allow-Headers')).toBe('Authorization, Content-Type');
-        expect(response.headers.get('Access-Control-Allow-Methods')).toBe('GET,PUT,POST,PATCH,DELETE,OPTIONS');
+        expect(response.headers.get('Access-Control-Allow-Methods')).toBe('GET,HEAD,PUT,POST,PATCH,DELETE,OPTIONS');
+    });
+
+    test('returns no-content CORS preflight responses', async () => {
+        const response = preflightResponse();
+
+        expect(response.status).toBe(204);
+        expect(response.headers.get('Access-Control-Allow-Origin')).toBe(corsOrigin);
+        expect(response.headers.get('Access-Control-Allow-Headers')).toBe('Authorization, Content-Type');
+        expect(response.headers.get('Access-Control-Allow-Methods')).toBe('GET,HEAD,PUT,POST,PATCH,DELETE,OPTIONS');
+        expect(await response.text()).toBe('');
     });
 
     test('includes a request id in internal server error responses', async () => {
-        const response = __cloudTestUtils.createInternalServerErrorResponse('Internal server error', 'req-test-123');
+        const response = createInternalServerErrorResponse('Internal server error', 'req-test-123');
 
         expect(response.status).toBe(500);
         expect(response.headers.get('X-Request-Id')).toBe('req-test-123');
@@ -147,7 +271,7 @@ describe('cloud server utils', () => {
     });
 
     test('rejects invalid task status and timestamps in app data', () => {
-        const invalidStatus = __cloudTestUtils.validateAppData({
+        const invalidStatus = validateAppData({
             tasks: [{
                 id: 't1',
                 title: 'Task 1',
@@ -159,7 +283,7 @@ describe('cloud server utils', () => {
         });
         expect(invalidStatus.ok).toBe(false);
 
-        const invalidTimestamp = __cloudTestUtils.validateAppData({
+        const invalidTimestamp = validateAppData({
             tasks: [{
                 id: 't1',
                 title: 'Task 1',
@@ -174,7 +298,7 @@ describe('cloud server utils', () => {
 
     test('accepts null optional deletedAt timestamps while requiring area createdAt/updatedAt', () => {
      const iso = '2024-01-01T00:00:00.000Z';
-     const result = __cloudTestUtils.validateAppData({
+     const result = validateAppData({
          tasks: [{
              id: 't1',
              title: 'Task',
@@ -213,7 +337,7 @@ describe('cloud server utils', () => {
     test('rejects live records with broken project, section, or area references', () => {
         const iso = '2024-01-01T00:00:00.000Z';
 
-        const invalidTaskProject = __cloudTestUtils.validateAppData({
+        const invalidTaskProject = validateAppData({
             tasks: [{
                 id: 't1',
                 title: 'Task',
@@ -228,7 +352,7 @@ describe('cloud server utils', () => {
         });
         expect(invalidTaskProject.ok).toBe(false);
 
-        const invalidTaskSection = __cloudTestUtils.validateAppData({
+        const invalidTaskSection = validateAppData({
             tasks: [{
                 id: 't1',
                 title: 'Task',
@@ -253,7 +377,7 @@ describe('cloud server utils', () => {
         });
         expect(invalidTaskSection.ok).toBe(false);
 
-        const invalidProjectArea = __cloudTestUtils.validateAppData({
+        const invalidProjectArea = validateAppData({
             tasks: [],
             projects: [{
                 id: 'p1',
@@ -273,18 +397,22 @@ describe('cloud server utils', () => {
     });
 
     test('accepts only core task statuses', () => {
-        expect(__cloudTestUtils.asStatus('reference')).toBe('reference');
-        expect(__cloudTestUtils.asStatus('todo')).toBeNull();
-        expect(__cloudTestUtils.asStatus('in-progress')).toBeNull();
+        expect(asStatus('reference')).toBe('reference');
+        expect(asStatus('todo')).toBeNull();
+        expect(asStatus('in-progress')).toBeNull();
     });
 
     test('rejects reserved task creation props', () => {
-        expect(__cloudTestUtils.validateTaskCreationProps({
+        expect(validateTaskCreationProps({
             status: 'next',
+            energyLevel: 'medium',
+            assignedTo: 'person-1',
             projectId: 'p1',
+            showFutureRecurrence: true,
+            suppressMindwtrReminders: true,
         }).ok).toBe(true);
 
-        const invalid = __cloudTestUtils.validateTaskCreationProps({
+        const invalid = validateTaskCreationProps({
             status: 'next',
             rev: 99,
             deletedAt: '2026-01-01T00:00:00.000Z',
@@ -296,13 +424,16 @@ describe('cloud server utils', () => {
     });
 
     test('rejects reserved task patch props', () => {
-        expect(__cloudTestUtils.validateTaskPatchProps({
+        expect(validateTaskPatchProps({
             title: 'Renamed',
             status: 'next',
+            energyLevel: 'low',
+            assignedTo: 'person-2',
             order: 1,
+            suppressMindwtrReminders: false,
         }).ok).toBe(true);
 
-        const invalid = __cloudTestUtils.validateTaskPatchProps({
+        const invalid = validateTaskPatchProps({
             id: 'override',
             createdAt: '2026-01-01T00:00:00.000Z',
             arbitrary: 'value',
@@ -314,6 +445,78 @@ describe('cloud server utils', () => {
         expect(invalid.error).toContain('arbitrary');
     });
 
+    test('validates schedule task prop values before REST writes', () => {
+        expect(validateTaskCreationProps({
+            status: 'next',
+            repeatReminderMinutes: 15,
+            relativeStartOffset: { amount: -3, unit: 'day' },
+            recurrence: { rule: 'weekly', byDay: ['MO'] },
+        }).ok).toBe(true);
+        expect(validateTaskPatchProps({
+            repeatReminderMinutes: 0,
+            recurrence: 'FREQ=DAILY;INTERVAL=2',
+        }).ok).toBe(true);
+
+        const invalidRepeat = validateTaskCreationProps({ repeatReminderMinutes: 7 });
+        expect(invalidRepeat.ok).toBe(false);
+        if (invalidRepeat.ok) throw new Error('Expected invalid repeatReminderMinutes');
+        expect(invalidRepeat.error).toContain('repeatReminderMinutes');
+
+        const invalidOffset = validateTaskPatchProps({ relativeStartOffset: { amount: 3, unit: 'day' } });
+        expect(invalidOffset.ok).toBe(false);
+        if (invalidOffset.ok) throw new Error('Expected invalid relativeStartOffset');
+        expect(invalidOffset.error).toContain('relativeStartOffset');
+
+        const invalidRecurrence = validateTaskPatchProps({ recurrence: { rule: 'daily', arbitrary: true } });
+        expect(invalidRecurrence.ok).toBe(false);
+        if (invalidRecurrence.ok) throw new Error('Expected invalid recurrence');
+        expect(invalidRecurrence.error).toContain('recurrence');
+
+        const invalidRecurrenceValue = validateTaskPatchProps({ recurrence: { rule: 'weekly', byDay: ['NOPE'] } });
+        expect(invalidRecurrenceValue.ok).toBe(false);
+        if (invalidRecurrenceValue.ok) throw new Error('Expected invalid recurrence value');
+        expect(invalidRecurrenceValue.error).toContain('recurrence');
+    });
+
+    test('validates schedule task prop values in app data snapshots', () => {
+        const baseTask = makeTestTask({ id: 't1', title: 'Task' });
+
+        const valid = validateAppData({
+            tasks: [{
+                ...baseTask,
+                repeatReminderMinutes: 15,
+                relativeStartOffset: { amount: -3, unit: 'day' },
+                recurrence: { rule: 'weekly', byDay: ['MO'] },
+            }],
+            projects: [],
+        });
+        expect(valid.ok).toBe(true);
+
+        const invalidRepeat = validateAppData({
+            tasks: [{ ...baseTask, repeatReminderMinutes: 7 }],
+            projects: [],
+        });
+        expect(invalidRepeat.ok).toBe(false);
+        if (invalidRepeat.ok) throw new Error('Expected invalid repeatReminderMinutes');
+        expect(invalidRepeat.error).toContain('repeatReminderMinutes');
+
+        const invalidOffset = validateAppData({
+            tasks: [{ ...baseTask, relativeStartOffset: { amount: 3, unit: 'day' } }],
+            projects: [],
+        });
+        expect(invalidOffset.ok).toBe(false);
+        if (invalidOffset.ok) throw new Error('Expected invalid relativeStartOffset');
+        expect(invalidOffset.error).toContain('relativeStartOffset');
+
+        const invalidRecurrence = validateAppData({
+            tasks: [{ ...baseTask, recurrence: { rule: 'weekly', byDay: ['NOPE'] } }],
+            projects: [],
+        });
+        expect(invalidRecurrence.ok).toBe(false);
+        if (invalidRecurrence.ok) throw new Error('Expected invalid recurrence');
+        expect(invalidRecurrence.error).toContain('recurrence');
+    });
+
     test('validates settings.attachments.pendingRemoteDeletes structure', () => {
         const iso = '2024-01-01T00:00:00.000Z';
         const base = {
@@ -322,7 +525,7 @@ describe('cloud server utils', () => {
             sections: [],
             areas: [],
         };
-        const valid = __cloudTestUtils.validateAppData({
+        const valid = validateAppData({
             ...base,
             settings: {
                 attachments: {
@@ -337,7 +540,7 @@ describe('cloud server utils', () => {
         });
         expect(valid.ok).toBe(true);
 
-        const invalidCloudKey = __cloudTestUtils.validateAppData({
+        const invalidCloudKey = validateAppData({
             ...base,
             settings: {
                 attachments: {
@@ -347,7 +550,7 @@ describe('cloud server utils', () => {
         });
         expect(invalidCloudKey.ok).toBe(false);
 
-        const invalidAttempts = __cloudTestUtils.validateAppData({
+        const invalidAttempts = validateAppData({
             ...base,
             settings: {
                 attachments: {
@@ -359,9 +562,9 @@ describe('cloud server utils', () => {
     });
 
     test('normalizes rate limit routes for task item endpoints', () => {
-        expect(__cloudTestUtils.toRateLimitRoute('/v1/tasks/abc')).toBe('/v1/tasks/:id');
-        expect(__cloudTestUtils.toRateLimitRoute('/v1/tasks/abc/complete')).toBe('/v1/tasks/:id/:action');
-        expect(__cloudTestUtils.toRateLimitRoute('/v1/tasks')).toBe('/v1/tasks');
+        expect(toRateLimitRoute('/v1/tasks/abc')).toBe('/v1/tasks/:id');
+        expect(toRateLimitRoute('/v1/tasks/abc/complete')).toBe('/v1/tasks/:id/:action');
+        expect(toRateLimitRoute('/v1/tasks')).toBe('/v1/tasks');
     });
 
     test('enforces JSON body size limit without relying on content-length', async () => {
@@ -376,7 +579,9 @@ describe('cloud server utils', () => {
             }),
             duplex: 'half' as RequestDuplex,
         });
-        const parsed = await __cloudTestUtils.readJsonBody(req, 10);
+        const parsed = await readJsonBody(req, 10);
+        expect(isBodyReadError(parsed)).toBe(true);
+        if (!isBodyReadError(parsed)) throw new Error('Expected body read error');
         expect(parsed.__mindwtrError.message).toBe('Payload too large');
         expect(parsed.__mindwtrError.status).toBe(413);
     });
@@ -397,26 +602,28 @@ describe('cloud server utils', () => {
         });
 
         controller.abort(new Error('Request timed out'));
-        const parsed = await __cloudTestUtils.readJsonBody(req, 1024, controller.signal);
+        const parsed = await readJsonBody(req, 1024, controller.signal);
+        expect(isBodyReadError(parsed)).toBe(true);
+        if (!isBodyReadError(parsed)) throw new Error('Expected body read error');
         expect(parsed.__mindwtrError.message).toBe('Request timed out');
         expect(parsed.__mindwtrError.status).toBe(408);
     });
 
     test('normalizes attachment paths with allowlist and segment checks', () => {
-        expect(__cloudTestUtils.normalizeAttachmentRelativePath('folder/file.txt')).toBe('folder/file.txt');
-        expect(__cloudTestUtils.normalizeAttachmentRelativePath('/folder/file.txt/')).toBe('folder/file.txt');
-        expect(__cloudTestUtils.normalizeAttachmentRelativePath('%2e%2e/secret')).toBeNull();
-        expect(__cloudTestUtils.normalizeAttachmentRelativePath('%252e%252e/secret')).toBeNull();
-        expect(__cloudTestUtils.normalizeAttachmentRelativePath('%25252e%25252e/secret')).toBeNull();
-        expect(__cloudTestUtils.normalizeAttachmentRelativePath('../secret')).toBeNull();
-        expect(__cloudTestUtils.normalizeAttachmentRelativePath('folder\\\\file.txt')).toBeNull();
-        expect(__cloudTestUtils.normalizeAttachmentRelativePath('folder/file?.txt')).toBeNull();
+        expect(normalizeAttachmentRelativePath('folder/file.txt')).toBe('folder/file.txt');
+        expect(normalizeAttachmentRelativePath('/folder/file.txt/')).toBe('folder/file.txt');
+        expect(normalizeAttachmentRelativePath('%2e%2e/secret')).toBeNull();
+        expect(normalizeAttachmentRelativePath('%252e%252e/secret')).toBeNull();
+        expect(normalizeAttachmentRelativePath('%25252e%25252e/secret')).toBeNull();
+        expect(normalizeAttachmentRelativePath('../secret')).toBeNull();
+        expect(normalizeAttachmentRelativePath('folder\\\\file.txt')).toBeNull();
+        expect(normalizeAttachmentRelativePath('folder/file?.txt')).toBeNull();
     });
 
     test('checks whether resolved path stays inside root directory', () => {
-        expect(__cloudTestUtils.isPathWithinRoot('/data/ns/attachments/file.txt', '/data/ns/attachments')).toBe(true);
-        expect(__cloudTestUtils.isPathWithinRoot('/data/ns/attachments', '/data/ns/attachments')).toBe(true);
-        expect(__cloudTestUtils.isPathWithinRoot('/data/ns/attachments-evil/file.txt', '/data/ns/attachments')).toBe(false);
+        expect(isPathWithinRoot('/data/ns/attachments/file.txt', '/data/ns/attachments')).toBe(true);
+        expect(isPathWithinRoot('/data/ns/attachments', '/data/ns/attachments')).toBe(true);
+        expect(isPathWithinRoot('/data/ns/attachments-evil/file.txt', '/data/ns/attachments')).toBe(false);
     });
 
     test('detects symlink segments in attachment paths', () => {
@@ -428,17 +635,34 @@ describe('cloud server utils', () => {
 
         const normalDir = join(root, 'plain');
         mkdirSync(normalDir, { recursive: true });
-        expect(__cloudTestUtils.pathContainsSymlink(root, normalDir)).toBe(false);
+        expect(pathContainsSymlink(root, normalDir)).toBe(false);
 
         const linkDir = join(root, 'linked');
         symlinkSync(outside, linkDir);
-        expect(__cloudTestUtils.pathContainsSymlink(root, linkDir)).toBe(true);
+        expect(pathContainsSymlink(root, linkDir)).toBe(true);
+
+        rmSync(sandbox, { recursive: true, force: true });
+    });
+
+    test('does not create attachment roots through a symlinked namespace', () => {
+        const sandbox = mkdtempSync(join(tmpdir(), 'mindwtr-cloud-attachment-root-'));
+        const dataDirForTest = join(sandbox, 'data');
+        const outside = join(sandbox, 'outside');
+        const key = 'namespace-key';
+        mkdirSync(dataDirForTest, { recursive: true });
+        mkdirSync(outside, { recursive: true });
+        symlinkSync(outside, join(dataDirForTest, key), 'dir');
+
+        const resolvedPath = resolveAttachmentPath(dataDirForTest, key, 'folder/file.bin');
+
+        expect(resolvedPath).toBeNull();
+        expect(existsSync(join(outside, 'attachments'))).toBe(false);
 
         rmSync(sandbox, { recursive: true, force: true });
     });
 
     test('write lock runner executes each queued write once, even after a failure', async () => {
-        const withWriteLock = __cloudTestUtils.createWriteLockRunner();
+        const withWriteLock = createWriteLockRunner();
         let failingCalls = 0;
         let succeedingCalls = 0;
 
@@ -463,14 +687,313 @@ describe('cloud server utils', () => {
         const dir = mkdtempSync(join(tmpdir(), 'mindwtr-cloud-write-data-'));
         const filePath = join(dir, 'data.json');
 
-        __cloudTestUtils.writeData(filePath, { ok: true, version: 1 });
+        writeData(filePath, { ok: true, version: 1 });
         expect(JSON.parse(readFileSync(filePath, 'utf8'))).toEqual({ ok: true, version: 1 });
 
-        __cloudTestUtils.writeData(filePath, { ok: true, version: 2 });
+        writeData(filePath, { ok: true, version: 2 });
         expect(JSON.parse(readFileSync(filePath, 'utf8'))).toEqual({ ok: true, version: 2 });
         expect(readdirSync(dir)).toEqual(['data.json']);
 
         rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('caches parsed app data for unchanged data files without leaking caller mutations', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'mindwtr-cloud-load-cache-'));
+        const filePath = join(dir, 'data.json');
+        const iso = '2026-01-01T00:00:00.000Z';
+        const data: AppData = {
+            tasks: [makeTestTask({
+                id: 'task-1',
+                title: 'Cached',
+                createdAt: iso,
+                updatedAt: iso,
+            })],
+            projects: [],
+            sections: [],
+            areas: [],
+            settings: {},
+        };
+
+        try {
+            __serverDataCacheTestUtils.clearDataCaches();
+            writeFileSync(filePath, JSON.stringify(data));
+
+            const first = loadAppData(filePath);
+            first.tasks.push(makeTestTask({
+                id: 'caller-mutation',
+                title: 'Caller mutation',
+                createdAt: iso,
+                updatedAt: iso,
+            }));
+
+            const second = loadAppData(filePath);
+
+            expect(__serverDataCacheTestUtils.getParsedDataCacheSize()).toBe(1);
+            expect(second.tasks.map((task) => task.id)).toEqual(['task-1']);
+        } finally {
+            __serverDataCacheTestUtils.clearDataCaches();
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test('does not cache write caller object references', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'mindwtr-cloud-write-cache-'));
+        const filePath = join(dir, 'data.json');
+        const iso = '2026-01-01T00:00:00.000Z';
+        const data: AppData = {
+            tasks: [makeTestTask({
+                id: 'task-1',
+                title: 'Written',
+                createdAt: iso,
+                updatedAt: iso,
+            })],
+            projects: [],
+            sections: [],
+            areas: [],
+            settings: {},
+        };
+
+        try {
+            __serverDataCacheTestUtils.clearDataCaches();
+            writeCloudData(filePath, data);
+            data.tasks.push(makeTestTask({
+                id: 'caller-mutation',
+                title: 'Caller mutation',
+                createdAt: iso,
+                updatedAt: iso,
+            }));
+
+            const loaded = loadAppData(filePath);
+
+            expect(__serverDataCacheTestUtils.getParsedDataCacheSize()).toBe(1);
+            expect(loaded.tasks.map((task) => task.id)).toEqual(['task-1']);
+        } finally {
+            __serverDataCacheTestUtils.clearDataCaches();
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test('bounds parsed app data cache entries', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'mindwtr-cloud-cache-bound-'));
+        const iso = '2026-01-01T00:00:00.000Z';
+
+        try {
+            __serverDataCacheTestUtils.clearDataCaches();
+            const maxEntries = __serverDataCacheTestUtils.getDataCacheMaxEntries();
+            for (let index = 0; index < maxEntries + 3; index += 1) {
+                const filePath = join(dir, `data-${index}.json`);
+                writeCloudData(filePath, {
+                    tasks: [makeTestTask({
+                        id: `task-${index}`,
+                        title: `Task ${index}`,
+                        createdAt: iso,
+                        updatedAt: iso,
+                    })],
+                    projects: [],
+                    sections: [],
+                    areas: [],
+                    settings: {},
+                });
+            }
+
+            expect(__serverDataCacheTestUtils.getParsedDataCacheSize()).toBe(maxEntries);
+        } finally {
+            __serverDataCacheTestUtils.clearDataCaches();
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test('promotes parsed app data cache hits before eviction', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'mindwtr-cloud-cache-lru-'));
+        const iso = '2026-01-01T00:00:00.000Z';
+
+        try {
+            __serverDataCacheTestUtils.clearDataCaches();
+            const maxEntries = __serverDataCacheTestUtils.getDataCacheMaxEntries();
+            const filePaths: string[] = [];
+            for (let index = 0; index < maxEntries; index += 1) {
+                const filePath = join(dir, `data-${index}.json`);
+                filePaths.push(filePath);
+                writeCloudData(filePath, {
+                    tasks: [makeTestTask({
+                        id: `task-${index}`,
+                        title: `Task ${index}`,
+                        createdAt: iso,
+                        updatedAt: iso,
+                    })],
+                    projects: [],
+                    sections: [],
+                    areas: [],
+                    settings: {},
+                });
+            }
+
+            loadAppData(filePaths[0]!);
+            writeCloudData(join(dir, 'data-extra.json'), {
+                tasks: [makeTestTask({
+                    id: 'task-extra',
+                    title: 'Task extra',
+                    createdAt: iso,
+                    updatedAt: iso,
+                })],
+                projects: [],
+                sections: [],
+                areas: [],
+                settings: {},
+            });
+
+            expect(__serverDataCacheTestUtils.hasParsedDataCacheEntry(filePaths[0]!)).toBe(true);
+            expect(__serverDataCacheTestUtils.hasParsedDataCacheEntry(filePaths[1]!)).toBe(false);
+        } finally {
+            __serverDataCacheTestUtils.clearDataCaches();
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test('bounds validated data and metadata cache entries with LRU promotion', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'mindwtr-cloud-cache-bound-all-'));
+        const iso = '2026-01-01T00:00:00.000Z';
+
+        try {
+            __serverDataCacheTestUtils.clearDataCaches();
+            const maxEntries = __serverDataCacheTestUtils.getDataCacheMaxEntries();
+            const filePaths: string[] = [];
+            for (let index = 0; index < maxEntries; index += 1) {
+                const filePath = join(dir, `data-${index}.json`);
+                filePaths.push(filePath);
+                writeCloudData(filePath, {
+                    tasks: [makeTestTask({
+                        id: `task-${index}`,
+                        title: `Task ${index}`,
+                        createdAt: iso,
+                        updatedAt: iso,
+                    })],
+                    projects: [],
+                    sections: [],
+                    areas: [],
+                    settings: {},
+                });
+                dataMetadataResponse(filePath);
+            }
+
+            expect(isTrustedValidatedDataFile(filePaths[0]!)).toBe(true);
+            dataMetadataResponse(filePaths[0]!);
+            const extraPath = join(dir, 'data-extra.json');
+            writeCloudData(extraPath, {
+                tasks: [makeTestTask({
+                    id: 'task-extra',
+                    title: 'Task extra',
+                    createdAt: iso,
+                    updatedAt: iso,
+                })],
+                projects: [],
+                sections: [],
+                areas: [],
+                settings: {},
+            });
+            dataMetadataResponse(extraPath);
+
+            expect(__serverDataCacheTestUtils.getValidatedDataCacheSize()).toBe(maxEntries);
+            expect(__serverDataCacheTestUtils.getDataMetadataCacheSize()).toBe(maxEntries);
+            expect(__serverDataCacheTestUtils.hasValidatedDataCacheEntry(filePaths[0]!)).toBe(true);
+            expect(__serverDataCacheTestUtils.hasValidatedDataCacheEntry(filePaths[1]!)).toBe(false);
+            expect(__serverDataCacheTestUtils.hasDataMetadataCacheEntry(filePaths[0]!)).toBe(true);
+            expect(__serverDataCacheTestUtils.hasDataMetadataCacheEntry(filePaths[1]!)).toBe(false);
+        } finally {
+            __serverDataCacheTestUtils.clearDataCaches();
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test('uses server time for merge repair timestamps without spreading large payloads', () => {
+        const startedAt = Date.now();
+        const iso = '2026-01-01T00:00:00.000Z';
+        const data: AppData = {
+            tasks: Array.from({ length: 60_000 }, (_, index) => makeTestTask({
+                id: `task-${index}`,
+                title: `Task ${index}`,
+                createdAt: iso,
+                updatedAt: index === 59_999 ? '2026-01-02T00:00:00.000Z' : iso,
+            })),
+            projects: [],
+            sections: [],
+            areas: [],
+            settings: {},
+        };
+
+        const resolved = Date.parse(resolveServerMergeTimestamp(data));
+        expect(Number.isFinite(resolved)).toBe(true);
+        expect(resolved).toBeGreaterThanOrEqual(startedAt);
+        expect(resolved).toBeLessThanOrEqual(Date.now());
+    });
+
+    test('does not trust future payload timestamps for server merge repairs', () => {
+        const startedAt = Date.now();
+        const iso = '2026-01-01T00:00:00.000Z';
+        const farFuture = new Date(startedAt + 365 * 24 * 60 * 60 * 1000).toISOString();
+        const data: AppData = {
+            tasks: [makeTestTask({
+                id: 'task-future',
+                title: 'Future task',
+                createdAt: iso,
+                updatedAt: farFuture,
+            })],
+            projects: [],
+            sections: [],
+            areas: [],
+            settings: {},
+        };
+
+        const resolved = Date.parse(resolveServerMergeTimestamp(data));
+        expect(Number.isFinite(resolved)).toBe(true);
+        expect(resolved).toBeGreaterThanOrEqual(startedAt);
+        expect(resolved).toBeLessThanOrEqual(Date.now());
+    });
+});
+
+describe('cloud server namespace mode', () => {
+    test('caps new namespace creation when any-token mode is enabled', async () => {
+        const tempDataDir = mkdtempSync(join(tmpdir(), 'mindwtr-cloud-namespace-test-'));
+        const firstToken = 'namespace-token-one-1234567890';
+        const secondToken = 'namespace-token-two-1234567890';
+        const server = await startCloudServer({
+            host: '127.0.0.1',
+            port: 0,
+            dataDir: tempDataDir,
+            allowedAuthTokens: null,
+            maxAnyTokenNamespaces: 1,
+        });
+        const url = `http://127.0.0.1:${server.port}`;
+        try {
+            const firstResponse = await fetch(`${url}/v1/data`, {
+                headers: { Authorization: `Bearer ${firstToken}` },
+            });
+            expect(firstResponse.status).toBe(200);
+
+            const secondResponse = await fetch(`${url}/v1/data`, {
+                method: 'PUT',
+                headers: {
+                    Authorization: `Bearer ${secondToken}`,
+                    'content-type': 'application/json',
+                },
+                body: JSON.stringify({ tasks: [], projects: [], sections: [], areas: [], settings: {} }),
+            });
+            expect(secondResponse.status).toBe(403);
+            expect((await secondResponse.json()).error).toBe('Token namespace limit reached');
+
+            const existingNamespaceResponse = await fetch(`${url}/v1/data`, {
+                method: 'PUT',
+                headers: {
+                    Authorization: `Bearer ${firstToken}`,
+                    'content-type': 'application/json',
+                },
+                body: JSON.stringify({ tasks: [], projects: [], sections: [], areas: [], settings: {} }),
+            });
+            expect(existingNamespaceResponse.status).toBe(200);
+        } finally {
+            server.stop();
+            rmSync(tempDataDir, { recursive: true, force: true });
+        }
     });
 });
 
@@ -509,6 +1032,383 @@ describe('cloud server api', () => {
         baseUrl = '';
     });
 
+    test('handles CORS preflight without requiring auth or returning JSON', async () => {
+        const response = await fetch(`${baseUrl}/v1/tasks`, {
+            method: 'OPTIONS',
+            headers: {
+                Origin: corsOrigin,
+                'Access-Control-Request-Method': 'POST',
+                'Access-Control-Request-Headers': 'Authorization, Content-Type',
+            },
+        });
+
+        expect(response.status).toBe(204);
+        expect(response.headers.get('Access-Control-Allow-Origin')).toBe(corsOrigin);
+        expect(response.headers.get('Access-Control-Allow-Headers')).toBe('Authorization, Content-Type');
+        expect(response.headers.get('Access-Control-Allow-Methods')).toBe('GET,HEAD,PUT,POST,PATCH,DELETE,OPTIONS');
+        expect(await response.text()).toBe('');
+    });
+
+    test('returns post-write metadata for PUT /v1/data', async () => {
+        const response = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                tasks: [],
+                projects: [],
+                sections: [],
+                areas: [],
+                settings: {},
+            } satisfies AppData),
+        });
+
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body.ok).toBe(true);
+        expect(body.etag).toMatch(/^W\/"mindwtr-/);
+        expect(body.remoteFingerprint).toBe(`cloud:v1:etag=${body.etag}`);
+        expect(body.serverMergedRemoteData).toBe(false);
+        expect(body.contentLength).toBeTruthy();
+        expect(response.headers.get('etag')).toBe(body.etag);
+        expect(response.headers.get('access-control-expose-headers')).toContain('ETag');
+    });
+
+    test('marks PUT /v1/data when existing server data contributes to the stored merge', async () => {
+        const seedData: AppData = {
+            tasks: [makeTestTask({ id: 'server-only', title: 'Server Only' })],
+            projects: [],
+            sections: [],
+            areas: [],
+            settings: {},
+        };
+        const seedResponse = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify(seedData),
+        });
+        expect(seedResponse.status).toBe(200);
+
+        const staleResponse = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                tasks: [],
+                projects: [],
+                sections: [],
+                areas: [],
+                settings: {},
+            } satisfies AppData),
+        });
+
+        expect(staleResponse.status).toBe(200);
+        const body = await staleResponse.json();
+        expect(body.serverMergedRemoteData).toBe(true);
+        expect(body.remoteFingerprint).toBe(`cloud:v1:etag=${body.etag}`);
+
+        const getResponse = await fetch(`${baseUrl}/v1/data`, { headers: authHeaders });
+        const stored = await getResponse.json() as AppData;
+        expect(stored.tasks.map((task) => task.id)).toEqual(['server-only']);
+    });
+
+    test('auth failure throttling never bypasses token checks for PUT /v1/data', async () => {
+        let firstStatus = 0;
+        let lastStatus = 0;
+        for (let attempt = 0; attempt < 31; attempt += 1) {
+            const response = await fetch(`${baseUrl}/v1/data`, {
+                method: 'PUT',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ tasks: [], projects: [], sections: [], areas: [], settings: {} }),
+            });
+            if (attempt === 0) firstStatus = response.status;
+            lastStatus = response.status;
+        }
+
+        expect(firstStatus).toBe(401);
+        expect(lastStatus).toBe(429);
+        expect(readdirSync(dataDir)).toEqual([]);
+    });
+
+    test('converges concurrent task creation and full data merge writes', async () => {
+        const iso = '2026-01-01T00:00:00.000Z';
+        const createRequest = fetch(`${baseUrl}/v1/tasks`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ title: 'Task from POST' }),
+        });
+        const putRequest = fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                tasks: [makeTestTask({
+                    id: 'task-from-put',
+                    title: 'Task from PUT',
+                    createdAt: iso,
+                    updatedAt: iso,
+                })],
+                projects: [],
+                sections: [],
+                areas: [],
+                settings: {},
+            } satisfies AppData),
+        });
+
+        const [createResponse, putResponse] = await Promise.all([createRequest, putRequest]);
+        expect(createResponse.status).toBe(201);
+        expect(putResponse.status).toBe(200);
+        const createdJson = await createResponse.json();
+        const createdId = String(createdJson.task?.id || '');
+        expect(createdId).toBeTruthy();
+
+        const dataResponse = await fetch(`${baseUrl}/v1/data`, { headers: authHeaders });
+        expect(dataResponse.status).toBe(200);
+        const data = await dataResponse.json() as AppData;
+        const tasksById = new Map(data.tasks.map((task) => [task.id, task]));
+        expect(tasksById.get('task-from-put')?.title).toBe('Task from PUT');
+        expect(tasksById.get(createdId)?.title).toBe('Task from POST');
+    });
+
+    test('rejects writes when stored namespace data is corrupt before atomic write', async () => {
+        const key = tokenToKey(integrationToken);
+        const filePath = join(dataDir, `${key}.json`);
+        const corruptPayload = '{"tasks":[';
+        writeFileSync(filePath, corruptPayload);
+
+        const response = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                tasks: [makeTestTask({ id: 'replacement-task', title: 'Replacement Task' })],
+                projects: [],
+                sections: [],
+                areas: [],
+                settings: {},
+            } satisfies AppData),
+        });
+
+        expect(response.status).toBe(500);
+        expect((await response.json()).error).toBe('Stored data failed validation');
+        expect(readFileSync(filePath, 'utf8')).toBe(corruptPayload);
+    });
+
+    test('preserves people across /v1/data server-side merges', async () => {
+        const seedData: AppData = {
+            tasks: [],
+            projects: [],
+            sections: [],
+            areas: [],
+            people: [{
+                id: 'person-1',
+                name: 'Alex',
+                note: 'Design lead',
+                referenceLink: 'https://example.com/alex',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-01T00:00:00.000Z',
+                rev: 1,
+                revBy: 'device-a',
+            }],
+            settings: {},
+        };
+        const seedResponse = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify(seedData),
+        });
+        expect(seedResponse.status).toBe(200);
+
+        const staleResponse = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                tasks: [],
+                projects: [],
+                sections: [],
+                areas: [],
+                people: [],
+                settings: {},
+            } satisfies AppData),
+        });
+        expect(staleResponse.status).toBe(200);
+
+        const getResponse = await fetch(`${baseUrl}/v1/data`, { headers: authHeaders });
+        expect(getResponse.status).toBe(200);
+        const data = await getResponse.json() as AppData;
+        expect(data.people).toEqual(seedData.people);
+    });
+
+    test('returns fast-sync fingerprints for real self-hosted two-device writes', async () => {
+        const dataUrl = `${baseUrl}/v1/data`;
+        const firstDeviceData: AppData = {
+            tasks: [makeTestTask({ id: 'device-a-task', title: 'Device A task' })],
+            projects: [],
+            sections: [],
+            areas: [],
+            people: [],
+            settings: {},
+        };
+        const secondDeviceData: AppData = {
+            tasks: [makeTestTask({ id: 'device-b-task', title: 'Device B task' })],
+            projects: [],
+            sections: [],
+            areas: [],
+            people: [],
+            settings: {},
+        };
+
+        const firstWrite = await cloudPutJson(dataUrl, firstDeviceData, {
+            token: integrationToken,
+            allowInsecureHttp: true,
+        });
+        expect(firstWrite.serverMergedRemoteData).toBe(false);
+        expect(firstWrite.fingerprint).toMatch(/^cloud:v1:etag=/);
+        expect(firstWrite.etag).toBeTruthy();
+
+        const firstHead = await cloudHeadJson(dataUrl, {
+            token: integrationToken,
+            allowInsecureHttp: true,
+        });
+        expect(firstHead.fingerprint).toBe(firstWrite.fingerprint);
+
+        const secondWrite = await cloudPutJson(dataUrl, secondDeviceData, {
+            token: integrationToken,
+            allowInsecureHttp: true,
+        });
+        expect(secondWrite.serverMergedRemoteData).toBe(true);
+        expect(secondWrite.fingerprint).toMatch(/^cloud:v1:etag=/);
+
+        const secondHead = await cloudHeadJson(dataUrl, {
+            token: integrationToken,
+            allowInsecureHttp: true,
+        });
+        expect(secondHead.fingerprint).toBe(secondWrite.fingerprint);
+
+        const mergedResponse = await fetch(dataUrl, { headers: authHeaders });
+        expect(mergedResponse.status).toBe(200);
+        const mergedData = await mergedResponse.json() as AppData;
+        expect(mergedData.tasks.map((task) => task.id).sort()).toEqual([
+            'device-a-task',
+            'device-b-task',
+        ]);
+    });
+
+    test('returns data metadata for HEAD /v1/data without a body', async () => {
+        const seedResponse = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                tasks: [],
+                projects: [{
+                    id: 'project-multibyte',
+                    title: '多字节项目',
+                    status: 'active',
+                    color: '#2563EB',
+                    order: 0,
+                    tagIds: [],
+                    createdAt: '2026-01-01T00:00:00.000Z',
+                    updatedAt: '2026-01-01T00:00:00.000Z',
+                }],
+                sections: [],
+                areas: [],
+                settings: {},
+            }),
+        });
+        expect(seedResponse.status).toBe(200);
+
+        const response = await fetch(`${baseUrl}/v1/data`, {
+            method: 'HEAD',
+            headers: authHeaders,
+        });
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('etag')).toMatch(/^W\/"mindwtr-/);
+        expect(response.headers.get('last-modified')).toBeTruthy();
+        const getResponse = await fetch(`${baseUrl}/v1/data`, {
+            method: 'GET',
+            headers: authHeaders,
+        });
+        const getBody = await getResponse.text();
+        expect(response.headers.get('content-length')).toBe(String(new TextEncoder().encode(getBody).byteLength));
+        expect(await response.text()).toBe('');
+    });
+
+    test('serves trusted GET /v1/data cache hits without reparsing JSON', async () => {
+        const seedResponse = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                tasks: [makeTestTask({
+                    id: 'task-trusted-get',
+                    title: 'Trusted GET',
+                })],
+                projects: [],
+                sections: [],
+                areas: [],
+                settings: {},
+            }),
+        });
+        expect(seedResponse.status).toBe(200);
+
+        const key = tokenToKey(integrationToken);
+        const filePath = join(dataDir, `${key}.json`);
+        expect(isTrustedValidatedDataFile(filePath)).toBe(true);
+
+        const parseSpy = spyOn(JSON, 'parse').mockImplementation(() => {
+            throw new Error('trusted GET should not parse JSON');
+        });
+        try {
+            const response = await fetch(`${baseUrl}/v1/data`, { headers: authHeaders });
+            expect(response.status).toBe(200);
+            expect(await response.text()).toContain('Trusted GET');
+        } finally {
+            parseSpy.mockRestore();
+        }
+    });
+
+    test('caches unchanged stat-based data metadata by file stats', () => {
+        const tempDir = mkdtempSync(join(tmpdir(), 'mindwtr-cloud-head-cache-'));
+        const filePath = join(tempDir, 'data.json');
+        try {
+            writeFileSync(filePath, JSON.stringify({ version: 1 }));
+            const first = dataMetadataResponse(filePath);
+            const second = dataMetadataResponse(filePath);
+
+            expect(second.headers.get('etag')).toBe(first.headers.get('etag'));
+            expect(first.headers.get('etag')).toMatch(/^W\/"mindwtr-/);
+            expect(__serverDataCacheTestUtils.getDataMetadataCacheSize()).toBeGreaterThan(0);
+        } finally {
+            rmSync(tempDir, { recursive: true, force: true });
+        }
+    });
+
     test('supports task CRUD and soft delete flow', async () => {
         const createResponse = await fetch(`${baseUrl}/v1/tasks`, {
             method: 'POST',
@@ -522,6 +1422,8 @@ describe('cloud server api', () => {
         const createdJson = await createResponse.json();
         const taskId = createdJson.task.id as string;
         expect(taskId).toBeTruthy();
+        expect(createdJson.task.rev).toBe(1);
+        expect(createdJson.task.revBy).toBe('cloud');
 
         const patchResponse = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}`, {
             method: 'PATCH',
@@ -533,7 +1435,7 @@ describe('cloud server api', () => {
         });
         expect(patchResponse.status).toBe(200);
         const patchJson = await patchResponse.json();
-        expect(patchJson.task.rev).toBe(1);
+        expect(patchJson.task.rev).toBe(2);
         expect(patchJson.task.revBy).toBe('cloud');
 
         const getResponse = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}`, {
@@ -556,7 +1458,7 @@ describe('cloud server api', () => {
         const deletedJson = await listDeleted.json();
         const deletedTask = (deletedJson.tasks as { id: string; deletedAt?: string; rev?: number; revBy?: string }[]).find((task) => task.id === taskId);
         expect(deletedTask?.deletedAt).toBeTruthy();
-        expect(deletedTask?.rev).toBe(2);
+        expect(deletedTask?.rev).toBe(3);
         expect(deletedTask?.revBy).toBe('cloud');
 
         const getDeleted = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}`, {
@@ -585,6 +1487,62 @@ describe('cloud server api', () => {
             headers: authHeaders,
         });
         expect(archiveDeleted.status).toBe(404);
+    });
+
+    test('finalizes task REST writes before storing data', async () => {
+        const createResponse = await fetch(`${baseUrl}/v1/tasks`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                title: 'Dangling create',
+                props: {
+                    projectId: 'missing-project',
+                    sectionId: 'missing-section',
+                    areaId: 'missing-area',
+                },
+            }),
+        });
+        expect(createResponse.status).toBe(400);
+        expect((await createResponse.json()).error).toContain('references missing or deleted project');
+
+        const validCreateResponse = await fetch(`${baseUrl}/v1/tasks`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ title: 'Valid task' }),
+        });
+        expect(validCreateResponse.status).toBe(201);
+        const validCreatedJson = await validCreateResponse.json();
+        const validTask = validCreatedJson.task as Task;
+
+        const patchResponse = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent(validTask.id)}`, {
+            method: 'PATCH',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                projectId: 'missing-project-after-patch',
+                sectionId: 'missing-section-after-patch',
+                areaId: 'missing-area-after-patch',
+            }),
+        });
+        expect(patchResponse.status).toBe(400);
+        expect((await patchResponse.json()).error).toContain('references missing or deleted project');
+
+        const dataResponse = await fetch(`${baseUrl}/v1/data`, { headers: authHeaders });
+        expect(dataResponse.status).toBe(200);
+        const stored = await dataResponse.json() as AppData;
+        expect(stored.tasks).toHaveLength(1);
+        const storedTask = stored.tasks.find((task) => task.id === validTask.id);
+        expect(storedTask?.projectId).toBeUndefined();
+        expect(storedTask?.sectionId).toBeUndefined();
+        expect(storedTask?.areaId).toBeUndefined();
     });
 
     test('rejects invalid task ids in task and task-action routes', async () => {
@@ -640,6 +1598,252 @@ describe('cloud server api', () => {
         expect(body.projectTotal).toBe(3);
         expect((body.tasks as Array<{ id: string }>).map((task) => task.id)).toEqual(['task-2', 'task-3']);
         expect((body.projects as Array<{ id: string }>).map((project) => project.id)).toEqual(['project-2', 'project-3']);
+
+        const independentResponse = await fetch(`${baseUrl}/v1/search?query=Alpha&limit=2&taskOffset=2&projectOffset=0`, {
+            headers: authHeaders,
+        });
+        expect(independentResponse.status).toBe(200);
+        const independentBody = await independentResponse.json();
+        expect(independentBody.taskOffset).toBe(2);
+        expect(independentBody.projectOffset).toBe(0);
+        expect((independentBody.tasks as Array<{ id: string }>).map((task) => task.id)).toEqual(['task-3']);
+        expect((independentBody.projects as Array<{ id: string }>).map((project) => project.id)).toEqual(['project-1', 'project-2']);
+    });
+
+    test('supports REST create and patch for areas, projects, and sections', async () => {
+        const areaResponse = await fetch(`${baseUrl}/v1/areas`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ name: 'Work', props: { color: '#2563eb' } }),
+        });
+        expect(areaResponse.status).toBe(201);
+        const areaBody = await areaResponse.json();
+        const areaId = areaBody.area.id as string;
+
+        const projectResponse = await fetch(`${baseUrl}/v1/projects`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ title: 'Launch', props: { areaId } }),
+        });
+        expect(projectResponse.status).toBe(201);
+        const projectBody = await projectResponse.json();
+        const projectId = projectBody.project.id as string;
+        expect(projectBody.project.areaId).toBe(areaId);
+
+        const sectionResponse = await fetch(`${baseUrl}/v1/sections`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ projectId, title: 'Planning' }),
+        });
+        expect(sectionResponse.status).toBe(201);
+        const sectionBody = await sectionResponse.json();
+        const sectionId = sectionBody.section.id as string;
+
+        const patchProject = await fetch(`${baseUrl}/v1/projects/${encodeURIComponent(projectId)}`, {
+            method: 'PATCH',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ title: 'Launch v2' }),
+        });
+        expect(patchProject.status).toBe(200);
+        expect((await patchProject.json()).project.title).toBe('Launch v2');
+
+        const rejectEmptyArea = await fetch(`${baseUrl}/v1/projects/${encodeURIComponent(projectId)}`, {
+            method: 'PATCH',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ areaId: '' }),
+        });
+        expect(rejectEmptyArea.status).toBe(400);
+        expect((await rejectEmptyArea.json()).error).toBe('Invalid area id');
+
+        const clearArea = await fetch(`${baseUrl}/v1/projects/${encodeURIComponent(projectId)}`, {
+            method: 'PATCH',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ areaId: null }),
+        });
+        expect(clearArea.status).toBe(200);
+        expect((await clearArea.json()).project.areaId).toBeUndefined();
+
+        const patchSection = await fetch(`${baseUrl}/v1/sections/${encodeURIComponent(sectionId)}`, {
+            method: 'PATCH',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ title: 'Planning v2' }),
+        });
+        expect(patchSection.status).toBe(200);
+        expect((await patchSection.json()).section.title).toBe('Planning v2');
+
+        const patchArea = await fetch(`${baseUrl}/v1/areas/${encodeURIComponent(areaId)}`, {
+            method: 'PATCH',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ name: 'Work v2' }),
+        });
+        expect(patchArea.status).toBe(200);
+        expect((await patchArea.json()).area.name).toBe('Work v2');
+
+        const projectsList = await fetch(`${baseUrl}/v1/projects`, { headers: authHeaders });
+        const sectionsList = await fetch(`${baseUrl}/v1/sections?projectId=${encodeURIComponent(projectId)}`, { headers: authHeaders });
+        const areasList = await fetch(`${baseUrl}/v1/areas`, { headers: authHeaders });
+        expect((await projectsList.json()).total).toBe(1);
+        expect((await sectionsList.json()).total).toBe(1);
+        expect((await areasList.json()).total).toBe(1);
+    });
+
+    test('purges deleted REST projects with refcounted remote attachment cleanup', async () => {
+        const iso = '2026-01-01T00:00:00.000Z';
+        const purgeIso = '2026-01-02T00:00:00.000Z';
+        const projectOnlyCloudKey = 'attachments/project-only.bin';
+        const sharedCloudKey = 'attachments/shared.bin';
+        const attachmentBase = {
+            kind: 'file' as const,
+            uri: '',
+            createdAt: iso,
+            updatedAt: iso,
+            localStatus: 'available' as const,
+        };
+
+        const seedData: AppData = {
+            tasks: [makeTestTask({
+                id: 'task-retaining-shared',
+                title: 'Retains shared attachment',
+                attachments: [{
+                    ...attachmentBase,
+                    id: 'task-att-shared',
+                    title: 'shared.bin',
+                    cloudKey: sharedCloudKey,
+                }],
+            })],
+            projects: [{
+                id: 'project-purged',
+                title: 'Purged project',
+                status: 'active',
+                color: '#6B7280',
+                order: 0,
+                tagIds: [],
+                createdAt: iso,
+                updatedAt: iso,
+                deletedAt: iso,
+                attachments: [
+                    {
+                        ...attachmentBase,
+                        id: 'project-att-only',
+                        title: 'project-only.bin',
+                        cloudKey: projectOnlyCloudKey,
+                    },
+                    {
+                        ...attachmentBase,
+                        id: 'project-att-shared',
+                        title: 'shared.bin',
+                        cloudKey: sharedCloudKey,
+                    },
+                ],
+            }],
+            sections: [],
+            areas: [],
+            people: [],
+            settings: {},
+        };
+        const seedResponse = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify(seedData),
+        });
+        expect(seedResponse.status).toBe(200);
+
+        const purgeResponse = await fetch(`${baseUrl}/v1/projects/project-purged`, {
+            method: 'PATCH',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ purgedAt: purgeIso }),
+        });
+        expect(purgeResponse.status).toBe(200);
+        const purgeBody = await purgeResponse.json();
+        expect(purgeBody.project.purgedAt).toBe(purgeIso);
+        expect(purgeBody.project.attachments[0].cloudKey).toBeUndefined();
+        expect(purgeBody.project.attachments[0].localStatus).toBeUndefined();
+
+        const dataResponse = await fetch(`${baseUrl}/v1/data`, { headers: authHeaders });
+        expect(dataResponse.status).toBe(200);
+        const storedData = await dataResponse.json() as AppData;
+        const storedProject = storedData.projects.find((project) => project.id === 'project-purged');
+        expect(storedProject?.attachments?.map((attachment) => attachment.cloudKey)).toEqual([undefined, undefined]);
+        expect(storedData.settings.attachments?.pendingRemoteDeletes).toEqual([{
+            cloudKey: projectOnlyCloudKey,
+            title: 'project-only.bin',
+        }]);
+    });
+
+    test('validates REST project, section, and area inputs consistently', async () => {
+        const longName = 'x'.repeat(501);
+        const reservedProject = await fetch(`${baseUrl}/v1/projects`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ title: 'Reserved', props: { id: 'override', rev: 99 } }),
+        });
+        expect(reservedProject.status).toBe(400);
+        expect((await reservedProject.json()).error).toContain('Unsupported project props');
+
+        const missingAreaProject = await fetch(`${baseUrl}/v1/projects`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ title: 'Dangling project', props: { areaId: 'missing-area' } }),
+        });
+        expect(missingAreaProject.status).toBe(404);
+
+        const longSection = await fetch(`${baseUrl}/v1/sections`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ projectId: 'missing-project', title: longName }),
+        });
+        expect(longSection.status).toBe(400);
+        expect((await longSection.json()).error).toContain('Section title too long');
+
+        const longArea = await fetch(`${baseUrl}/v1/areas`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ name: longName }),
+        });
+        expect(longArea.status).toBe(400);
+        expect((await longArea.json()).error).toContain('Area name too long');
     });
 
     test('rejects invalid /v1/search pagination parameters', async () => {
@@ -702,7 +1906,7 @@ describe('cloud server api', () => {
         expect(completeResponse.status).toBe(200);
         const completeJson = await completeResponse.json();
         expect(completeJson.task.status).toBe('done');
-        expect(completeJson.task.rev).toBe(1);
+        expect(completeJson.task.rev).toBe(2);
         expect(completeJson.task.revBy).toBe('cloud');
 
         const archiveResponse = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/archive`, {
@@ -712,7 +1916,7 @@ describe('cloud server api', () => {
         expect(archiveResponse.status).toBe(200);
         const archiveJson = await archiveResponse.json();
         expect(archiveJson.task.status).toBe('archived');
-        expect(archiveJson.task.rev).toBe(2);
+        expect(archiveJson.task.rev).toBe(3);
         expect(archiveJson.task.revBy).toBe('cloud');
     });
 
@@ -734,6 +1938,52 @@ describe('cloud server api', () => {
         expect(createResponse.status).toBe(400);
         const payload = await createResponse.json();
         expect(payload.error).toContain('Unsupported task props');
+    });
+
+    test('rejects invalid task prop values on REST writes', async () => {
+        const invalidCreate = await fetch(`${baseUrl}/v1/tasks`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ title: 'Cloud Task', props: { repeatReminderMinutes: 7 } }),
+        });
+        expect(invalidCreate.status).toBe(400);
+        expect((await invalidCreate.json()).error).toContain('repeatReminderMinutes');
+
+        const createResponse = await fetch(`${baseUrl}/v1/tasks`, {
+            method: 'POST',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ title: 'Cloud Task' }),
+        });
+        expect(createResponse.status).toBe(201);
+        const created = (await createResponse.json()).task as Task;
+
+        const invalidOffsetPatch = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent(created.id)}`, {
+            method: 'PATCH',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ relativeStartOffset: { amount: 1, unit: 'day' } }),
+        });
+        expect(invalidOffsetPatch.status).toBe(400);
+        expect((await invalidOffsetPatch.json()).error).toContain('relativeStartOffset');
+
+        const invalidRecurrencePatch = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent(created.id)}`, {
+            method: 'PATCH',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({ recurrence: { rule: 'daily', arbitrary: true } }),
+        });
+        expect(invalidRecurrencePatch.status).toBe(400);
+        expect((await invalidRecurrencePatch.json()).error).toContain('recurrence');
     });
 
     test('accepts quick-add input longer than the task title limit when the parsed title stays short', async () => {
@@ -814,6 +2064,119 @@ describe('cloud server api', () => {
         expect(missingResponse.status).toBe(404);
     });
 
+    test('garbage-collects unreferenced attachment files on demand', async () => {
+        const referencedPath = 'folder/referenced.bin';
+        const orphanPath = 'folder/orphan.bin';
+        const uploadReferenced = await fetch(`${baseUrl}/v1/attachments/${referencedPath}`, {
+            method: 'PUT',
+            headers: authHeaders,
+            body: new TextEncoder().encode('referenced'),
+        });
+        const uploadOrphan = await fetch(`${baseUrl}/v1/attachments/${orphanPath}`, {
+            method: 'PUT',
+            headers: authHeaders,
+            body: new TextEncoder().encode('orphan'),
+        });
+        expect(uploadReferenced.status).toBe(200);
+        expect(uploadOrphan.status).toBe(200);
+        const key = tokenToKey(integrationToken);
+        expireFileForOrphanGc(join(dataDir, key, 'attachments', orphanPath));
+
+        const iso = '2026-01-01T00:00:00.000Z';
+        const seedResponse = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                tasks: [{
+                    id: 'task-with-attachment',
+                    title: 'Task with attachment',
+                    status: 'inbox',
+                    tags: [],
+                    contexts: [],
+                    createdAt: iso,
+                    updatedAt: iso,
+                    attachments: [{
+                        id: 'att-1',
+                        kind: 'file',
+                        title: 'referenced.bin',
+                        uri: '',
+                        cloudKey: referencedPath,
+                        createdAt: iso,
+                        updatedAt: iso,
+                    }],
+                }],
+                projects: [],
+                sections: [],
+                areas: [],
+                settings: {},
+            }),
+        });
+        expect(seedResponse.status).toBe(200);
+
+        const gcResponse = await fetch(`${baseUrl}/v1/attachments/orphans`, {
+            method: 'POST',
+            headers: authHeaders,
+        });
+        expect(gcResponse.status).toBe(200);
+        const gcBody = await gcResponse.json();
+        expect(gcBody.deleted).toBe(1);
+
+        const referencedGet = await fetch(`${baseUrl}/v1/attachments/${referencedPath}`, { headers: authHeaders });
+        const orphanGet = await fetch(`${baseUrl}/v1/attachments/${orphanPath}`, { headers: authHeaders });
+        expect(referencedGet.status).toBe(200);
+        expect(orphanGet.status).toBe(404);
+    });
+
+    test('does not garbage-collect fresh unreferenced attachment uploads', async () => {
+        const freshPath = 'folder/fresh-orphan.bin';
+        const uploadFresh = await fetch(`${baseUrl}/v1/attachments/${freshPath}`, {
+            method: 'PUT',
+            headers: authHeaders,
+            body: new TextEncoder().encode('fresh'),
+        });
+        expect(uploadFresh.status).toBe(200);
+
+        const gcResponse = await fetch(`${baseUrl}/v1/attachments/orphans`, {
+            method: 'POST',
+            headers: authHeaders,
+        });
+        expect(gcResponse.status).toBe(200);
+        const gcBody = await gcResponse.json();
+        expect(gcBody.deleted).toBe(0);
+        expect(gcBody.kept).toBe(1);
+
+        const freshGet = await fetch(`${baseUrl}/v1/attachments/${freshPath}`, { headers: authHeaders });
+        expect(freshGet.status).toBe(200);
+    });
+
+    test('does not garbage-collect through a symlinked attachment root', async () => {
+        const key = tokenToKey(integrationToken);
+        const namespaceDir = join(dataDir, key);
+        const outsideDir = mkdtempSync(join(tmpdir(), 'mindwtr-cloud-outside-'));
+        const outsideFile = join(outsideDir, 'private.bin');
+        mkdirSync(namespaceDir, { recursive: true });
+        writeFileSync(outsideFile, 'private');
+        symlinkSync(outsideDir, join(namespaceDir, 'attachments'), 'dir');
+
+        try {
+            const gcResponse = await fetch(`${baseUrl}/v1/attachments/orphans`, {
+                method: 'POST',
+                headers: authHeaders,
+            });
+            expect(gcResponse.status).toBe(200);
+            const gcBody = await gcResponse.json();
+            expect(gcBody.ok).toBe(false);
+            expect(gcBody.deleted).toBe(0);
+            expect(gcBody.errors).toContain('attachment root is not a normal directory');
+            expect(existsSync(outsideFile)).toBe(true);
+        } finally {
+            rmSync(outsideDir, { recursive: true, force: true });
+        }
+    });
+
     test('rejects attachment uploads with blocked executable content types', async () => {
         const putResponse = await fetch(`${baseUrl}/v1/attachments/folder/file.exe`, {
             method: 'PUT',
@@ -830,6 +2193,19 @@ describe('cloud server api', () => {
             headers: authHeaders,
         });
         expect(getResponse.status).toBe(404);
+    });
+
+    test('rejects unauthenticated attachment uploads before writing files', async () => {
+        const putResponse = await fetch(`${baseUrl}/v1/attachments/folder/unauth.bin`, {
+            method: 'PUT',
+            headers: {
+                'content-type': 'application/octet-stream',
+            },
+            body: new TextEncoder().encode('unauthenticated-bytes'),
+        });
+
+        expect(putResponse.status).toBe(401);
+        expect(readdirSync(dataDir)).toEqual([]);
     });
 
     test('rejects attachment uploads with executable file signatures even when content-type is benign', async () => {
@@ -852,7 +2228,7 @@ describe('cloud server api', () => {
 
     test('rejects attachment uploads when target path is a symlink', async () => {
         const token = integrationToken;
-        const key = __cloudTestUtils.tokenToKey(token);
+        const key = tokenToKey(token);
         const attachmentDir = join(dataDir, key, 'attachments', 'folder');
         mkdirSync(attachmentDir, { recursive: true });
 
@@ -875,7 +2251,7 @@ describe('cloud server api', () => {
 
     test('rejects attachment uploads when parent directory is a symlink', async () => {
         const token = integrationToken;
-        const key = __cloudTestUtils.tokenToKey(token);
+        const key = tokenToKey(token);
         const attachmentRoot = join(dataDir, key, 'attachments');
         mkdirSync(attachmentRoot, { recursive: true });
 
@@ -883,7 +2259,7 @@ describe('cloud server api', () => {
         const symlinkedParent = join(attachmentRoot, 'folder');
         symlinkSync(outsideDir, symlinkedParent);
 
-        const putResponse = await fetch(`${baseUrl}/v1/attachments/folder/file.bin`, {
+        const putResponse = await fetch(`${baseUrl}/v1/attachments/folder/nested/file.bin`, {
             method: 'PUT',
             headers: authHeaders,
             body: new TextEncoder().encode('attacker-data'),
@@ -891,6 +2267,7 @@ describe('cloud server api', () => {
 
         expect(putResponse.status).toBe(400);
         expect(existsSync(join(outsideDir, 'file.bin'))).toBe(false);
+        expect(existsSync(join(outsideDir, 'nested'))).toBe(false);
 
         rmSync(outsideDir, { recursive: true, force: true });
     });
@@ -957,6 +2334,27 @@ describe('cloud server api', () => {
             }),
         });
         expect(putResponse.status).toBe(200);
+
+        const secondGetResponse = await fetch(`${baseUrl}/v1/data`, {
+            headers: authHeaders,
+        });
+        expect(secondGetResponse.status).toBe(429);
+
+        const secondPutResponse = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                tasks: [],
+                projects: [],
+                sections: [],
+                areas: [],
+                settings: {},
+            }),
+        });
+        expect(secondPutResponse.status).toBe(429);
     });
 
     test('serializes concurrent task writes without dropping records', async () => {
@@ -989,6 +2387,290 @@ describe('cloud server api', () => {
         for (const id of createdIds) {
             expect(taskIds.has(id)).toBe(true);
         }
+    });
+
+    test('serializes concurrent /v1/data merges without dropping records', async () => {
+        const iso = '2026-01-01T00:00:00.000Z';
+        const requests: Array<Promise<Response>> = [];
+        for (let i = 0; i < 20; i += 1) {
+            requests.push(fetch(`${baseUrl}/v1/data`, {
+                method: 'PUT',
+                headers: {
+                    ...authHeaders,
+                    'content-type': 'application/json',
+                },
+                body: JSON.stringify({
+                    tasks: [{
+                        id: `data-task-${i}`,
+                        title: `Data Task ${i}`,
+                        status: 'inbox',
+                        createdAt: iso,
+                        updatedAt: iso,
+                    }],
+                    projects: [],
+                    sections: [],
+                    areas: [],
+                    settings: {},
+                }),
+            }));
+        }
+
+        const responses = await Promise.all(requests);
+        for (const response of responses) {
+            expect(response.status).toBe(200);
+        }
+
+        const getResponse = await fetch(`${baseUrl}/v1/data`, {
+            headers: authHeaders,
+        });
+        expect(getResponse.status).toBe(200);
+        const data = await getResponse.json();
+        const taskIds = new Set((data.tasks as Array<{ id: string }>).map((task) => task.id));
+        for (let i = 0; i < 20; i += 1) {
+            expect(taskIds.has(`data-task-${i}`)).toBe(true);
+        }
+    });
+
+    test('serializes concurrent /v1/data read-merge-write cycles against existing data', async () => {
+        const iso = '2026-01-01T00:00:00.000Z';
+        const key = tokenToKey(integrationToken);
+        writeFileSync(join(dataDir, `${key}.json`), JSON.stringify({
+            tasks: [makeTestTask({
+                id: 'seed-task',
+                title: 'Seed Task',
+                rev: 1,
+                revBy: 'seed-device',
+                createdAt: iso,
+                updatedAt: iso,
+            })],
+            projects: [],
+            sections: [],
+            areas: [],
+            settings: {},
+        }));
+
+        const putTask = (id: string, title: string) => fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                tasks: [makeTestTask({
+                    id,
+                    title,
+                    rev: 2,
+                    revBy: id,
+                    createdAt: iso,
+                    updatedAt: '2026-01-01T00:01:00.000Z',
+                })],
+                projects: [],
+                sections: [],
+                areas: [],
+                settings: {},
+            }),
+        });
+
+        const responses = await Promise.all([
+            putTask('client-a-task', 'Client A Task'),
+            putTask('client-b-task', 'Client B Task'),
+        ]);
+
+        for (const response of responses) {
+            expect(response.status).toBe(200);
+            const body = await response.json();
+            expect(body.ok).toBe(true);
+            expect(body.stats).toBeTruthy();
+        }
+
+        const getResponse = await fetch(`${baseUrl}/v1/data`, {
+            headers: authHeaders,
+        });
+        expect(getResponse.status).toBe(200);
+        const data = await getResponse.json();
+        const taskIds = new Set((data.tasks as Array<{ id: string }>).map((task) => task.id));
+        expect(taskIds.has('seed-task')).toBe(true);
+        expect(taskIds.has('client-a-task')).toBe(true);
+        expect(taskIds.has('client-b-task')).toBe(true);
+    });
+
+    test('uses server timestamps for server-side merge repairs', async () => {
+        const deletedProjectAt = '2026-01-01T00:00:00.000Z';
+        const sectionAt = '2026-01-02T00:00:00.000Z';
+        const key = tokenToKey(integrationToken);
+        writeFileSync(join(dataDir, `${key}.json`), JSON.stringify({
+            tasks: [],
+            projects: [{
+                id: 'project-deleted',
+                title: 'Deleted project',
+                status: 'active',
+                createdAt: deletedProjectAt,
+                updatedAt: deletedProjectAt,
+                deletedAt: deletedProjectAt,
+            }],
+            sections: [],
+            areas: [],
+            settings: {},
+        }));
+
+        const startedAt = Date.now();
+        const putSection = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                tasks: [],
+                projects: [{
+                    id: 'project-deleted',
+                    title: 'Deleted project before delete',
+                    status: 'active',
+                    createdAt: '2025-12-31T00:00:00.000Z',
+                    updatedAt: '2025-12-31T00:00:00.000Z',
+                }],
+                sections: [{
+                    id: 'section-stale',
+                    projectId: 'project-deleted',
+                    title: 'Stale section',
+                    order: 0,
+                    createdAt: sectionAt,
+                    updatedAt: sectionAt,
+                }],
+                areas: [],
+                settings: {},
+            }),
+        });
+        expect(putSection.status).toBe(200);
+
+        const getResponse = await fetch(`${baseUrl}/v1/data`, { headers: authHeaders });
+        expect(getResponse.status).toBe(200);
+        const body = await getResponse.json();
+        const section = (body.sections as Array<{ id: string; deletedAt?: string; updatedAt: string }>).find((item) => item.id === 'section-stale');
+        const repairedAt = Date.parse(section?.updatedAt ?? '');
+        expect(Number.isFinite(repairedAt)).toBe(true);
+        expect(section?.deletedAt).toBe(section?.updatedAt);
+        expect(section?.updatedAt).not.toBe(sectionAt);
+        expect(repairedAt).toBeGreaterThanOrEqual(startedAt);
+        expect(repairedAt).toBeLessThanOrEqual(Date.now() + 1000);
+    });
+
+    test('clamps adversarial future payload timestamps for server-side repairs', async () => {
+        const deletedProjectAt = '2026-01-01T00:00:00.000Z';
+        const futureSectionAt = '2099-01-01T00:00:00.000Z';
+        const key = tokenToKey(integrationToken);
+        writeFileSync(join(dataDir, `${key}.json`), JSON.stringify({
+            tasks: [],
+            projects: [{
+                id: 'project-deleted',
+                title: 'Deleted project',
+                status: 'active',
+                createdAt: deletedProjectAt,
+                updatedAt: deletedProjectAt,
+                deletedAt: deletedProjectAt,
+            }],
+            sections: [],
+            areas: [],
+            settings: {},
+        }));
+
+        const startedAt = Date.now();
+        const putSection = await fetch(`${baseUrl}/v1/data`, {
+            method: 'PUT',
+            headers: {
+                ...authHeaders,
+                'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+                tasks: [],
+                projects: [{
+                    id: 'project-deleted',
+                    title: 'Deleted project before delete',
+                    status: 'active',
+                    createdAt: '2025-12-31T00:00:00.000Z',
+                    updatedAt: '2025-12-31T00:00:00.000Z',
+                }],
+                sections: [{
+                    id: 'section-future',
+                    projectId: 'project-deleted',
+                    title: 'Future section',
+                    order: 0,
+                    createdAt: futureSectionAt,
+                    updatedAt: futureSectionAt,
+                }],
+                areas: [],
+                settings: {},
+            }),
+        });
+        expect(putSection.status).toBe(200);
+
+        const getResponse = await fetch(`${baseUrl}/v1/data`, { headers: authHeaders });
+        expect(getResponse.status).toBe(200);
+        const body = await getResponse.json();
+        const section = (body.sections as Array<{ id: string; deletedAt?: string; updatedAt: string }>).find((item) => item.id === 'section-future');
+        const repairedAt = Date.parse(section?.updatedAt ?? '');
+        expect(Number.isFinite(repairedAt)).toBe(true);
+        expect(section?.deletedAt).toBe(section?.updatedAt);
+        expect(section?.updatedAt).not.toBe(futureSectionAt);
+        expect(repairedAt).toBeGreaterThanOrEqual(startedAt);
+        expect(repairedAt).toBeLessThanOrEqual(Date.now() + 1000);
+    });
+
+    test('serializes concurrent /v1/data edits to the same task with record-level merge rules', async () => {
+        const base = {
+            projects: [],
+            sections: [],
+            areas: [],
+            settings: {},
+        };
+        const taskA = {
+            id: 'shared-task',
+            title: 'foo',
+            status: 'inbox',
+            rev: 2,
+            revBy: 'client-a',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:01:00.000Z',
+        };
+        const taskB = {
+            id: 'shared-task',
+            title: 'bar',
+            status: 'inbox',
+            rev: 3,
+            revBy: 'client-b',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:02:00.000Z',
+        };
+
+        const responses = await Promise.all([taskA, taskB].map((task) =>
+            fetch(`${baseUrl}/v1/data`, {
+                method: 'PUT',
+                headers: {
+                    ...authHeaders,
+                    'content-type': 'application/json',
+                },
+                body: JSON.stringify({
+                    ...base,
+                    tasks: [task],
+                }),
+            })
+        ));
+
+        for (const response of responses) {
+            expect(response.status).toBe(200);
+        }
+
+        const getResponse = await fetch(`${baseUrl}/v1/data`, {
+            headers: authHeaders,
+        });
+        expect(getResponse.status).toBe(200);
+        const data = await getResponse.json();
+        const task = (data.tasks as Array<{ id: string; title: string; rev?: number; revBy?: string }>).find(
+            (candidate) => candidate.id === 'shared-task'
+        );
+        expect(task?.title).toBe('bar');
+        expect(task?.rev).toBe(3);
+        expect(task?.revBy).toBe('client-b');
     });
 
     test('rate limits repeated unauthorized requests per client', async () => {
@@ -1042,6 +2724,14 @@ describe('cloud server api', () => {
             }),
         });
         expect(firstPut.status).toBe(200);
+        const firstPutBody = await firstPut.json();
+        expect(firstPutBody.ok).toBe(true);
+        expect(firstPutBody.stats.tasks.localTotal).toBe(0);
+        expect(firstPutBody.stats.tasks.incomingTotal).toBe(1);
+        expect(firstPutBody.stats.tasks.incomingOnly).toBe(1);
+        expect(firstPutBody.stats.tasks.mergedTotal).toBe(1);
+        expect(firstPutBody.stats.tasks.conflicts).toBe(0);
+        expect(firstPutBody.clockSkewWarning).toBeNull();
 
         const secondPut = await fetch(`${baseUrl}/v1/data`, {
             method: 'PUT',
@@ -1055,6 +2745,14 @@ describe('cloud server api', () => {
             }),
         });
         expect(secondPut.status).toBe(200);
+        const secondPutBody = await secondPut.json();
+        expect(secondPutBody.ok).toBe(true);
+        expect(secondPutBody.stats.tasks.localTotal).toBe(1);
+        expect(secondPutBody.stats.tasks.incomingTotal).toBe(1);
+        expect(secondPutBody.stats.tasks.localOnly).toBe(1);
+        expect(secondPutBody.stats.tasks.incomingOnly).toBe(1);
+        expect(secondPutBody.stats.tasks.mergedTotal).toBe(2);
+        expect(secondPutBody.stats.tasks.conflicts).toBe(0);
 
         const getResponse = await fetch(`${baseUrl}/v1/data`, {
             headers: authHeaders,
@@ -1067,7 +2765,7 @@ describe('cloud server api', () => {
     });
 
     test('rejects /v1/data merge when existing on-disk state is invalid', async () => {
-        const key = __cloudTestUtils.tokenToKey(integrationToken);
+        const key = tokenToKey(integrationToken);
         const filePath = join(dataDir, `${key}.json`);
         writeFileSync(filePath, JSON.stringify({
             tasks: [],
@@ -1100,14 +2798,14 @@ describe('cloud server api', () => {
 
         expect(response.status).toBe(500);
         const body = await response.json();
-        expect(body.error).toBe('Merged data failed validation');
+        expect(body.error).toBe('Stored data failed validation');
 
         const persisted = JSON.parse(readFileSync(filePath, 'utf8'));
         expect((persisted.tasks as Array<{ id: string }>).some((task) => task.id === 'valid-task')).toBe(false);
         expect((persisted.projects as Array<{ id: string }>).some((project) => project.id === 'broken-project')).toBe(true);
     });
 
-    test('prefers the live task over a nearby stale delete during /v1/data merge', async () => {
+    test('keeps a nearby legacy delete during /v1/data merge', async () => {
         const base = { projects: [], sections: [], areas: [], settings: {} };
         const taskId = 'merge-race-live-wins';
 
@@ -1157,11 +2855,11 @@ describe('cloud server api', () => {
         const body = await getResponse.json();
         const mergedTask = (body.tasks as Array<{ id: string; updatedAt: string; deletedAt?: string }>).find((task) => task.id === taskId);
         expect(mergedTask).toBeTruthy();
-        expect(mergedTask?.deletedAt).toBeUndefined();
-        expect(mergedTask?.updatedAt).toBe('2026-01-01T00:00:00.100Z');
+        expect(mergedTask?.deletedAt).toBe('2026-01-01T00:00:00.000Z');
+        expect(mergedTask?.updatedAt).toBe('2026-01-01T00:00:00.000Z');
     });
 
-    test('prefers the live task when the delete is only slightly newer during /v1/data merge', async () => {
+    test('keeps a slightly newer legacy delete during /v1/data merge', async () => {
         const base = { projects: [], sections: [], areas: [], settings: {} };
         const taskId = 'merge-race-delete-wins';
 
@@ -1211,7 +2909,7 @@ describe('cloud server api', () => {
         const body = await getResponse.json();
         const mergedTask = (body.tasks as Array<{ id: string; updatedAt: string; deletedAt?: string }>).find((task) => task.id === taskId);
         expect(mergedTask).toBeTruthy();
-        expect(mergedTask?.deletedAt).toBeUndefined();
-        expect(mergedTask?.updatedAt).toBe('2026-01-01T00:00:00.000Z');
+        expect(mergedTask?.deletedAt).toBe('2026-01-01T00:00:00.100Z');
+        expect(mergedTask?.updatedAt).toBe('2026-01-01T00:00:00.100Z');
     });
 });

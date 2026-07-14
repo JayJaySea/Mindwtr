@@ -3,8 +3,8 @@ import {
     type AppData,
     type AIProviderId,
     type ClarifyResponse,
+    type TaskDraftSetter,
     type TimeEstimate,
-    PRESET_CONTEXTS,
     createAIProvider,
 } from '@mindwtr/core';
 import { isTauriRuntime } from '../../lib/runtime';
@@ -24,13 +24,14 @@ type UseTaskItemAiArgs = {
     editDescription: string;
     editContexts: string;
     editTags: string;
+    editStartTime: string;
+    editDueDate: string;
+    editReviewAt: string;
+    contextOptions: string[];
     tagOptions: string[];
     projectContext: TaskItemAiContext;
     timeEstimatesEnabled: boolean;
-    setEditTitle: (value: string) => void;
-    setEditContexts: (value: string) => void;
-    setEditTags: (value: string) => void;
-    setEditTimeEstimate: (value: TimeEstimate | '') => void;
+    setField: TaskDraftSetter;
 };
 
 export function useTaskItemAi({
@@ -41,13 +42,14 @@ export function useTaskItemAi({
     editDescription,
     editContexts,
     editTags,
+    editStartTime,
+    editDueDate,
+    editReviewAt,
+    contextOptions,
     tagOptions,
     projectContext,
     timeEstimatesEnabled,
-    setEditTitle,
-    setEditContexts,
-    setEditTags,
-    setEditTimeEstimate,
+    setField,
 }: UseTaskItemAiArgs) {
     const aiEnabled = settings?.ai?.enabled === true;
     const aiProvider = (settings?.ai?.provider ?? 'openai') as AIProviderId;
@@ -110,7 +112,7 @@ export function useTaskItemAi({
         const handle = setTimeout(async () => {
             try {
                 const currentContexts = editContexts.split(',').map((c) => c.trim()).filter(Boolean);
-                const provider = createAIProvider(buildCopilotConfig(settings ?? {}, aiKey));
+                const provider = createAIProvider(await buildCopilotConfig(settings ?? {}, aiKey));
                 const abortController = typeof AbortController === 'function' ? new AbortController() : null;
                 localAbort = abortController;
                 const previousController = copilotAbortRef.current;
@@ -123,7 +125,7 @@ export function useTaskItemAi({
                 const suggestion = await provider.predictMetadata(
                     {
                         title: input,
-                        contexts: Array.from(new Set([...PRESET_CONTEXTS, ...currentContexts])),
+                        contexts: Array.from(new Set([...contextOptions, ...currentContexts])),
                         tags: tagOptions,
                     },
                     abortController ? { signal: abortController.signal } : undefined
@@ -148,7 +150,7 @@ export function useTaskItemAi({
                 copilotAbortRef.current = null;
             }
         };
-    }, [aiEnabled, aiKey, aiProvider, copilotModel, editContexts, editDescription, editTitle, keyRequired, settings, tagOptions, timeEstimatesEnabled]);
+    }, [aiEnabled, aiKey, aiProvider, contextOptions, copilotModel, editContexts, editDescription, editTitle, keyRequired, settings, tagOptions, timeEstimatesEnabled]);
 
     useEffect(() => {
         copilotMountedRef.current = true;
@@ -180,7 +182,7 @@ export function useTaskItemAi({
         }
     }, [aiProvider, settings?.ai?.model, taskId]);
 
-    const getAIProvider = useCallback(() => {
+    const getAIProvider = useCallback(async () => {
         if (!aiEnabled) {
             setAiError(t('ai.disabledBody'));
             return null;
@@ -189,7 +191,7 @@ export function useTaskItemAi({
             setAiError(t('ai.missingKeyBody'));
             return null;
         }
-        return createAIProvider(buildAIConfig(settings, aiKey));
+        return createAIProvider(await buildAIConfig(settings, aiKey));
     }, [aiEnabled, aiKey, keyRequired, settings, t]);
 
     const resetCopilotDraft = useCallback(() => {
@@ -221,37 +223,37 @@ export function useTaskItemAi({
         if (copilotSuggestion.context) {
             const currentContexts = editContexts.split(',').map((c) => c.trim()).filter(Boolean);
             const nextContexts = Array.from(new Set([...currentContexts, copilotSuggestion.context]));
-            setEditContexts(nextContexts.join(', '));
+            setField('contexts', nextContexts.join(', '));
             setCopilotContext(copilotSuggestion.context);
         }
         if (copilotSuggestion.tags?.length) {
             const currentTags = editTags.split(',').map((t) => t.trim()).filter(Boolean);
             const nextTags = Array.from(new Set([...currentTags, ...copilotSuggestion.tags]));
-            setEditTags(nextTags.join(', '));
+            setField('tags', nextTags.join(', '));
         }
         if (copilotSuggestion.timeEstimate && timeEstimatesEnabled) {
-            setEditTimeEstimate(copilotSuggestion.timeEstimate);
+            setField('timeEstimate', copilotSuggestion.timeEstimate);
             setCopilotEstimate(copilotSuggestion.timeEstimate);
         }
         setCopilotApplied(true);
-    }, [copilotSuggestion, editContexts, editTags, setEditContexts, setEditTags, setEditTimeEstimate, timeEstimatesEnabled]);
+    }, [copilotSuggestion, editContexts, editTags, setField, timeEstimatesEnabled]);
 
     const applyAISuggestion = useCallback((suggested: { title?: string; context?: string; timeEstimate?: TimeEstimate }) => {
-        if (suggested.title) setEditTitle(suggested.title);
-        if (suggested.timeEstimate && timeEstimatesEnabled) setEditTimeEstimate(suggested.timeEstimate);
+        if (suggested.title) setField('title', suggested.title);
+        if (suggested.timeEstimate && timeEstimatesEnabled) setField('timeEstimate', suggested.timeEstimate);
         if (suggested.context) {
             const currentContexts = editContexts.split(',').map((c) => c.trim()).filter(Boolean);
             const nextContexts = Array.from(new Set([...currentContexts, suggested.context]));
-            setEditContexts(nextContexts.join(', '));
+            setField('contexts', nextContexts.join(', '));
         }
         setAiClarifyResponse(null);
-    }, [editContexts, setEditContexts, setEditTimeEstimate, setEditTitle, timeEstimatesEnabled]);
+    }, [editContexts, setField, timeEstimatesEnabled]);
 
     const handleAIClarify = useCallback(async () => {
         if (isAIWorking) return;
         const title = editTitle.trim();
         if (!title) return;
-        const provider = getAIProvider();
+        const provider = await getAIProvider();
         if (!provider) return;
         setIsAIWorking(true);
         setAiError(null);
@@ -260,7 +262,10 @@ export function useTaskItemAi({
             const currentContexts = editContexts.split(',').map((c) => c.trim()).filter(Boolean);
             const response = await provider.clarifyTask({
                 title,
-                contexts: Array.from(new Set([...PRESET_CONTEXTS, ...currentContexts])),
+                contexts: Array.from(new Set([...contextOptions, ...currentContexts])),
+                startTime: editStartTime || undefined,
+                dueDate: editDueDate || undefined,
+                reviewAt: editReviewAt || undefined,
                 ...(projectContext ?? {}),
             });
             setAiClarifyResponse(response);
@@ -275,13 +280,13 @@ export function useTaskItemAi({
         } finally {
             setIsAIWorking(false);
         }
-    }, [editContexts, editTitle, getAIProvider, isAIWorking, logAIDebug, projectContext]);
+    }, [contextOptions, editContexts, editDueDate, editReviewAt, editStartTime, editTitle, getAIProvider, isAIWorking, logAIDebug, projectContext]);
 
     const handleAIBreakdown = useCallback(async () => {
         if (isAIWorking) return;
         const title = editTitle.trim();
         if (!title) return;
-        const provider = getAIProvider();
+        const provider = await getAIProvider();
         if (!provider) return;
         setIsAIWorking(true);
         setAiError(null);

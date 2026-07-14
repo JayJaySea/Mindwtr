@@ -1,4 +1,24 @@
-import type { Project, Section, Task } from './types';
+import type { Area, Attachment, Person, Project, Section, Task } from './types';
+import { normalizeProjectSequentialScope } from './project-utils';
+
+type StableSignatureCacheEntry = {
+    validation: string;
+    signature: string;
+};
+
+export type SyncSignatureMemo = {
+    comparable: WeakMap<object, string>;
+    deterministic: WeakMap<object, string>;
+    comparableByRevision: Map<string, StableSignatureCacheEntry>;
+    deterministicByRevision: Map<string, StableSignatureCacheEntry>;
+};
+
+export const createSyncSignatureMemo = (): SyncSignatureMemo => ({
+    comparable: new WeakMap<object, string>(),
+    deterministic: new WeakMap<object, string>(),
+    comparableByRevision: new Map<string, StableSignatureCacheEntry>(),
+    deterministicByRevision: new Map<string, StableSignatureCacheEntry>(),
+});
 
 const CONTENT_DIFF_IGNORED_KEYS = new Set([
     'rev',
@@ -9,22 +29,106 @@ const CONTENT_DIFF_IGNORED_KEYS = new Set([
     'purgedAt',
     'order',
     'orderNum',
+    'boardOrder',
+]);
+
+const SIGNATURE_OPAQUE_KEYS = new Set([
+    'statusBeforeProjectArchive',
+    'completedAtBeforeProjectArchive',
+    'isFocusedTodayBeforeProjectArchive',
+    'deletedAtBeforeProjectArchive',
+    'projectArchivedAt',
 ]);
 
 const normalizeOptionalArrayForComparison = <T>(value: T[] | undefined): T[] | undefined =>
     Array.isArray(value) && value.length > 0 ? value : undefined;
 
+const normalizeAttachmentForContentComparison = (attachment: Attachment): Record<string, unknown> => {
+    if (attachment.kind === 'link') {
+        return {
+            id: attachment.id,
+            kind: attachment.kind,
+            title: attachment.title,
+            uri: attachment.uri,
+            deletedAt: attachment.deletedAt,
+        };
+    }
+
+    return {
+        id: attachment.id,
+        kind: attachment.kind,
+        title: attachment.title,
+        deletedAt: attachment.deletedAt,
+    };
+};
+
+const normalizeAttachmentsForContentComparison = (
+    attachments: Attachment[] | undefined
+): Record<string, unknown>[] | undefined => {
+    if (!Array.isArray(attachments) || attachments.length === 0) {
+        return undefined;
+    }
+    return [...attachments]
+        .sort((left, right) => left.id.localeCompare(right.id))
+        .map((attachment) => normalizeAttachmentForContentComparison(attachment));
+};
+
+// Task fields deliberately absent from content comparison: revision/order metadata
+// (CONTENT_DIFF_IGNORED_KEYS) and project-archive bookkeeping (SIGNATURE_OPAQUE_KEYS).
+// A new Task field must be added either here or to the comparable below (compile error otherwise).
+type TaskContentComparisonExcludedKey =
+    | 'rev'
+    | 'revBy'
+    | 'createdAt'
+    | 'updatedAt'
+    | 'purgedAt'
+    | 'order'
+    | 'orderNum'
+    | 'boardOrder'
+    | 'statusBeforeProjectArchive'
+    | 'completedAtBeforeProjectArchive'
+    | 'isFocusedTodayBeforeProjectArchive'
+    | 'projectArchivedAt';
+
 export const normalizeTaskForContentComparison = (task: Task): Record<string, unknown> => {
-    const comparable: Record<string, unknown> = {
-        ...task,
+    const hasRecurrence = task.recurrence !== undefined && task.recurrence !== null;
+    const comparable = {
+        id: task.id,
+        title: task.title,
+        status: task.status === 'inbox' ? undefined : task.status,
+        priority: task.priority,
+        energyLevel: task.energyLevel,
+        assignedTo: task.assignedTo,
+        taskMode: task.taskMode,
+        startTime: task.startTime,
+        relativeStartOffset: task.relativeStartOffset,
+        dueDate: task.dueDate,
+        recurrence: task.recurrence,
         tags: normalizeOptionalArrayForComparison(task.tags),
         contexts: normalizeOptionalArrayForComparison(task.contexts),
         checklist: normalizeOptionalArrayForComparison(task.checklist),
-        attachments: normalizeOptionalArrayForComparison(task.attachments),
+        description: task.description,
+        textDirection: task.textDirection,
+        // Attachment entities merge independently. Ignore file transport/runtime fields here
+        // so task conflicts only reflect meaningful task-level attachment changes. Once
+        // the parent task is deleted, attachment tombstone cleanup should not keep
+        // surfacing as a user-visible task conflict.
+        attachments: task.deletedAt ? undefined : normalizeAttachmentsForContentComparison(task.attachments),
+        location: task.location,
+        projectId: task.projectId,
+        sectionId: task.sectionId,
+        areaId: task.areaId,
         isFocusedToday: task.isFocusedToday ? true : undefined,
+        timeEstimate: task.timeEstimate,
+        timeSpentMinutes: task.timeSpentMinutes ? task.timeSpentMinutes : undefined,
+        showFutureRecurrence: hasRecurrence && task.showFutureRecurrence ? true : undefined,
+        suppressMindwtrReminders: task.suppressMindwtrReminders ? true : undefined,
         pushCount: task.pushCount === 0 ? undefined : task.pushCount,
-    };
-    if (task.status === 'inbox') delete comparable.status;
+        repeatReminderMinutes: task.repeatReminderMinutes ? task.repeatReminderMinutes : undefined,
+        reviewAt: task.reviewAt,
+        completedAt: task.completedAt,
+        deletedAt: task.deletedAt,
+    } satisfies Record<Exclude<keyof Task, TaskContentComparisonExcludedKey>, unknown>;
     return comparable;
 };
 
@@ -32,8 +136,11 @@ export const normalizeProjectForContentComparison = (project: Project): Record<s
     const comparable: Record<string, unknown> = {
         ...project,
         tagIds: normalizeOptionalArrayForComparison(project.tagIds),
-        attachments: normalizeOptionalArrayForComparison(project.attachments),
+        attachments: project.deletedAt ? undefined : normalizeAttachmentsForContentComparison(project.attachments),
         isSequential: project.isSequential ? true : undefined,
+        sequentialScope: project.isSequential && normalizeProjectSequentialScope(project.sequentialScope) === 'section'
+            ? 'section'
+            : undefined,
         isFocused: project.isFocused ? true : undefined,
     };
     if (project.status === 'active') delete comparable.status;
@@ -46,47 +153,134 @@ export const normalizeSectionForContentComparison = (section: Section): Record<s
     isCollapsed: section.isCollapsed ? true : undefined,
 });
 
+type AreaContentComparisonInput = Omit<Area, 'order'> & {
+    order?: number;
+};
+
+export const normalizeAreaForContentComparison = (area: AreaContentComparisonInput): Record<string, unknown> => ({
+    ...area,
+    color: area.color === '#6B7280' ? undefined : area.color,
+    order: undefined,
+});
+
+export const normalizePersonForContentComparison = (person: Person): Record<string, unknown> => ({
+    ...person,
+    note: person.note?.trim() || undefined,
+    referenceLink: person.referenceLink?.trim() || undefined,
+});
+
+const STABLE_SIGNATURE_CACHE_LIMIT = 5000;
+
+const toStableRevisionCacheKey = (
+    value: unknown,
+    signatureKind: 'comparable' | 'deterministic'
+): string | undefined => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    if (typeof record.id !== 'string' || record.id.length === 0) return undefined;
+    if (typeof record.rev !== 'number' || !Number.isFinite(record.rev)) return undefined;
+
+    const updatedAt = typeof record.updatedAt === 'string' ? record.updatedAt : '';
+    const deletedAt = typeof record.deletedAt === 'string' ? record.deletedAt : '';
+    const purgedAt = typeof record.purgedAt === 'string' ? record.purgedAt : '';
+    const revBy = typeof record.revBy === 'string' ? record.revBy : '';
+    return [
+        signatureKind,
+        record.id,
+        record.rev,
+        updatedAt,
+        deletedAt,
+        purgedAt,
+        revBy,
+    ].join('\0');
+};
+
+const readStableSignatureCache = (
+    cache: Map<string, StableSignatureCacheEntry> | undefined,
+    key: string | undefined,
+    validation: string
+): string | undefined => {
+    if (!cache || !key) return undefined;
+    const cached = cache.get(key);
+    if (cached === undefined || cached.validation !== validation) return undefined;
+    cache.delete(key);
+    cache.set(key, cached);
+    return cached.signature;
+};
+
+const writeStableSignatureCache = (
+    cache: Map<string, StableSignatureCacheEntry> | undefined,
+    key: string | undefined,
+    validation: string,
+    signature: string
+) => {
+    if (!cache || !key) return;
+    if (!cache.has(key) && cache.size >= STABLE_SIGNATURE_CACHE_LIMIT) {
+        const oldestKey = cache.keys().next().value;
+        if (oldestKey !== undefined) cache.delete(oldestKey);
+    }
+    cache.set(key, { validation, signature });
+};
+
 export const toComparableValue = (value: unknown, options?: { includeIgnoredKeys?: boolean }): unknown => {
     const includeIgnoredKeys = options?.includeIgnoredKeys === true;
     if (Array.isArray(value)) {
-        return value.map((item) => toComparableValue(item, options));
+        const comparableArray = value
+            .map((item) => toComparableValue(item, options))
+            .filter((item) => item !== undefined && item !== null);
+        return comparableArray.length > 0 ? comparableArray : undefined;
     }
     if (value && typeof value === 'object') {
         const record = value as Record<string, unknown>;
         const comparable: Record<string, unknown> = {};
         for (const key of Object.keys(record).sort()) {
+            if (SIGNATURE_OPAQUE_KEYS.has(key)) continue;
             if (!includeIgnoredKeys && CONTENT_DIFF_IGNORED_KEYS.has(key)) continue;
             if (!includeIgnoredKeys && key === 'uri' && record.kind === 'file') continue;
-            comparable[key] = toComparableValue(record[key], options);
+            const comparableValue = toComparableValue(record[key], options);
+            if (comparableValue === undefined || comparableValue === null) continue;
+            comparable[key] = comparableValue;
         }
-        return comparable;
+        return Object.keys(comparable).length > 0 ? comparable : undefined;
+    }
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        return trimmed.length > 0 ? trimmed : undefined;
     }
     return value;
 };
 
-const comparableSignatureCache = new WeakMap<object, string>();
-const deterministicSignatureCache = new WeakMap<object, string>();
-
-export const toComparableSignature = (value: unknown): string => {
-    if (value && typeof value === 'object') {
-        const cached = comparableSignatureCache.get(value);
-        if (cached) return cached;
-        const signature = JSON.stringify(toComparableValue(value));
-        comparableSignatureCache.set(value, signature);
+const toMemoizedSignature = (
+    value: unknown,
+    cache: WeakMap<object, string> | undefined,
+    stableCache: Map<string, StableSignatureCacheEntry> | undefined,
+    signatureKind: 'comparable' | 'deterministic',
+    options?: { includeIgnoredKeys?: boolean }
+): string => {
+    if (value && typeof value === 'object' && cache) {
+        const cached = cache.get(value);
+        if (cached !== undefined) return cached;
+        const stableCacheKey = toStableRevisionCacheKey(value, signatureKind);
+        const stableCacheValidation = stableCacheKey ? JSON.stringify(value) : '';
+        const stableCached = readStableSignatureCache(stableCache, stableCacheKey, stableCacheValidation);
+        if (stableCached !== undefined) {
+            cache.set(value, stableCached);
+            return stableCached;
+        }
+        const signature = JSON.stringify(toComparableValue(value, options));
+        cache.set(value, signature);
+        writeStableSignatureCache(stableCache, stableCacheKey, stableCacheValidation, signature);
         return signature;
     }
-    return JSON.stringify(toComparableValue(value));
+    return JSON.stringify(toComparableValue(value, options));
 };
 
-const toDeterministicSignature = (value: unknown): string => {
-    if (value && typeof value === 'object') {
-        const cached = deterministicSignatureCache.get(value);
-        if (cached) return cached;
-        const signature = JSON.stringify(toComparableValue(value, { includeIgnoredKeys: true }));
-        deterministicSignatureCache.set(value, signature);
-        return signature;
-    }
-    return JSON.stringify(toComparableValue(value, { includeIgnoredKeys: true }));
+export const toComparableSignature = (value: unknown, memo?: SyncSignatureMemo): string => {
+    return toMemoizedSignature(value, memo?.comparable, memo?.comparableByRevision, 'comparable');
+};
+
+const toDeterministicSignature = (value: unknown, memo?: SyncSignatureMemo): string => {
+    return toMemoizedSignature(value, memo?.deterministic, memo?.deterministicByRevision, 'deterministic', { includeIgnoredKeys: true });
 };
 
 export const hashComparableSignature = (signature: string): string => {
@@ -156,12 +350,12 @@ export const collectComparableDiffKeys = (
     return diffKeys;
 };
 
-export const chooseDeterministicWinner = <T>(localItem: T, incomingItem: T): T => {
-    const localSignature = toComparableSignature(localItem);
-    const incomingSignature = toComparableSignature(incomingItem);
+export const chooseDeterministicWinner = <T>(localItem: T, incomingItem: T, memo?: SyncSignatureMemo): T => {
+    const localSignature = toComparableSignature(localItem, memo);
+    const incomingSignature = toComparableSignature(incomingItem, memo);
     if (localSignature === incomingSignature) {
-        const localFullSignature = toDeterministicSignature(localItem);
-        const incomingFullSignature = toDeterministicSignature(incomingItem);
+        const localFullSignature = toDeterministicSignature(localItem, memo);
+        const incomingFullSignature = toDeterministicSignature(incomingItem, memo);
         if (localFullSignature === incomingFullSignature) return incomingItem;
         return incomingFullSignature > localFullSignature ? incomingItem : localItem;
     }

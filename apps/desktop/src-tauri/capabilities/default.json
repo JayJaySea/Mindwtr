@@ -3,15 +3,18 @@
   "identifier": "default",
   "description": "enables the default permissions",
   "windows": [
-    "main"
+    "main",
+    "quick-add"
   ],
   "permissions": [
     "core:default",
     "core:app:allow-set-app-theme",
     "core:window:allow-close",
     "core:window:allow-set-decorations",
+    "core:window:allow-set-theme",
     "core:window:allow-set-skip-taskbar",
     "core:window:allow-hide",
+    "core:webview:allow-set-webview-zoom",
     "dialog:default",
     "fs:default",
     "fs:allow-mkdir",
@@ -57,10 +60,10 @@
           "path": "$DATA/mindwtr/whisper-models/**"
         },
         {
-          "path": "$HOME"
+          "path": "$RUNTIME/doc"
         },
         {
-          "path": "$HOME/**"
+          "path": "$RUNTIME/doc/**"
         }
       ]
     },

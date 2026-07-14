@@ -1,5 +1,108 @@
 use crate::*;
 
+fn strip_file_scheme(raw: &str) -> Result<String, String> {
+    if !raw.to_ascii_lowercase().starts_with("file://") {
+        return Ok(raw.to_string());
+    }
+
+    let without_scheme = &raw[7..];
+    if without_scheme.starts_with('/') {
+        #[cfg(target_os = "windows")]
+        {
+            let without_leading_slash = without_scheme.trim_start_matches('/');
+            if without_leading_slash.as_bytes().get(1) == Some(&b':') {
+                return Ok(without_leading_slash.to_string());
+            }
+        }
+        return Ok(without_scheme.to_string());
+    }
+
+    Err("Only local file paths can be opened.".to_string())
+}
+
+fn canonical_existing_dir(path: PathBuf) -> Option<PathBuf> {
+    path.canonicalize()
+        .ok()
+        .filter(|candidate| candidate.is_dir())
+}
+
+fn configured_obsidian_vault_path(config: &AppConfigToml) -> Option<PathBuf> {
+    #[derive(Deserialize, Default)]
+    struct VaultPathOnly {
+        vault_path: Option<String>,
+    }
+
+    let raw = config.obsidian_config.as_ref()?;
+    let parsed = serde_json::from_str::<VaultPathOnly>(raw).ok()?;
+    let vault_path = parsed.vault_path?.trim().to_string();
+    if vault_path.is_empty() {
+        return None;
+    }
+    canonical_existing_dir(PathBuf::from(vault_path))
+}
+
+fn allowed_open_roots(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    let config = read_config(app);
+    let mut roots = vec![
+        get_data_dir(app),
+        get_data_dir(app).join("attachments"),
+        get_data_dir(app).join("audio-captures"),
+    ];
+
+    if let Some(sync_path) = config
+        .sync_path
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        roots.push(PathBuf::from(sync_path).join("attachments"));
+    }
+
+    if let Some(vault_path) = configured_obsidian_vault_path(&config) {
+        roots.push(vault_path);
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        roots.push(PathBuf::from(runtime_dir).join("doc"));
+    }
+
+    roots.into_iter().filter_map(canonical_existing_dir).fold(
+        Vec::<PathBuf>::new(),
+        |mut unique_roots, root| {
+            if !unique_roots.iter().any(|existing| existing == &root) {
+                unique_roots.push(root);
+            }
+            unique_roots
+        },
+    )
+}
+
+fn normalize_open_path(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Path is empty".to_string());
+    }
+    let without_file_scheme = strip_file_scheme(trimmed)?;
+    let candidate = PathBuf::from(without_file_scheme);
+    if !candidate.is_absolute() {
+        return Err("Only absolute local file paths can be opened.".to_string());
+    }
+    candidate
+        .canonicalize()
+        .map_err(|_| "File does not exist or cannot be accessed.".to_string())
+}
+
+fn path_is_under_allowed_root(path: &Path, allowed_roots: &[PathBuf]) -> bool {
+    allowed_roots
+        .iter()
+        .any(|root| path == root || path.starts_with(root))
+}
+
+fn path_is_openable(path: &Path, allowed_roots: &[PathBuf]) -> bool {
+    path_is_under_allowed_root(path, allowed_roots) || path.is_file()
+}
+
 #[cfg(target_os = "macos")]
 fn parse_macos_eventkit_json(raw: *mut c_char) -> Result<Value, String> {
     if raw.is_null() {
@@ -81,6 +184,135 @@ pub(crate) fn get_macos_calendar_events(
             permission: "unsupported".to_string(),
             calendars: Vec::new(),
             events: Vec::new(),
+        })
+    }
+}
+
+#[tauri::command]
+pub(crate) fn get_macos_writable_calendars() -> Result<Vec<MacOsCalendarPushTarget>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let value = parse_macos_eventkit_json(unsafe { mindwtr_macos_writable_calendars_json() })?;
+        let parsed = serde_json::from_value::<Vec<MacOsCalendarPushTarget>>(value)
+            .map_err(|error| format!("Failed to decode writable EventKit calendars: {error}"))?;
+        return Ok(parsed);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+#[tauri::command]
+pub(crate) fn ensure_macos_mindwtr_calendar(
+    stored_calendar_id: Option<String>,
+) -> Result<Option<MacOsCalendarPushTarget>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let stored = CString::new(stored_calendar_id.unwrap_or_default())
+            .map_err(|error| format!("Invalid stored calendar ID: {error}"))?;
+        let value = parse_macos_eventkit_json(unsafe {
+            mindwtr_macos_ensure_mindwtr_calendar_json(stored.as_ptr())
+        })?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let parsed = serde_json::from_value::<MacOsCalendarPushTarget>(value)
+            .map_err(|error| format!("Failed to decode Mindwtr EventKit calendar: {error}"))?;
+        return Ok(Some(parsed));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = stored_calendar_id;
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn encode_macos_calendar_event_payload(
+    details: &MacOsCalendarEventPayload,
+) -> Result<CString, String> {
+    let raw = serde_json::to_string(details)
+        .map_err(|error| format!("Failed to encode EventKit event payload: {error}"))?;
+    CString::new(raw).map_err(|error| format!("Invalid EventKit event payload: {error}"))
+}
+
+#[tauri::command]
+pub(crate) fn create_macos_calendar_event(
+    details: MacOsCalendarEventPayload,
+) -> Result<MacOsCalendarEventWriteResult, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let event_json = encode_macos_calendar_event_payload(&details)?;
+        let value = parse_macos_eventkit_json(unsafe {
+            mindwtr_macos_create_calendar_event_json(event_json.as_ptr())
+        })?;
+        let parsed = serde_json::from_value::<MacOsCalendarEventWriteResult>(value)
+            .map_err(|error| format!("Failed to decode EventKit create result: {error}"))?;
+        return Ok(parsed);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = details;
+        Ok(MacOsCalendarEventWriteResult {
+            ok: false,
+            event_id: None,
+            error: Some("unsupported".to_string()),
+        })
+    }
+}
+
+#[tauri::command]
+pub(crate) fn update_macos_calendar_event(
+    event_id: String,
+    details: MacOsCalendarEventPayload,
+) -> Result<MacOsCalendarEventWriteResult, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let event_id = CString::new(event_id.as_str())
+            .map_err(|error| format!("Invalid EventKit event ID: {error}"))?;
+        let event_json = encode_macos_calendar_event_payload(&details)?;
+        let value = parse_macos_eventkit_json(unsafe {
+            mindwtr_macos_update_calendar_event_json(event_id.as_ptr(), event_json.as_ptr())
+        })?;
+        let parsed = serde_json::from_value::<MacOsCalendarEventWriteResult>(value)
+            .map_err(|error| format!("Failed to decode EventKit update result: {error}"))?;
+        return Ok(parsed);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = event_id;
+        let _ = details;
+        Ok(MacOsCalendarEventWriteResult {
+            ok: false,
+            event_id: None,
+            error: Some("unsupported".to_string()),
+        })
+    }
+}
+
+#[tauri::command]
+pub(crate) fn delete_macos_calendar_event(
+    event_id: String,
+) -> Result<MacOsCalendarEventWriteResult, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let event_id = CString::new(event_id.as_str())
+            .map_err(|error| format!("Invalid EventKit event ID: {error}"))?;
+        let value = parse_macos_eventkit_json(unsafe {
+            mindwtr_macos_delete_calendar_event_json(event_id.as_ptr())
+        })?;
+        let parsed = serde_json::from_value::<MacOsCalendarEventWriteResult>(value)
+            .map_err(|error| format!("Failed to decode EventKit delete result: {error}"))?;
+        return Ok(parsed);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = event_id;
+        Ok(MacOsCalendarEventWriteResult {
+            ok: false,
+            event_id: None,
+            error: Some("unsupported".to_string()),
         })
     }
 }
@@ -228,6 +460,72 @@ pub(crate) async fn cloudkit_save_records(
 }
 
 #[tauri::command]
+pub(crate) async fn cloudkit_save_attachment_asset(
+    record_name: String,
+    file_path: String,
+    metadata_json: String,
+) -> Result<Value, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let value = tauri::async_runtime::spawn_blocking(move || {
+            let c_record_name = CString::new(record_name.as_str())
+                .map_err(|e| format!("Invalid attachment record name: {e}"))?;
+            let c_file_path = CString::new(file_path.as_str())
+                .map_err(|e| format!("Invalid attachment file path: {e}"))?;
+            let c_metadata = CString::new(metadata_json.as_str())
+                .map_err(|e| format!("Invalid attachment metadata JSON: {e}"))?;
+            parse_cloudkit_json(unsafe {
+                mindwtr_cloudkit_save_attachment_asset(
+                    c_record_name.as_ptr(),
+                    c_file_path.as_ptr(),
+                    c_metadata.as_ptr(),
+                )
+            })
+        })
+        .await
+        .map_err(|error| format!("CloudKit save attachment task failed: {error}"))??;
+        return Ok(value);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (record_name, file_path, metadata_json);
+        Err("CloudKit is not available on this platform".to_string())
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn cloudkit_fetch_attachment_asset(
+    record_name: String,
+    target_path: String,
+) -> Result<Value, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let value = tauri::async_runtime::spawn_blocking(move || {
+            let c_record_name = CString::new(record_name.as_str())
+                .map_err(|e| format!("Invalid attachment record name: {e}"))?;
+            let c_target_path = CString::new(target_path.as_str())
+                .map_err(|e| format!("Invalid attachment target path: {e}"))?;
+            parse_cloudkit_json(unsafe {
+                mindwtr_cloudkit_fetch_attachment_asset(
+                    c_record_name.as_ptr(),
+                    c_target_path.as_ptr(),
+                )
+            })
+        })
+        .await
+        .map_err(|error| format!("CloudKit fetch attachment task failed: {error}"))??;
+        return Ok(value);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (record_name, target_path);
+        Err("CloudKit is not available on this platform".to_string())
+    }
+}
+
+#[tauri::command]
 pub(crate) async fn cloudkit_delete_records(
     record_type: String,
     record_ids: Vec<String>,
@@ -283,19 +581,289 @@ pub(crate) fn cloudkit_register_for_notifications() -> Result<bool, String> {
     }
 }
 
-#[tauri::command]
-pub(crate) fn open_path(path: String) -> Result<bool, String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err("Path is empty".to_string());
+pub(crate) const ATTACHMENT_IMPORT_TOO_LARGE: &str = "file_too_large";
+
+fn sanitize_attachment_file_name(raw: &str) -> Result<&str, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('\0')
+    {
+        return Err("Invalid attachment file name.".to_string());
     }
-    let normalized = if trimmed.starts_with("file://") {
-        trimmed.trim_start_matches("file://")
-    } else {
-        trimmed
+    Ok(trimmed)
+}
+
+// Intentionally avoids canonicalize(): exotic mounts (Windows RAM drives, some
+// network shares) fail canonicalization even though plain reads work, which is
+// exactly the case this import path exists to support.
+fn import_attachment_into(
+    dest_dir: &Path,
+    source: &Path,
+    file_name: &str,
+    max_bytes: Option<u64>,
+) -> Result<(PathBuf, u64), String> {
+    if !source.is_absolute() {
+        return Err("Only absolute local file paths can be attached.".to_string());
+    }
+    let metadata = std::fs::metadata(source)
+        .map_err(|_| "File does not exist or cannot be accessed.".to_string())?;
+    if !metadata.is_file() {
+        return Err("Only regular files can be attached.".to_string());
+    }
+    let size = metadata.len();
+    if let Some(max) = max_bytes {
+        if size > max {
+            return Err(ATTACHMENT_IMPORT_TOO_LARGE.to_string());
+        }
+    }
+    let file_name = sanitize_attachment_file_name(file_name)?;
+    std::fs::create_dir_all(dest_dir)
+        .map_err(|error| format!("Failed to create attachments directory: {error}"))?;
+    let final_path = dest_dir.join(file_name);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let temp_path = dest_dir.join(format!("{file_name}.tmp-{}-{nanos:x}", std::process::id()));
+    std::fs::copy(source, &temp_path)
+        .map_err(|error| format!("Failed to copy attachment: {error}"))?;
+    if let Err(rename_error) = std::fs::rename(&temp_path, &final_path) {
+        let copy_result = std::fs::copy(&temp_path, &final_path);
+        let _ = std::fs::remove_file(&temp_path);
+        copy_result.map_err(|_| format!("Failed to store attachment: {rename_error}"))?;
+    }
+    Ok((final_path, size))
+}
+
+#[derive(Serialize)]
+pub(crate) struct ImportedAttachmentFile {
+    uri: String,
+    size: u64,
+}
+
+#[tauri::command]
+pub(crate) fn import_attachment_file(
+    app: tauri::AppHandle,
+    path: String,
+    file_name: String,
+    max_bytes: Option<u64>,
+) -> Result<ImportedAttachmentFile, String> {
+    let source = PathBuf::from(strip_file_scheme(path.trim())?);
+    // Matches the webview-side managed dir used by sync downloads, previews,
+    // and cleanup; portable mode redirects it into the profile dir (#855).
+    let dest_dir = get_data_dir(&app).join("attachments");
+    let (final_path, size) = import_attachment_into(&dest_dir, &source, &file_name, max_bytes)?;
+    Ok(ImportedAttachmentFile {
+        uri: final_path.to_string_lossy().into_owned(),
+        size,
+    })
+}
+
+// The directory the webview must use for managed app files (attachments, logs,
+// audio captures, speech models). Portable mode points it into the profile dir.
+#[tauri::command]
+pub(crate) fn get_managed_data_dir(app: tauri::AppHandle) -> String {
+    get_data_dir(&app).to_string_lossy().into_owned()
+}
+
+fn legacy_webview_data_root() -> Option<PathBuf> {
+    dirs::data_dir().map(|dir| dir.join("mindwtr"))
+}
+
+// A standard (installed) copy of Mindwtr on the same machine stores its data
+// under the OS data dir; its attachment files must never be moved away by a
+// portable copy that references the same paths.
+fn standard_install_present(legacy_root: &Path) -> bool {
+    legacy_root.join(DATA_FILE_NAME).exists() || legacy_root.join(DB_FILE_NAME).exists()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PortableAttachmentMigration {
+    is_portable: bool,
+    legacy_attachments_dir: String,
+    managed_attachments_dir: String,
+    migrated_file_names: Vec<String>,
+}
+
+// One-time, idempotent re-home of attachment files a portable install wrote to
+// the OS data dir before portable mode covered webview-managed files (#855).
+// Only the requested file names are touched, sources must live inside the
+// legacy attachments dir, and files are copied (not moved) when a standard
+// install shares the machine.
+#[tauri::command]
+pub(crate) fn migrate_portable_attachments(
+    app: tauri::AppHandle,
+    file_names: Vec<String>,
+) -> Result<PortableAttachmentMigration, String> {
+    let managed_dir = get_data_dir(&app).join("attachments");
+    let legacy_root = legacy_webview_data_root();
+    let legacy_dir = legacy_root
+        .as_ref()
+        .map(|root| root.join("attachments"))
+        .unwrap_or_default();
+    let mut result = PortableAttachmentMigration {
+        is_portable: crate::storage::is_portable_mode(),
+        legacy_attachments_dir: legacy_dir.to_string_lossy().into_owned(),
+        managed_attachments_dir: managed_dir.to_string_lossy().into_owned(),
+        migrated_file_names: Vec::new(),
     };
+    if !result.is_portable || file_names.is_empty() {
+        return Ok(result);
+    }
+    let Some(legacy_root) = legacy_root else {
+        return Ok(result);
+    };
+    if legacy_dir == managed_dir || !legacy_dir.is_dir() {
+        return Ok(result);
+    }
+    let keep_legacy_copy = standard_install_present(&legacy_root);
+    for file_name in file_names {
+        // Reject anything that could escape the legacy attachments dir.
+        if file_name.is_empty()
+            || file_name.contains('/')
+            || file_name.contains('\\')
+            || file_name == "."
+            || file_name == ".."
+        {
+            continue;
+        }
+        let source = legacy_dir.join(&file_name);
+        if !source.is_file() {
+            continue;
+        }
+        let target = managed_dir.join(&file_name);
+        if target.exists() {
+            result.migrated_file_names.push(file_name);
+            continue;
+        }
+        if let Err(error) = fs::create_dir_all(&managed_dir) {
+            return Err(format!("Failed to create attachments directory: {error}"));
+        }
+        let moved = if keep_legacy_copy {
+            fs::copy(&source, &target).map(|_| ())
+        } else {
+            fs::rename(&source, &target).or_else(|_| {
+                // Profile dir may sit on another volume (USB stick).
+                fs::copy(&source, &target).map(|_| {
+                    let _ = fs::remove_file(&source);
+                })
+            })
+        };
+        match moved {
+            Ok(()) => result.migrated_file_names.push(file_name),
+            Err(error) => {
+                log::warn!("Failed to migrate portable attachment {file_name}: {error}");
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub(crate) fn open_path(app: tauri::AppHandle, path: String) -> Result<bool, String> {
+    let normalized = normalize_open_path(&path)?;
+    let allowed_roots = allowed_open_roots(&app);
+    if !path_is_openable(&normalized, &allowed_roots) {
+        return Err("Path is outside Mindwtr-managed locations.".to_string());
+    }
     open::that(normalized).map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_open_path_rejects_urls_and_relative_paths() {
+        assert!(normalize_open_path("https://example.com/file.txt").is_err());
+        assert!(normalize_open_path("../notes.txt").is_err());
+    }
+
+    #[test]
+    fn import_attachment_into_copies_file_and_keeps_original() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("original.txt");
+        std::fs::write(&source, b"hello attachment").expect("write source");
+        let dest_dir = dir.path().join("managed");
+
+        let (copied, size) =
+            import_attachment_into(&dest_dir, &source, "id-1.txt", Some(1024)).expect("import");
+
+        assert_eq!(size, 16);
+        assert_eq!(copied, dest_dir.join("id-1.txt"));
+        assert_eq!(std::fs::read(&copied).expect("read copy"), b"hello attachment");
+        assert!(source.exists(), "original must stay untouched");
+        let leftovers: Vec<_> = std::fs::read_dir(&dest_dir)
+            .expect("read dest dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp files may remain");
+    }
+
+    #[test]
+    fn import_attachment_into_rejects_oversized_missing_and_bad_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("big.bin");
+        std::fs::write(&source, vec![0u8; 32]).expect("write source");
+        let dest_dir = dir.path().join("managed");
+
+        let too_large = import_attachment_into(&dest_dir, &source, "id.bin", Some(16));
+        assert_eq!(too_large.unwrap_err(), ATTACHMENT_IMPORT_TOO_LARGE);
+
+        let missing = import_attachment_into(&dest_dir, &dir.path().join("nope.bin"), "id.bin", None);
+        assert!(missing.is_err());
+
+        let relative = import_attachment_into(&dest_dir, Path::new("relative.bin"), "id.bin", None);
+        assert!(relative.is_err());
+
+        let traversal = import_attachment_into(&dest_dir, &source, "../escape.bin", None);
+        assert!(traversal.is_err());
+    }
+
+    #[test]
+    fn path_is_under_allowed_root_respects_boundaries() {
+        let root = PathBuf::from("/tmp/mindwtr");
+        assert!(path_is_under_allowed_root(
+            Path::new("/tmp/mindwtr/attachments/a.pdf"),
+            &[root.clone()]
+        ));
+        assert!(!path_is_under_allowed_root(
+            Path::new("/tmp/mindwtr-other/a.pdf"),
+            &[root]
+        ));
+    }
+
+    #[test]
+    fn path_is_under_allowed_root_allows_flatpak_document_portal_paths() {
+        let portal_root = PathBuf::from("/run/user/1000/doc");
+        assert!(path_is_under_allowed_root(
+            Path::new("/run/user/1000/doc/abc123/notes.pdf"),
+            &[portal_root]
+        ));
+    }
+
+    #[test]
+    fn path_is_openable_allows_existing_user_selected_files() {
+        let temp = tempfile::tempdir().expect("should create temp dir");
+        let attachment_path = temp.path().join("notes.md");
+        fs::write(&attachment_path, "notes").expect("should write attachment");
+
+        assert!(path_is_openable(&attachment_path, &[]));
+    }
+
+    #[test]
+    fn path_is_openable_rejects_unmanaged_directories() {
+        let temp = tempfile::tempdir().expect("should create temp dir");
+
+        assert!(!path_is_openable(temp.path(), &[]));
+    }
 }
 
 #[tauri::command]

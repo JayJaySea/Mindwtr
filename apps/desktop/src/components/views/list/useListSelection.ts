@@ -7,15 +7,19 @@ import {
     useCallback,
     type RefObject,
 } from 'react';
+import { updateRangeSelection } from '@mindwtr/core';
 import type {
     StoreActionResult,
     Task,
     TaskPriority,
     TaskStatus,
     TimeEstimate,
+    RangeSelectionOptions,
 } from '@mindwtr/core';
 
 import { reportError } from '../../../lib/report-error';
+import { registerUndoableAction } from '../../../lib/undo-registry';
+import { undoTaskCompletion } from '../../../lib/undo-task-completion';
 import type { NextGroupBy } from './next-grouping';
 
 type ShowToast = (
@@ -32,8 +36,12 @@ type TaskListScope = {
     selectFirst: () => void;
     selectLast: () => void;
     editSelected: () => void;
+    openSelected: () => void;
+    openQuickActions: () => void;
     toggleDoneSelected: () => void;
+    toggleSelectSelected: () => void;
     deleteSelected: () => void;
+    setStatusSelected: (status: TaskStatus) => void;
     focusAddInput: () => void;
 };
 
@@ -87,18 +95,21 @@ type UseListSelectionResult = {
     handleConfirmTagPrompt: (value: string) => Promise<void>;
     handleSelectIndex: (index: number) => void;
     isBatchDeleting: boolean;
+    allVisibleTasksSelected: boolean;
+    clearTaskSelection: () => void;
     multiSelectedIds: Set<string>;
     pendingBatchDeleteIds: string[];
     pendingDeleteTask: Task | null;
     selectedIdsArray: string[];
     selectedIndex: number;
+    selectAllVisibleTasks: () => void;
     selectionMode: boolean;
     setContextPromptOpen: (open: boolean) => void;
     setPendingBatchDeleteIds: (taskIds: string[]) => void;
     setPendingDeleteTask: (task: Task | null) => void;
     setTagPromptOpen: (open: boolean) => void;
     tagPromptOpen: boolean;
-    toggleMultiSelect: (taskId: string) => void;
+    toggleMultiSelect: (taskId: string, options?: RangeSelectionOptions) => void;
     toggleSelectionMode: () => void;
 };
 
@@ -170,11 +181,13 @@ export function useListSelection({
     const [pendingDeleteTask, setPendingDeleteTask] = useState<Task | null>(null);
     const [pendingBatchDeleteIds, setPendingBatchDeleteIds] = useState<string[]>([]);
     const lastFilterKeyRef = useRef('');
+    const multiSelectAnchorIdRef = useRef<string | null>(null);
     const pendingSelectionScrollRef = useRef(false);
 
     const exitSelectionMode = useCallback(() => {
         setSelectionMode(false);
         setMultiSelectedIds(new Set());
+        multiSelectAnchorIdRef.current = null;
     }, []);
 
     const requestSelectionScroll = useCallback(() => {
@@ -183,6 +196,24 @@ export function useListSelection({
     }, []);
 
     const selectedIdsArray = useMemo(() => Array.from(multiSelectedIds), [multiSelectedIds]);
+    const filteredTaskIds = useMemo(() => filteredTasks.map((task) => task.id), [filteredTasks]);
+    const selectedVisibleCount = useMemo(
+        () => filteredTaskIds.filter((id) => multiSelectedIds.has(id)).length,
+        [filteredTaskIds, multiSelectedIds],
+    );
+    const allVisibleTasksSelected = filteredTaskIds.length > 0 && selectedVisibleCount === filteredTaskIds.length;
+
+    useEffect(() => {
+        setMultiSelectedIds((prev) => {
+            const visible = new Set(filteredTaskIds);
+            const next = new Set(Array.from(prev).filter((id) => visible.has(id)));
+            if (next.size === prev.size) return prev;
+            return next;
+        });
+        if (multiSelectAnchorIdRef.current && !filteredTaskIds.includes(multiSelectAnchorIdRef.current)) {
+            multiSelectAnchorIdRef.current = null;
+        }
+    }, [filteredTaskIds]);
 
     useEffect(() => {
         const filterKey = [
@@ -255,11 +286,28 @@ export function useListSelection({
         setSelectedIndex(index);
         if (shouldVirtualize) {
             scrollToVirtualIndex(index, 'center');
-        }
-
-        const element = document.querySelector(`[data-task-id="${highlightTaskId}"]`) as HTMLElement | null;
-        if (element && typeof (element as { scrollIntoView?: (options?: ScrollIntoViewOptions) => void }).scrollIntoView === 'function') {
-            element.scrollIntoView({ block: 'center' });
+        } else {
+            let retryTimer: number | null = null;
+            let cancelled = false;
+            let attempts = 0;
+            const scrollHighlightedTask = () => {
+                if (cancelled) return;
+                const element = document.querySelector(`[data-task-id="${highlightTaskId}"]`) as HTMLElement | null;
+                if (element && typeof (element as { scrollIntoView?: (options?: ScrollIntoViewOptions) => void }).scrollIntoView === 'function') {
+                    element.scrollIntoView({ block: 'center' });
+                    return;
+                }
+                if (attempts >= 8) return;
+                attempts += 1;
+                retryTimer = window.setTimeout(scrollHighlightedTask, 50);
+            };
+            scrollHighlightedTask();
+            const timer = window.setTimeout(() => setHighlightTask(null), 4000);
+            return () => {
+                cancelled = true;
+                if (retryTimer !== null) window.clearTimeout(retryTimer);
+                window.clearTimeout(timer);
+            };
         }
 
         const timer = window.setTimeout(() => setHighlightTask(null), 4000);
@@ -299,30 +347,86 @@ export function useListSelection({
         editTrigger?.click();
     }, [filteredTasks, selectedIndex]);
 
+    const openSelected = useCallback(() => {
+        const task = filteredTasks[selectedIndex];
+        if (!task) return;
+        const toggle = document.querySelector(
+            `[data-task-id="${task.id}"] [data-task-view-toggle]`,
+        ) as HTMLElement | null;
+        toggle?.click();
+    }, [filteredTasks, selectedIndex]);
+
     const toggleDoneSelected = useCallback(() => {
         const task = filteredTasks[selectedIndex];
         if (!task) return;
         const nextStatus: TaskStatus = task.status === 'done' ? 'inbox' : 'done';
+        const wasFocusedToday = task.isFocusedToday === true;
         void Promise.resolve(moveTask(task.id, nextStatus))
             .then(() => {
-                if (!undoNotificationsEnabled || nextStatus !== 'done') return;
+                if (nextStatus !== 'done') return;
+                const undo = registerUndoableAction(() => {
+                    void undoTaskCompletion(task.id, task.status, wasFocusedToday)
+                        .catch((error) => reportError('Failed to undo task completion', error));
+                });
+                if (!undoNotificationsEnabled) return;
                 showToast(
                     `${task.title} marked Done`,
                     'info',
                     5000,
                     {
                         label: t('common.undo') || 'Undo',
-                        onClick: () => {
-                            void Promise.resolve(moveTask(task.id, task.status));
-                        },
+                        onClick: undo,
                     },
                 );
             })
             .catch((error) => reportError('Failed to update task status', error));
     }, [filteredTasks, moveTask, selectedIndex, showToast, t, undoNotificationsEnabled]);
 
+    // Status chord (#860): `s` then a letter moves the selected task straight
+    // to that status through the shared moveTask path (recurrence/completion
+    // metadata applied by updateTask).
+    const setStatusSelected = useCallback((status: TaskStatus) => {
+        const task = filteredTasks[selectedIndex];
+        if (!task || task.status === status) return;
+        const previousStatus = task.status;
+        const wasFocusedToday = task.isFocusedToday === true;
+        void Promise.resolve(moveTask(task.id, status))
+            .then(() => {
+                const undo = registerUndoableAction(() => {
+                    // Completion has side effects (Today star, completedAt), so
+                    // undoing a move to done goes through the shared core rule.
+                    if (status === 'done') {
+                        void undoTaskCompletion(task.id, previousStatus, wasFocusedToday)
+                            .catch((error) => reportError('Failed to undo task status change', error));
+                        return;
+                    }
+                    void Promise.resolve(moveTask(task.id, previousStatus))
+                        .catch((error) => reportError('Failed to undo task status change', error));
+                });
+                if (!undoNotificationsEnabled) return;
+                const message = status === 'done'
+                    ? translateWithFallback('task.markedDone', '{title} marked Done').replace('{title}', task.title)
+                    : translateWithFallback('task.movedToStatus', '{{title}} moved to {{status}}')
+                        .replace('{{title}}', task.title)
+                        .replace('{{status}}', translateWithFallback(`status.${status}`, status));
+                showToast(
+                    message,
+                    'info',
+                    5000,
+                    {
+                        label: t('common.undo') || 'Undo',
+                        onClick: undo,
+                    },
+                );
+            })
+            .catch((error) => reportError('Failed to update task status', error));
+    }, [filteredTasks, moveTask, selectedIndex, showToast, t, translateWithFallback, undoNotificationsEnabled]);
+
     const runSingleDelete = useCallback(async (task: Task) => {
         await Promise.resolve(deleteTask(task.id));
+        const undo = registerUndoableAction(() => {
+            void restoreTask(task.id);
+        });
         if (!undoNotificationsEnabled) return;
         showToast(
             t('list.taskDeleted') || 'Task deleted',
@@ -330,9 +434,7 @@ export function useListSelection({
             5000,
             {
                 label: t('common.undo') || 'Undo',
-                onClick: () => {
-                    void restoreTask(task.id);
-                },
+                onClick: undo,
             },
         );
     }, [deleteTask, restoreTask, showToast, t, undoNotificationsEnabled]);
@@ -341,6 +443,34 @@ export function useListSelection({
         const task = filteredTasks[selectedIndex];
         if (!task) return;
         setPendingDeleteTask(task);
+    }, [filteredTasks, selectedIndex]);
+
+    // Keyboard multi-select: entering selection mode on first select and
+    // leaving it when the selection empties keeps the mode invisible unless
+    // it is actually in use.
+    const toggleSelectSelected = useCallback(() => {
+        const task = filteredTasks[selectedIndex];
+        if (!task) return;
+        const result = updateRangeSelection({
+            anchorId: multiSelectAnchorIdRef.current,
+            selectedIds: multiSelectedIds,
+            targetId: task.id,
+            visibleIds: filteredTaskIds,
+        });
+        multiSelectAnchorIdRef.current = result.anchorId;
+        setMultiSelectedIds(result.selectedIds);
+        setSelectionMode(result.selectedIds.size > 0);
+    }, [filteredTaskIds, filteredTasks, multiSelectedIds, selectedIndex]);
+
+    const openQuickActionsSelected = useCallback(() => {
+        const task = filteredTasks[selectedIndex];
+        if (!task) return;
+        const taskElement = Array.from(document.querySelectorAll<HTMLElement>('[data-task-id]'))
+            .find((element) => element.dataset.taskId === task.id);
+        const trigger = taskElement?.querySelector<HTMLElement>('[data-task-quick-actions-trigger]');
+        if (!trigger) return;
+        trigger.focus();
+        trigger.click();
     }, [filteredTasks, selectedIndex]);
 
     useEffect(() => {
@@ -356,14 +486,20 @@ export function useListSelection({
             selectFirst,
             selectLast,
             editSelected,
+            openSelected,
+            openQuickActions: openQuickActionsSelected,
             toggleDoneSelected,
+            toggleSelectSelected,
             deleteSelected,
+            setStatusSelected,
             focusAddInput: () => {
-                if (showViewFilterInput) {
-                    viewFilterInputRef.current?.focus();
+                if (addInputRef.current) {
+                    addInputRef.current.focus();
                     return;
                 }
-                addInputRef.current?.focus();
+                if (showViewFilterInput) {
+                    viewFilterInputRef.current?.focus();
+                }
             },
         });
 
@@ -373,23 +509,42 @@ export function useListSelection({
         deleteSelected,
         editSelected,
         isProcessing,
+        openQuickActionsSelected,
+        openSelected,
         registerTaskListScope,
         selectFirst,
         selectLast,
         selectNext,
         selectPrev,
+        setStatusSelected,
         showViewFilterInput,
         toggleDoneSelected,
+        toggleSelectSelected,
         viewFilterInputRef,
     ]);
 
-    const toggleMultiSelect = useCallback((taskId: string) => {
+    const toggleMultiSelect = useCallback((taskId: string, options: RangeSelectionOptions = {}) => {
         setMultiSelectedIds((previous) => {
-            const next = new Set(previous);
-            if (next.has(taskId)) next.delete(taskId);
-            else next.add(taskId);
-            return next;
+            const result = updateRangeSelection({
+                anchorId: multiSelectAnchorIdRef.current,
+                range: options.range,
+                selectedIds: previous,
+                targetId: taskId,
+                visibleIds: filteredTaskIds,
+            });
+            multiSelectAnchorIdRef.current = result.anchorId;
+            return result.selectedIds;
         });
+    }, [filteredTaskIds]);
+
+    const selectAllVisibleTasks = useCallback(() => {
+        multiSelectAnchorIdRef.current = filteredTaskIds[0] ?? null;
+        setMultiSelectedIds(new Set(filteredTaskIds));
+    }, [filteredTaskIds]);
+
+    const clearTaskSelection = useCallback(() => {
+        multiSelectAnchorIdRef.current = null;
+        setMultiSelectedIds(new Set());
     }, []);
 
     const handleSelectIndex = useCallback((index: number) => {
@@ -420,6 +575,9 @@ export function useListSelection({
         try {
             await Promise.resolve(batchDeleteTasks(taskIds));
             exitSelectionMode();
+            const undo = registerUndoableAction(() => {
+                void restoreDeletedTasksWithFeedback(taskIds, restoreTask, showToast);
+            });
             if (undoNotificationsEnabled) {
                 const deletedMessage = taskIds.length === 1
                     ? (t('list.taskDeleted') || 'Task deleted')
@@ -430,9 +588,7 @@ export function useListSelection({
                     5000,
                     {
                         label: t('common.undo') || 'Undo',
-                        onClick: () => {
-                            void restoreDeletedTasksWithFeedback(taskIds, restoreTask, showToast);
-                        },
+                        onClick: undo,
                     },
                 );
             }
@@ -551,11 +707,14 @@ export function useListSelection({
         handleConfirmTagPrompt,
         handleSelectIndex,
         isBatchDeleting,
+        allVisibleTasksSelected,
+        clearTaskSelection,
         multiSelectedIds,
         pendingBatchDeleteIds,
         pendingDeleteTask,
         selectedIdsArray,
         selectedIndex,
+        selectAllVisibleTasks,
         selectionMode,
         setContextPromptOpen,
         setPendingBatchDeleteIds,

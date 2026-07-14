@@ -1,17 +1,23 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, Modal, TouchableOpacity, ScrollView, StyleSheet, Platform } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { View, Text, FlatList, Modal, TouchableOpacity, ScrollView, StyleSheet, Platform } from 'react-native';
 import { router } from 'expo-router';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, Calendar as CalendarIcon, Target, Inbox, Clock, Sparkles, Star, CheckCircle2, Play } from 'lucide-react-native';
+import { X, Calendar as CalendarIcon, Target, Inbox, Clock, Sparkles, Star, CheckCircle2, Play, ChevronDown, ChevronUp } from 'lucide-react-native';
 
 import {
+    formatFocusTaskLimitText,
     useTaskStore,
+    shallow,
+    isTaskInActiveProject,
     isDueForReview,
+    normalizeFocusTaskLimit,
     safeFormatDate,
     safeParseDate,
     safeParseDueDate,
+    shouldShowTaskForStart,
     sortTasksBy,
+    tFallback,
     type ExternalCalendarEvent,
     type Task,
     type TaskSortBy,
@@ -20,7 +26,9 @@ import {
 
 import { useTheme } from '../contexts/theme-context';
 import { useLanguage } from '../contexts/language-context';
+import { ToastViewport } from '../contexts/toast-context';
 import { useThemeColors } from '@/hooks/use-theme-colors';
+import { useFilledButtonColors } from '@/hooks/use-filled-button-colors';
 import { openContextsScreen, openProjectScreen } from '@/lib/task-meta-navigation';
 import { SwipeableTaskItem } from './swipeable-task-item';
 import { TaskEditModal } from './task-edit-modal';
@@ -29,6 +37,12 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { fetchExternalCalendarEvents } from '../lib/external-calendar';
 
 type DailyReviewStep = 'today' | 'focus' | 'inbox' | 'waiting' | 'complete';
+type DailyReviewStepDefinition = {
+    hasWork: boolean;
+    id: DailyReviewStep;
+    title: string;
+    description: string;
+};
 
 interface DailyReviewModalProps {
     visible: boolean;
@@ -40,10 +54,17 @@ function isSameDay(a: Date, b: Date): boolean {
 }
 
 function DailyReviewFlow({ onClose }: { onClose: () => void }) {
-    const { tasks, settings, updateTask, deleteTask } = useTaskStore();
+    const { tasks, projects, settings, updateTask, deleteTask } = useTaskStore((state) => ({
+        tasks: state.tasks,
+        projects: state.projects,
+        settings: state.settings,
+        updateTask: state.updateTask,
+        deleteTask: state.deleteTask,
+    }), shallow);
     const { isDark } = useTheme();
     const { t } = useLanguage();
     const tc = useThemeColors();
+    const filledButton = useFilledButtonColors();
     const insets = useSafeAreaInsets();
 
     const [currentStep, setCurrentStep] = useState<DailyReviewStep>('today');
@@ -53,15 +74,26 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
     const [externalEvents, setExternalEvents] = useState<ExternalCalendarEvent[]>([]);
     const [externalLoading, setExternalLoading] = useState(false);
     const [externalError, setExternalError] = useState<string | null>(null);
+    const [calendarExpanded, setCalendarExpanded] = useState(true);
 
     const sortBy = (settings?.taskSortBy ?? 'default') as TaskSortBy;
+    const includeFocusStep = settings.gtd?.dailyReview?.includeFocusStep !== false;
+    const focusTaskLimit = normalizeFocusTaskLimit(settings.gtd?.focusTaskLimit);
+    const showFutureStarts = settings?.appearance?.showFutureStarts === true;
+    const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
 
     const today = useMemo(() => new Date(), []);
+    const followUpTodayReviewAt = useMemo(
+        () => new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString(),
+        [today],
+    );
     const tomorrow = useMemo(() => {
         const d = new Date(today);
         d.setDate(d.getDate() + 1);
         return d;
     }, [today]);
+    const followUpTodayLabel = tFallback(t, 'dailyReview.followUpToday', 'Follow up today');
+    const reviewDueLabel = tFallback(t, 'agenda.reviewDue', 'Review Due');
 
     useEffect(() => {
         const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -94,7 +126,7 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
         };
     }, [today]);
 
-    const getExternalEventsForDate = (date: Date) => {
+    const getExternalEventsForDate = useCallback((date: Date) => {
         const start = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
         const end = new Date(start);
         end.setDate(end.getDate() + 1);
@@ -110,28 +142,32 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
                 const bStart = safeParseDate(b.start)?.getTime() ?? Number.POSITIVE_INFINITY;
                 return aStart - bStart;
             });
-    };
-    const todayEvents = useMemo(() => getExternalEventsForDate(today), [externalEvents, today]);
-    const tomorrowEvents = useMemo(() => getExternalEventsForDate(tomorrow), [externalEvents, tomorrow]);
+    }, [externalEvents]);
+    const todayEvents = useMemo(() => getExternalEventsForDate(today), [getExternalEventsForDate, today]);
+    const tomorrowEvents = useMemo(() => getExternalEventsForDate(tomorrow), [getExternalEventsForDate, tomorrow]);
 
     const activeTasks = useMemo(
-        () => tasks.filter((task) => !task.deletedAt && task.status !== 'done' && task.status !== 'reference'),
-        [tasks],
+        () => tasks.filter((task) => (
+            !task.deletedAt
+            && task.status !== 'done'
+            && task.status !== 'reference'
+            && isTaskInActiveProject(task, projectById)
+        )),
+        [projectById, tasks],
     );
 
-    const inboxTasks = useMemo(() => {
-        const now = new Date();
-        return activeTasks.filter((task) => {
-            if (task.status !== 'inbox') return false;
-            const start = safeParseDate(task.startTime);
-            if (start && start > now) return false;
-            return true;
-        });
-    }, [activeTasks]);
+    const inboxTasks = useMemo(
+        () => activeTasks.filter((task) => task.status === 'inbox'),
+        [activeTasks],
+    );
 
     const focusedTasks = useMemo(
-        () => activeTasks.filter((task) => task.isFocusedToday && task.status !== 'done'),
-        [activeTasks],
+        () => activeTasks.filter((task) => (
+            task.isFocusedToday
+            && task.status !== 'done'
+            && shouldShowTaskForStart(task, { showFutureStarts })
+        )),
+        [activeTasks, showFutureStarts],
     );
 
     const focusCandidates = useMemo(() => {
@@ -142,7 +178,7 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
             if (!byId.has(task.id)) byId.set(task.id, task);
         };
         activeTasks.forEach((task) => {
-            if (task.isFocusedToday) addCandidate(task);
+            if (task.isFocusedToday && shouldShowTaskForStart(task, { showFutureStarts })) addCandidate(task);
             const due = safeParseDueDate(task.dueDate);
             if (due && (due < now || due.toDateString() === todayStr)) {
                 addCandidate(task);
@@ -159,7 +195,7 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
             }
         });
         return sortTasksBy(Array.from(byId.values()), sortBy);
-    }, [activeTasks, sortBy]);
+    }, [activeTasks, showFutureStarts, sortBy]);
 
     const dueTodayTasks = useMemo(() => {
         const dueToday = activeTasks.filter((task) => {
@@ -185,23 +221,66 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
         return sortTasksBy(waiting, sortBy);
     }, [activeTasks, sortBy]);
 
-    const steps: { id: DailyReviewStep; title: string; description: string }[] = [
-        { id: 'today', title: t('dailyReview.todayStep'), description: t('dailyReview.todayDesc') },
-        { id: 'focus', title: t('dailyReview.focusStep'), description: t('dailyReview.focusDesc') },
-        { id: 'inbox', title: t('dailyReview.inboxStep'), description: t('dailyReview.inboxDesc') },
-        { id: 'waiting', title: t('dailyReview.waitingStep'), description: t('dailyReview.waitingDesc') },
-        { id: 'complete', title: t('dailyReview.completeTitle'), description: t('dailyReview.completeDesc') },
-    ];
+    const steps: DailyReviewStepDefinition[] = useMemo(() => {
+        const todayHasWork = overdueTasks.length > 0
+            || dueTodayTasks.length > 0
+            || todayEvents.length > 0
+            || tomorrowEvents.length > 0
+            || Boolean(externalError);
+        const list: DailyReviewStepDefinition[] = [
+            { id: 'today', title: t('dailyReview.todayStep'), description: t('dailyReview.todayDesc'), hasWork: todayHasWork },
+            { id: 'inbox', title: t('dailyReview.inboxStep'), description: t('dailyReview.inboxDesc'), hasWork: inboxTasks.length > 0 },
+            // Waiting For comes before focus selection: items unblocked today can be
+            // switched to Next here and then picked up in the focus step.
+            { id: 'waiting', title: t('dailyReview.waitingStep'), description: t('dailyReview.waitingDesc'), hasWork: waitingTasks.length > 0 },
+        ];
+        if (includeFocusStep) {
+            list.push({ id: 'focus', title: t('dailyReview.focusStep'), description: t('dailyReview.focusDesc'), hasWork: focusCandidates.length > 0 });
+        }
+        list.push(
+            { id: 'complete', title: t('dailyReview.completeTitle'), description: t('dailyReview.completeDesc'), hasWork: true },
+        );
+        return list;
+    }, [
+        dueTodayTasks.length,
+        externalError,
+        focusCandidates.length,
+        inboxTasks.length,
+        includeFocusStep,
+        overdueTasks.length,
+        t,
+        todayEvents.length,
+        tomorrowEvents.length,
+        waitingTasks.length,
+    ]);
+    const activeSteps = useMemo(
+        () => steps.filter((step) => step.hasWork || step.id === 'complete'),
+        [steps],
+    );
 
-    const currentIndex = steps.findIndex((s) => s.id === currentStep);
-    const progress = (currentIndex / (steps.length - 1)) * 100;
+    const displayedStep = activeSteps.some((step) => step.id === currentStep)
+        ? currentStep
+        : activeSteps[0]?.id ?? 'complete';
+    const currentIndex = steps.findIndex((s) => s.id === displayedStep);
+    const safeCurrentIndex = Math.max(0, currentIndex);
+    const activeStepIndex = activeSteps.findIndex((step) => step.id === displayedStep);
+    const progress = (safeCurrentIndex / Math.max(1, steps.length - 1)) * 100;
+
+    useEffect(() => {
+        if (activeSteps.some((step) => step.id === currentStep)) return;
+        setCurrentStep(activeSteps[0]?.id ?? 'complete');
+    }, [activeSteps, currentStep]);
 
     const next = () => {
-        if (currentIndex < steps.length - 1) setCurrentStep(steps[currentIndex + 1].id);
+        if (activeStepIndex < 0) {
+            setCurrentStep(activeSteps[0]?.id ?? 'complete');
+            return;
+        }
+        if (activeStepIndex < activeSteps.length - 1) setCurrentStep(activeSteps[activeStepIndex + 1].id);
     };
 
     const back = () => {
-        if (currentIndex > 0) setCurrentStep(steps[currentIndex - 1].id);
+        if (activeStepIndex > 0) setCurrentStep(activeSteps[activeStepIndex - 1].id);
     };
 
     const openTask = (task: Task) => {
@@ -212,6 +291,9 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
     const closeTask = () => {
         setIsTaskModalVisible(false);
         setEditingTask(null);
+    };
+    const handleFollowUpToday = (task: Task) => {
+        void updateTask(task.id, { reviewAt: followUpTodayReviewAt });
     };
     const handleNavigateToProject = (projectId: string) => {
         closeTask();
@@ -224,25 +306,115 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
         openContextsScreen(token);
     };
 
-    const renderTaskList = (list: Task[], options?: { showFocusToggle?: boolean; hideStatusBadge?: boolean }) => (
-        <ScrollView style={styles.taskList}>
-            {list.map((task) => (
-                <SwipeableTaskItem
-                    key={task.id}
-                    task={task}
-                    isDark={isDark}
-                    tc={tc}
-                    onPress={() => openTask(task)}
-                    onStatusChange={(status) => updateTask(task.id, { status: status as TaskStatus })}
-                    onDelete={() => deleteTask(task.id)}
-                    showFocusToggle={options?.showFocusToggle}
-                    hideStatusBadge={options?.hideStatusBadge}
-                    onProjectPress={handleNavigateToProject}
-                    onContextPress={handleNavigateToToken}
-                    onTagPress={handleNavigateToToken}
-                />
-            ))}
+    const renderStepRail = () => (
+        <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={[styles.stepRail, { borderBottomColor: tc.border }]}
+            contentContainerStyle={styles.stepRailContent}
+        >
+            {steps.map((step, index) => {
+                const skipped = !step.hasWork && step.id !== 'complete';
+                const complete = skipped || index < safeCurrentIndex;
+                const current = step.id === displayedStep;
+                return (
+                    <View
+                        key={step.id}
+                        style={[
+                            styles.stepRailItem,
+                            {
+                                backgroundColor: current
+                                    ? `${tc.tint}1A`
+                                    : complete
+                                        ? `${tc.success}1A`
+                                        : tc.filterBg,
+                                borderColor: current
+                                    ? tc.tint
+                                    : complete
+                                        ? `${tc.success}66`
+                                        : tc.border,
+                            },
+                        ]}
+                    >
+                        <View
+                            style={[
+                                styles.stepRailBadge,
+                                {
+                                    backgroundColor: current
+                                        ? tc.tint
+                                        : complete
+                                            ? tc.success
+                                            : tc.border,
+                                },
+                            ]}
+                        >
+                            {complete ? (
+                                <CheckCircle2 size={12} color="#FFFFFF" strokeWidth={2.8} />
+                            ) : (
+                                <Text style={styles.stepRailBadgeText}>{index + 1}</Text>
+                            )}
+                        </View>
+                        <Text
+                            style={[styles.stepRailText, { color: current ? tc.text : tc.secondaryText }]}
+                            numberOfLines={1}
+                        >
+                            {step.title}
+                        </Text>
+                    </View>
+                );
+            })}
         </ScrollView>
+    );
+
+    const renderTaskList = (list: Task[], options?: { showFocusToggle?: boolean; hideStatusBadge?: boolean; showFollowUpToday?: boolean }) => (
+        <FlatList
+            data={list}
+            renderItem={({ item: task }) => {
+                const taskRow = (
+                    <SwipeableTaskItem
+                        task={task}
+                        isDark={isDark}
+                        tc={tc}
+                        onPress={() => openTask(task)}
+                        onStatusChange={(status) => updateTask(task.id, { status: status as TaskStatus })}
+                        onDelete={() => { void deleteTask(task.id); }}
+                        showFocusToggle={options?.showFocusToggle}
+                        hideStatusBadge={options?.hideStatusBadge}
+                    />
+                );
+                if (!options?.showFollowUpToday) return taskRow;
+                const reviewDue = isDueForReview(task.reviewAt, today);
+                return (
+                    <View style={styles.waitingTaskActionItem}>
+                        {taskRow}
+                        <TouchableOpacity
+                            style={[
+                                styles.followUpButton,
+                                { borderColor: tc.border, backgroundColor: tc.cardBg, opacity: reviewDue ? 0.65 : 1 },
+                            ]}
+                            onPress={() => handleFollowUpToday(task)}
+                            disabled={reviewDue}
+                            hitSlop={6}
+                            accessibilityRole="button"
+                            accessibilityLabel={`${followUpTodayLabel}: ${task.title}`}
+                        >
+                            <Clock size={14} color={tc.tint} strokeWidth={2.2} />
+                            <Text style={[styles.followUpButtonText, { color: tc.text }]}>
+                                {reviewDue ? reviewDueLabel : followUpTodayLabel}
+                            </Text>
+                        </TouchableOpacity>
+                    </View>
+                );
+            }}
+            keyExtractor={(task) => task.id}
+            style={styles.taskList}
+            initialNumToRender={12}
+            maxToRenderPerBatch={12}
+            windowSize={5}
+            updateCellsBatchingPeriod={50}
+            removeClippedSubviews={false}
+            showsVerticalScrollIndicator={false}
+        />
     );
 
     const renderExternalEventList = (events: ExternalCalendarEvent[]) => {
@@ -279,10 +451,11 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
     };
 
     const renderStep = () => {
-        switch (currentStep) {
+        switch (displayedStep) {
             case 'today': {
                 const topTasks = [...overdueTasks, ...dueTodayTasks].slice(0, 8);
                 const totalToday = overdueTasks.length + dueTodayTasks.length;
+                const calendarEventCount = todayEvents.length + tomorrowEvents.length;
                 return (
                     <View style={styles.stepContent}>
                         <View style={styles.stepTitleRow}>
@@ -295,19 +468,48 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
                             </Text>
                             <Text style={[styles.guideText, { color: tc.secondaryText }]}>{t('dailyReview.todayDesc')}</Text>
                         </View>
-                        <View style={styles.calendarGrid}>
-                            <View style={[styles.calendarCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
-                                <Text style={[styles.calendarCardTitle, { color: tc.secondaryText }]}>
-                                    {safeFormatDate(today, 'P')} · {t('calendar.events')}
-                                </Text>
-                                {renderExternalEventList(todayEvents)}
-                            </View>
-                            <View style={[styles.calendarCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
-                                <Text style={[styles.calendarCardTitle, { color: tc.secondaryText }]}>
-                                    {safeFormatDate(tomorrow, 'P')} · {t('calendar.events')}
-                                </Text>
-                                {renderExternalEventList(tomorrowEvents)}
-                            </View>
+                        <View style={styles.calendarSection}>
+                            <TouchableOpacity
+                                style={[styles.calendarToggleButton, { backgroundColor: tc.cardBg, borderColor: tc.border }]}
+                                onPress={() => setCalendarExpanded((expanded) => !expanded)}
+                                activeOpacity={0.75}
+                                accessibilityRole="button"
+                                accessibilityState={{ expanded: calendarExpanded }}
+                                accessibilityLabel={t('calendar.events')}
+                            >
+                                <View style={styles.calendarToggleTitle}>
+                                    <CalendarIcon size={16} color={tc.secondaryText} strokeWidth={2} />
+                                    <Text style={[styles.calendarToggleText, { color: tc.text }]}>
+                                        {t('calendar.events')}
+                                    </Text>
+                                    <View style={[styles.calendarCountBadge, { backgroundColor: tc.filterBg }]}>
+                                        <Text style={[styles.calendarCountText, { color: tc.secondaryText }]}>
+                                            {calendarEventCount}
+                                        </Text>
+                                    </View>
+                                </View>
+                                {calendarExpanded ? (
+                                    <ChevronUp size={18} color={tc.secondaryText} strokeWidth={2} />
+                                ) : (
+                                    <ChevronDown size={18} color={tc.secondaryText} strokeWidth={2} />
+                                )}
+                            </TouchableOpacity>
+                            {calendarExpanded && (
+                                <View style={styles.calendarGrid}>
+                                    <View style={[styles.calendarCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
+                                        <Text style={[styles.calendarCardTitle, { color: tc.secondaryText }]}>
+                                            {safeFormatDate(today, 'P')} · {t('calendar.events')}
+                                        </Text>
+                                        {renderExternalEventList(todayEvents)}
+                                    </View>
+                                    <View style={[styles.calendarCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
+                                        <Text style={[styles.calendarCardTitle, { color: tc.secondaryText }]}>
+                                            {safeFormatDate(tomorrow, 'P')} · {t('calendar.events')}
+                                        </Text>
+                                        {renderExternalEventList(tomorrowEvents)}
+                                    </View>
+                                </View>
+                            )}
                         </View>
                         {topTasks.length === 0 ? (
                             <View style={styles.emptyState}>
@@ -329,14 +531,16 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
                         </View>
                         <View style={[styles.infoBox, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
                             <Text style={[styles.infoText, { color: tc.text }]}>
-                                <Text style={{ fontWeight: '700' }}>{focusedTasks.length}</Text> / 3
+                                <Text style={{ fontWeight: '700' }}>{focusedTasks.length}</Text> {t('dailyReview.focusSelected')}
                             </Text>
                             <Text style={[styles.guideText, { color: tc.secondaryText }]}>{t('dailyReview.focusDesc')}</Text>
                         </View>
                         {focusCandidates.length === 0 ? (
                             <View style={styles.emptyState}>
                                 <Star size={48} color={tc.secondaryText} strokeWidth={1.5} style={styles.emptyIcon} />
-                                <Text style={[styles.emptyText, { color: tc.secondaryText }]}>{t('agenda.focusHint')}</Text>
+                                <Text style={[styles.emptyText, { color: tc.secondaryText }]}>
+                                    {formatFocusTaskLimitText(t('agenda.focusHint'), focusTaskLimit)}
+                                </Text>
                             </View>
                         ) : (
                             renderTaskList(focusCandidates.slice(0, 8), { showFocusToggle: true, hideStatusBadge: true })
@@ -358,14 +562,14 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
                         </View>
                         {inboxTasks.length > 0 && (
                             <TouchableOpacity
-                                style={[styles.processButton, { backgroundColor: tc.tint }]}
+                                style={[styles.processButton, { backgroundColor: filledButton.backgroundColor }]}
                                 onPress={() => setShowInboxProcessing(true)}
                                 hitSlop={8}
                                 accessibilityRole="button"
                                 accessibilityLabel={t('inbox.processButton')}
                             >
-                                <Play size={14} color="#FFFFFF" strokeWidth={2.5} fill="#FFFFFF" />
-                                <Text style={styles.processButtonText}>
+                                <Play size={14} color={filledButton.textColor ?? '#FFFFFF'} strokeWidth={2.5} fill={filledButton.textColor ?? '#FFFFFF'} />
+                                <Text style={[styles.processButtonText, filledButton.textColor ? { color: filledButton.textColor } : null]}>
                                     {t('inbox.processButton')}
                                 </Text>
                             </TouchableOpacity>
@@ -399,7 +603,7 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
                                 <Text style={[styles.emptyText, { color: tc.secondaryText }]}>{t('review.waitingEmpty')}</Text>
                             </View>
                         ) : (
-                            renderTaskList(waitingTasks.slice(0, 8))
+                            renderTaskList(waitingTasks.slice(0, 8), { showFollowUpToday: true })
                         )}
                     </View>
                 );
@@ -409,8 +613,8 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
                         <CheckCircle2 size={56} color={tc.tint} strokeWidth={1.5} style={styles.bigIcon} />
                         <Text style={[styles.heading, { color: tc.text }]}>{t('dailyReview.completeTitle')}</Text>
                         <Text style={[styles.description, { color: tc.secondaryText }]}>{t('dailyReview.completeDesc')}</Text>
-                        <TouchableOpacity style={[styles.primaryButton, { backgroundColor: tc.tint }]} onPress={onClose}>
-                            <Text style={styles.primaryButtonText}>{t('review.finish')}</Text>
+                        <TouchableOpacity style={[styles.primaryButton, { backgroundColor: filledButton.backgroundColor }]} onPress={onClose}>
+                            <Text style={[styles.primaryButtonText, filledButton.textColor ? { color: filledButton.textColor } : null]}>{t('review.finish')}</Text>
                         </TouchableOpacity>
                     </View>
                 );
@@ -446,10 +650,11 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
                 <View style={[styles.progressTrack, { backgroundColor: tc.border }]}>
                     <View style={[styles.progressFill, { width: `${progress}%`, backgroundColor: tc.tint }]} />
                 </View>
+                {renderStepRail()}
 
                 <View style={styles.content}>{renderStep()}</View>
 
-                {currentStep !== 'complete' && (
+                {displayedStep !== 'complete' && (
                     <View
                         style={[
                             styles.footer,
@@ -462,13 +667,13 @@ function DailyReviewFlow({ onClose }: { onClose: () => void }) {
                     >
                         <TouchableOpacity
                             onPress={back}
-                            disabled={currentIndex === 0}
-                            style={[styles.footerButton, { backgroundColor: tc.filterBg, opacity: currentIndex === 0 ? 0.5 : 1 }]}
+                            disabled={activeStepIndex <= 0}
+                            style={[styles.footerButton, { backgroundColor: tc.filterBg, opacity: activeStepIndex <= 0 ? 0.5 : 1 }]}
                         >
                             <Text style={[styles.footerButtonText, { color: tc.text }]}>{t('review.back')}</Text>
                         </TouchableOpacity>
-                        <TouchableOpacity onPress={next} style={[styles.footerButton, { backgroundColor: tc.tint }]}>
-                            <Text style={styles.footerPrimaryText}>{t('review.nextStepBtn')}</Text>
+                        <TouchableOpacity onPress={next} style={[styles.footerButton, { backgroundColor: filledButton.backgroundColor }]}>
+                            <Text style={[styles.footerPrimaryText, filledButton.textColor ? { color: filledButton.textColor } : null]}>{t('review.nextStepBtn')}</Text>
                         </TouchableOpacity>
                     </View>
                 )}
@@ -513,6 +718,7 @@ export function DailyReviewModal({ visible, onClose }: DailyReviewModalProps) {
             onRequestClose={onClose}
         >
             <DailyReviewFlow onClose={onClose} />
+            <ToastViewport />
         </Modal>
     );
 }
@@ -557,6 +763,44 @@ const styles = StyleSheet.create({
     },
     progressFill: {
         height: '100%',
+    },
+    stepRail: {
+        borderBottomWidth: 1,
+        maxHeight: 48,
+    },
+    stepRailContent: {
+        gap: 8,
+        paddingHorizontal: 16,
+        paddingVertical: 8,
+    },
+    stepRailItem: {
+        minWidth: 104,
+        maxWidth: 148,
+        height: 32,
+        borderRadius: 999,
+        borderWidth: 1,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        paddingHorizontal: 8,
+    },
+    stepRailBadge: {
+        width: 18,
+        height: 18,
+        borderRadius: 9,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    stepRailBadgeText: {
+        color: '#FFFFFF',
+        fontSize: 10,
+        fontWeight: '800',
+    },
+    stepRailText: {
+        flex: 1,
+        minWidth: 0,
+        fontSize: 12,
+        fontWeight: '700',
     },
     content: {
         flex: 1,
@@ -624,6 +868,44 @@ const styles = StyleSheet.create({
     calendarGrid: {
         gap: 10,
     },
+    calendarSection: {
+        gap: 10,
+    },
+    calendarToggleButton: {
+        minHeight: 44,
+        borderWidth: 1,
+        borderRadius: 12,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+    },
+    calendarToggleTitle: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        flex: 1,
+        minWidth: 0,
+    },
+    calendarToggleText: {
+        fontSize: 13,
+        fontWeight: '700',
+        flexShrink: 1,
+    },
+    calendarCountBadge: {
+        minWidth: 28,
+        height: 24,
+        borderRadius: 999,
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingHorizontal: 8,
+    },
+    calendarCountText: {
+        fontSize: 12,
+        fontWeight: '700',
+    },
     calendarCard: {
         borderWidth: 1,
         borderRadius: 12,
@@ -680,6 +962,24 @@ const styles = StyleSheet.create({
     },
     taskList: {
         flex: 1,
+    },
+    waitingTaskActionItem: {
+        gap: 8,
+    },
+    followUpButton: {
+        alignSelf: 'flex-start',
+        minHeight: 36,
+        borderWidth: 1,
+        borderRadius: 999,
+        paddingHorizontal: 12,
+        paddingVertical: 8,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+    },
+    followUpButtonText: {
+        fontSize: 12,
+        fontWeight: '700',
     },
     emptyState: {
         alignItems: 'center',

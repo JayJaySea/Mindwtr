@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef } from 'react';
-import { createPortal } from 'react-dom';
+import { ModalPortal } from './ModalPortal';
 import { Button } from './ui/Button';
 
 interface ConfirmModalProps {
@@ -48,9 +48,8 @@ export function ConfirmModal({
     }, [isOpen]);
 
     if (!isOpen) return null;
-    if (typeof document === 'undefined') return null;
-
-    return createPortal(
+    return (
+        <ModalPortal>
         <div
             className="fixed inset-0 bg-black/50 flex items-start justify-center pt-[20vh] z-50"
             role="dialog"
@@ -95,7 +94,10 @@ export function ConfirmModal({
                 <div className="px-4 py-3 border-b">
                     <h3 id={titleId} className="font-semibold">{title}</h3>
                     {description && (
-                        <p id={descriptionId} className="text-xs text-muted-foreground mt-1">
+                        <p
+                            id={descriptionId}
+                            className="mt-1 max-h-64 overflow-y-auto whitespace-pre-line break-words text-xs leading-relaxed text-muted-foreground"
+                        >
                             {description}
                         </p>
                     )}
@@ -110,7 +112,6 @@ export function ConfirmModal({
                 </div>
             </div>
         </div>
-        ,
-        document.body,
+        </ModalPortal>
     );
 }

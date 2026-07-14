@@ -1,22 +1,28 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useId, useMemo, useRef } from 'react';
 import { Search, FileText, CheckCircle, Save, SlidersHorizontal, X } from 'lucide-react';
 import {
     shallow,
     useTaskStore,
     Task,
+    Project,
     generateUUID,
     SavedSearch,
     SearchProjectResult,
     SearchResults,
     SearchTaskResult,
     getStorageAdapter,
+    normalizeWeekStartSetting,
     TaskStatus,
+    AREA_FILTER_ALL,
+    resolveAreaFilter,
+    taskMatchesAreaFilter,
+    projectMatchesAreaFilter,
 } from '@mindwtr/core';
 import { useLanguage } from '../contexts/language-context';
 import { cn } from '../lib/utils';
+import { ModalPortal } from './ModalPortal';
 import { PromptModal } from './PromptModal';
 import { useUiStore } from '../store/ui-store';
-import { AREA_FILTER_ALL, AREA_FILTER_NONE, resolveAreaFilter } from '../lib/area-filter';
 import { computeGlobalSearchResults, type DuePreset, type GlobalSearchScope } from './global-search-filtering';
 import { resolveTaskNavigationView } from '../lib/task-navigation';
 
@@ -27,6 +33,7 @@ interface GlobalSearchProps {
 export const resolveGlobalSearchTaskView = resolveTaskNavigationView;
 
 export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
+    const dialogTitleId = useId();
     const [isOpen, setIsOpen] = useState(false);
     const [query, setQuery] = useState('');
     const [selectedIndex, setSelectedIndex] = useState(0);
@@ -34,10 +41,12 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
     const [savePromptDefault, setSavePromptDefault] = useState('');
     const [includeCompleted, setIncludeCompleted] = useState(false);
     const [includeReference, setIncludeReference] = useState(true);
+    const [hideFutureTasks, setHideFutureTasks] = useState(false);
     const [filtersOpen, setFiltersOpen] = useState(false);
     const [selectedStatuses, setSelectedStatuses] = useState<TaskStatus[]>([]);
     const [selectedArea, setSelectedArea] = useState<string>('all');
     const [selectedTokens, setSelectedTokens] = useState<string[]>([]);
+    const [locationQuery, setLocationQuery] = useState('');
     const [duePreset, setDuePreset] = useState<DuePreset>('any');
     const [scope, setScope] = useState<GlobalSearchScope>('all');
     const [ftsResults, setFtsResults] = useState<SearchResults | null>(null);
@@ -59,18 +68,20 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
         shallow
     );
     const { allContexts, allTags } = getDerivedState();
-    const setProjectView = useUiStore((state) => state.setProjectView);
-    const { t } = useLanguage();
-
-    const globalAreaFilter = useMemo(
+    const areaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
+    const projectMap = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
+    const activeAreaFilter = useMemo(
         () => resolveAreaFilter(settings?.filters?.areaId, areas),
-        [settings?.filters?.areaId, areas],
+        [settings?.filters?.areaId, areas]
     );
+    const setProjectView = useUiStore((state) => state.setProjectView);
+    const showToast = useUiStore((state) => state.showToast);
+    const { t } = useLanguage();
 
     // Toggle search with Cmd+K / Ctrl+K
     useEffect(() => {
         isOpenRef.current = isOpen;
-    }, [isOpen, globalAreaFilter]);
+    }, [isOpen]);
 
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -93,24 +104,24 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
         return () => window.removeEventListener('mindwtr:open-search', handleOpen);
     }, []);
 
-    // Auto-focus input when opened
+    // Auto-focus input when opened. Focus immediately so keys typed right
+    // after "/" land in the query instead of nowhere; the delayed retry covers
+    // the portal/animation frame where the first attempt can be swallowed.
     useEffect(() => {
         if (isOpen) {
+            inputRef.current?.focus();
             setTimeout(() => inputRef.current?.focus(), 50);
             setQuery('');
             setSelectedIndex(0);
             setShowSavePrompt(false);
             setIncludeCompleted(false);
             setIncludeReference(true);
+            setHideFutureTasks(false);
             setFiltersOpen(false);
             setSelectedStatuses([]);
-            const initialArea = globalAreaFilter === AREA_FILTER_ALL
-                ? 'all'
-                : globalAreaFilter === AREA_FILTER_NONE
-                    ? 'none'
-                    : globalAreaFilter;
-            setSelectedArea(initialArea);
+            setSelectedArea('all');
             setSelectedTokens([]);
+            setLocationQuery('');
             setDuePreset('any');
             setScope('all');
         }
@@ -172,32 +183,38 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
     const includeReferenceText = includeReferenceLabel === 'search.includeReference'
         ? 'Include Reference tasks'
         : includeReferenceLabel;
-    const { totalResults, results, isTruncated } = useMemo(() => computeGlobalSearchResults({
+    const hideFutureTasksLabel = t('filters.hideFutureTasks');
+    const hideFutureTasksText = hideFutureTasksLabel === 'filters.hideFutureTasks'
+        ? 'Hide future tasks'
+        : hideFutureTasksLabel;
+    const { totalResultsLabel, results, isTruncated } = useMemo(() => computeGlobalSearchResults({
         query,
         tasks: _allTasks,
         projects,
         areas,
-        globalAreaFilter,
         includeCompleted,
         includeReference,
+        hideFutureTasks,
         selectedStatuses,
         selectedArea,
         selectedTokens,
+        locationQuery,
         duePreset,
         scope,
-        weekStart: settings?.weekStart === 'monday' ? 'monday' : 'sunday',
+        weekStart: normalizeWeekStartSetting(settings?.weekStart),
         ftsResults,
     }), [
         query,
         _allTasks,
         projects,
         areas,
-        globalAreaFilter,
         includeCompleted,
         includeReference,
+        hideFutureTasks,
         selectedStatuses,
         selectedArea,
         selectedTokens,
+        locationQuery,
         duePreset,
         scope,
         settings?.weekStart,
@@ -249,8 +266,40 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
         }
     };
 
+    // Keys pressed inside the dialog but outside the query input (after
+    // clicking a result or a filter chip) still drive the search instead of
+    // going dead: arrows/Enter navigate the results, and plain typing
+    // refocuses the query input. A stray Enter here used to fall through to
+    // the task list behind the dialog and act on it.
+    const handleDialogKeyDown = (e: React.KeyboardEvent) => {
+        if (e.target === inputRef.current) return;
+        if (
+            e.target instanceof HTMLElement
+            && e.target.closest('button, a[href], input, select, textarea, [contenteditable="true"]')
+        ) {
+            return;
+        }
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter') {
+            handleListKeyDown(e);
+            return;
+        }
+        if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+            inputRef.current?.focus();
+        }
+    };
+
     const handleSelect = (result: { type: 'project'; item: SearchProjectResult } | { type: 'task'; item: SearchTaskResult }) => {
         setIsOpen(false);
+        const shouldSwitchToAllAreas = activeAreaFilter !== AREA_FILTER_ALL && (
+            result.type === 'project'
+                ? !projectMatchesAreaFilter(result.item as Project, activeAreaFilter, areaById)
+                : !taskMatchesAreaFilter(result.item as Task, activeAreaFilter, projectMap, areaById)
+        );
+        if (shouldSwitchToAllAreas) {
+            void updateSettings({ filters: { ...(settings?.filters ?? {}), areaId: AREA_FILTER_ALL } })
+                .catch(() => showToast('Failed to update area filter.', 'error'));
+            showToast('Switched to All Areas so the selected item is visible.', 'info');
+        }
         if (result.type === 'project') {
             setProjectView({ selectedProjectId: result.item.id });
             onNavigate('projects', result.item.id);
@@ -320,6 +369,13 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
             onRemove: () => toggleToken(token),
         });
     });
+    if (locationQuery.trim()) {
+        activeChips.push({
+            key: 'location',
+            label: `${t('taskEdit.locationLabel') || 'Location'}: ${locationQuery.trim()}`,
+            onRemove: () => setLocationQuery(''),
+        });
+    }
     if (duePreset !== 'any') {
         const labels: Record<string, string> = {
             overdue: 'Overdue',
@@ -361,17 +417,28 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
             onRemove: () => setIncludeReference(false),
         });
     }
+    if (hideFutureTasks) {
+        activeChips.push({
+            key: 'hideFutureTasks',
+            label: hideFutureTasksText,
+            onRemove: () => setHideFutureTasks(false),
+        });
+    }
 
     return (
+        <ModalPortal>
         <div
             className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh] bg-background/80 backdrop-blur-sm animate-in fade-in-0"
             role="dialog"
             aria-modal="true"
+            aria-labelledby={dialogTitleId}
+            onKeyDown={handleDialogKeyDown}
         >
             <div
                 className="w-full max-w-lg bg-popover text-popover-foreground rounded-xl border shadow-2xl overflow-hidden flex flex-col animate-in zoom-in-95 duration-100"
                 onClick={(e) => e.stopPropagation()}
             >
+                <h2 id={dialogTitleId} className="sr-only">{t('search.title')}</h2>
                 <div className="flex items-center border-b px-4 py-3 gap-3">
                     <Search className="w-5 h-5 text-muted-foreground" />
                     <input
@@ -400,7 +467,7 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
                     </div>
                     <button
                         type="button"
-                        aria-label="Filters"
+                        aria-label={t('filters.label')}
                         aria-expanded={filtersOpen}
                         onClick={() => setFiltersOpen((prev) => !prev)}
                         className={cn(
@@ -506,6 +573,18 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
                             </div>
                         </div>
                         <div className="space-y-2">
+                            <div className="text-[11px] uppercase tracking-wide text-muted-foreground/80">
+                                {t('taskEdit.locationLabel') || 'Location'}
+                            </div>
+                            <input
+                                type="text"
+                                value={locationQuery}
+                                onChange={(event) => setLocationQuery(event.target.value)}
+                                placeholder={t('taskEdit.locationPlaceholder') || 'e.g. Office'}
+                                className="w-full rounded border border-border bg-muted/40 px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground"
+                            />
+                        </div>
+                        <div className="space-y-2">
                             <div className="text-[11px] uppercase tracking-wide text-muted-foreground/80">Contexts & Tags</div>
                             <div className="flex flex-wrap gap-2 max-h-20 overflow-y-auto">
                                 {allTokens.map((token) => (
@@ -554,14 +633,29 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
                             </button>
                             <button
                                 type="button"
+                                aria-pressed={hideFutureTasks}
+                                onClick={() => setHideFutureTasks((prev) => !prev)}
+                                className={cn(
+                                    "px-2 py-1 rounded-full border text-xs transition-colors",
+                                    hideFutureTasks
+                                        ? "bg-primary/15 text-primary border-primary/40"
+                                        : "bg-muted/40 text-muted-foreground border-border hover:bg-muted/60"
+                                )}
+                            >
+                                {hideFutureTasksText}
+                            </button>
+                            <button
+                                type="button"
                                 onClick={() => {
                                     setSelectedStatuses([]);
                                     setSelectedArea('all');
                                     setSelectedTokens([]);
+                                    setLocationQuery('');
                                     setDuePreset('any');
                                     setScope('all');
                                     setIncludeCompleted(false);
                                     setIncludeReference(true);
+                                    setHideFutureTasks(false);
                                 }}
                                 className="text-xs text-muted-foreground hover:text-foreground"
                             >
@@ -576,7 +670,7 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
                         <div className="px-3 pb-2 text-xs text-muted-foreground">
                             {t('search.showingFirst')
                                 .replace('{shown}', String(results.length))
-                                .replace('{total}', String(totalResults))}
+                                .replace('{total}', totalResultsLabel)}
                         </div>
                     )}
                     {ftsLoading && trimmedQuery !== '' && (
@@ -679,5 +773,6 @@ export function GlobalSearch({ onNavigate }: GlobalSearchProps) {
                 onClick={() => setIsOpen(false)}
             />
         </div>
+        </ModalPortal>
     );
 }

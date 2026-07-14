@@ -1,14 +1,50 @@
-import { format, isValid, parseISO, setDefaultOptions, type Locale } from 'date-fns';
-import { ar, de, enGB, enUS, es, fr, hi, it, ja, ko, nl, pl, ptBR, ru, tr, zhCN, zhTW } from 'date-fns/locale';
+import {
+    addDays,
+    addMonths,
+    endOfMonth as endOfGregorianMonth,
+    format,
+    getYear as getGregorianYear,
+    isSameDay,
+    isSameMonth as isSameGregorianMonth,
+    isValid,
+    parseISO,
+    setDefaultOptions,
+    setMonth as setGregorianMonth,
+    setYear as setGregorianYear,
+    startOfDay,
+    startOfMonth as startOfGregorianMonth,
+    type Locale,
+} from 'date-fns';
+import { ar, cs, de, enGB, enUS, es, fr, hi, it, ja, ko, nl, pl, ptBR, ru, tr, vi, zhCN, zhTW } from 'date-fns/locale';
+import {
+    addMonths as addJalaliMonths,
+    endOfMonth as endOfJalaliMonth,
+    format as formatJalali,
+    getDate as getJalaliDate,
+    getMonth as getJalaliMonth,
+    getYear as getJalaliYear,
+    parse as parseJalali,
+    setMonth as setJalaliMonth,
+    setYear as setJalaliYear,
+    startOfMonth as startOfJalaliMonth,
+} from 'date-fns-jalali';
+import { faIR as jalaliFaIR } from 'date-fns-jalali/locale/fa-IR';
 import type { Language } from './i18n/i18n-types';
 
 export type DateFormatSetting = 'system' | 'dmy' | 'mdy' | 'ymd';
+export type CalendarSystemSetting = 'gregorian' | 'jalali';
 export type TimeFormatSetting = 'system' | '12h' | '24h';
+export type WeekStartSetting = 'sunday' | 'monday' | 'saturday';
+export type WeekStartsOnIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+export const QUICK_DATE_PRESETS = ['today', 'tomorrow', 'in_3_days', 'next_week', 'next_month', 'no_date'] as const;
+export type QuickDatePreset = typeof QUICK_DATE_PRESETS[number];
+export const JALALI_LOCALE_TAG = 'fa-IR-u-ca-persian';
 
 const DEFAULT_LOCALE = enUS;
 const DMY_EN_REGIONS = new Set(['GB', 'IE', 'AU', 'NZ', 'ZA']);
 const DATE_LOCALE_BY_LANGUAGE: Record<Language, Locale> = {
     en: enUS,
+    vi,
     zh: zhCN,
     'zh-Hant': zhTW,
     es,
@@ -21,12 +57,14 @@ const DATE_LOCALE_BY_LANGUAGE: Record<Language, Locale> = {
     pt: ptBR,
     pl,
     ko,
+    cs,
     it,
     tr,
     nl,
 };
 const LOCALE_TAG_BY_LANGUAGE: Record<Language, string> = {
     en: 'en-US',
+    vi: 'vi-VN',
     zh: 'zh-CN',
     'zh-Hant': 'zh-TW',
     es: 'es-ES',
@@ -38,6 +76,7 @@ const LOCALE_TAG_BY_LANGUAGE: Record<Language, string> = {
     fr: 'fr-FR',
     pt: 'pt-PT',
     pl: 'pl-PL',
+    cs: 'cs-CZ',
     ko: 'ko-KR',
     it: 'it-IT',
     tr: 'tr-TR',
@@ -47,8 +86,22 @@ const LOCALE_TAG_BY_LANGUAGE: Record<Language, string> = {
 let activeLocale: Locale = DEFAULT_LOCALE;
 let activeDateFormatSetting: DateFormatSetting = 'system';
 let activeTimeFormatSetting: TimeFormatSetting = 'system';
+let activeCalendarSystem: CalendarSystemSetting = 'gregorian';
 
 const normalizeLocaleTag = (value?: string | null): string => String(value || '').trim().replace(/_/g, '-');
+
+const getPrimaryLanguageSubtag = (value?: string | null): string => (
+    normalizeLocaleTag(value).toLowerCase().split('-')[0] || ''
+);
+
+const isPersianLocaleTag = (value?: string | null): boolean => {
+    const primary = getPrimaryLanguageSubtag(value);
+    return primary === 'fa' || primary === 'prs';
+};
+
+const formatStoredDate = (date: Date): string => format(date, 'yyyy-MM-dd');
+
+const hasLocalizedDateToken = (formatStr: string): boolean => /(^|[^'])P{1,4}/.test(formatStr);
 
 const normalizeLanguage = (language?: string | null): Language => {
     const normalized = normalizeLocaleTag(language);
@@ -120,6 +173,32 @@ export function normalizeDateFormatSetting(value?: string | null): DateFormatSet
     return 'system';
 }
 
+export function normalizeCalendarSystemSetting(value?: string | null): CalendarSystemSetting {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'jalali' || normalized === 'persian' || normalized === 'solar-hijri') return 'jalali';
+    return 'gregorian';
+}
+
+export function canUseJalaliCalendar(params: {
+    language?: string | null;
+    systemLocale?: string | null;
+} = {}): boolean {
+    return isPersianLocaleTag(params.language) || isPersianLocaleTag(params.systemLocale);
+}
+
+export function resolveCalendarSystemSetting(value?: string | null, params: {
+    language?: string | null;
+    systemLocale?: string | null;
+} = {}): CalendarSystemSetting {
+    const calendarSystem = normalizeCalendarSystemSetting(value);
+    if (calendarSystem !== 'jalali') return 'gregorian';
+    return canUseJalaliCalendar(params) ? 'jalali' : 'gregorian';
+}
+
+export function isJalaliCalendarLocale(locale?: string | null): boolean {
+    return normalizeLocaleTag(locale).toLowerCase().includes('ca-persian');
+}
+
 export function normalizeTimeFormatSetting(value?: string | null): TimeFormatSetting {
     const normalized = String(value || '').trim().toLowerCase();
     if (normalized === '12h' || normalized === '12' || normalized === '12-hour') return '12h';
@@ -127,14 +206,159 @@ export function normalizeTimeFormatSetting(value?: string | null): TimeFormatSet
     return 'system';
 }
 
+// CLDR weekData firstDay: regions not listed here start the week on Monday.
+const SUNDAY_FIRST_REGIONS = new Set([
+    'AG', 'AS', 'BD', 'BR', 'BS', 'BT', 'BW', 'BZ', 'CA', 'CO', 'DM', 'DO', 'ET',
+    'GT', 'GU', 'HK', 'HN', 'ID', 'IL', 'IN', 'JM', 'JP', 'KE', 'KH', 'KR', 'LA',
+    'MH', 'MM', 'MO', 'MT', 'MX', 'MZ', 'NI', 'NP', 'PA', 'PE', 'PH', 'PK', 'PR',
+    'PT', 'PY', 'SA', 'SG', 'SV', 'TH', 'TT', 'TW', 'UM', 'US', 'VE', 'VI', 'WS',
+    'YE', 'ZA', 'ZW',
+]);
+const SATURDAY_FIRST_REGIONS = new Set([
+    'AE', 'AF', 'BH', 'DJ', 'DZ', 'EG', 'IQ', 'IR', 'JO', 'KW', 'LY', 'OM', 'QA',
+    'SD', 'SY',
+]);
+
+function regionWeekStart(region: string): WeekStartSetting {
+    if (SATURDAY_FIRST_REGIONS.has(region)) return 'saturday';
+    if (SUNDAY_FIRST_REGIONS.has(region)) return 'sunday';
+    return 'monday';
+}
+
+/**
+ * Week start inferred from the device locale, so calendars look right without
+ * a setting. Uses Intl week info when the runtime provides it and falls back
+ * to CLDR region data parsed from the locale tag.
+ */
+export function getSystemWeekStart(localeInput?: string | null): WeekStartSetting {
+    let locale = typeof localeInput === 'string' && localeInput.trim() ? localeInput.trim() : '';
+    if (!locale) {
+        try {
+            if (typeof navigator !== 'undefined' && typeof navigator.language === 'string' && navigator.language) {
+                locale = navigator.language;
+            } else {
+                locale = Intl.DateTimeFormat().resolvedOptions().locale ?? '';
+            }
+        } catch {
+            locale = '';
+        }
+    }
+    if (!locale) return 'monday';
+    try {
+        const intlLocale = new Intl.Locale(locale);
+        const weekInfo = (intlLocale as { getWeekInfo?: () => { firstDay?: number } }).getWeekInfo?.()
+            ?? (intlLocale as { weekInfo?: { firstDay?: number } }).weekInfo;
+        if (weekInfo?.firstDay === 7) return 'sunday';
+        if (weekInfo?.firstDay === 6) return 'saturday';
+        if (typeof weekInfo?.firstDay === 'number') return 'monday';
+        const region = intlLocale.maximize?.().region ?? intlLocale.region;
+        if (region) return regionWeekStart(region.toUpperCase());
+    } catch {
+        // Fall through to plain locale-tag parsing below.
+    }
+    const match = locale.match(/[-_]([A-Za-z]{2})(?:[-_]|$)/);
+    if (match) return regionWeekStart(match[1].toUpperCase());
+    return 'monday';
+}
+
+export type WeekStartPreference = WeekStartSetting | 'system';
+
+/** The stored preference, for settings UIs: explicit day or 'system'. */
+export function normalizeWeekStartPreference(value?: string | null): WeekStartPreference {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'monday') return 'monday';
+    if (normalized === 'saturday') return 'saturday';
+    if (normalized === 'sunday') return 'sunday';
+    return 'system';
+}
+
+/** The resolved week start: explicit setting wins, otherwise the device locale decides. */
+export function normalizeWeekStartSetting(value?: string | null): WeekStartSetting {
+    const preference = normalizeWeekStartPreference(value);
+    if (preference !== 'system') return preference;
+    return getSystemWeekStart();
+}
+
+export function getWeekStartsOnIndex(value?: string | null): WeekStartsOnIndex {
+    const weekStart = normalizeWeekStartSetting(value);
+    if (weekStart === 'monday') return 1;
+    if (weekStart === 'saturday') return 6;
+    return 0;
+}
+
+export function normalizeClockTimeInput(value?: string | null): string | null {
+    const trimmed = String(value ?? '').trim();
+    if (!trimmed) return '';
+    const compact = trimmed.replace(/\s+/g, '');
+    let hours: number;
+    let minutes: number;
+
+    if (/^\d{1,2}:\d{2}$/.test(compact)) {
+        const [h, m] = compact.split(':');
+        hours = Number(h);
+        minutes = Number(m);
+    } else if (/^\d{3,4}$/.test(compact)) {
+        if (compact.length === 3) {
+            hours = Number(compact.slice(0, 1));
+            minutes = Number(compact.slice(1));
+        } else {
+            hours = Number(compact.slice(0, 2));
+            minutes = Number(compact.slice(2));
+        }
+    } else {
+        return null;
+    }
+
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+export function getQuickDate(preset: QuickDatePreset, now: Date = new Date()): Date | null {
+    const today = startOfDay(now);
+    switch (preset) {
+        case 'today':
+            return today;
+        case 'tomorrow':
+            return addDays(today, 1);
+        case 'in_3_days':
+            return addDays(today, 3);
+        case 'next_week': {
+            const dayOfWeek = today.getDay();
+            const daysUntilNextMonday = ((8 - dayOfWeek) % 7) || 7;
+            return addDays(today, daysUntilNextMonday);
+        }
+        case 'next_month':
+            return startOfGregorianMonth(addMonths(today, 1));
+        case 'no_date':
+            return null;
+    }
+}
+
+export function isQuickDatePresetSelected(
+    preset: QuickDatePreset,
+    selectedDate: Date | null | undefined,
+    now: Date = new Date()
+): boolean {
+    if (!selectedDate || preset === 'no_date') return false;
+    const presetDate = getQuickDate(preset, now);
+    return presetDate ? isSameDay(selectedDate, presetDate) : false;
+}
+
 export function resolveDateLocaleTag(params: {
     language?: string | null;
     dateFormat?: string | null;
+    calendarSystem?: string | null;
     systemLocale?: string | null;
 }): string {
     const dateFormat = normalizeDateFormatSetting(params.dateFormat);
     const language = normalizeLanguage(params.language);
     const systemLocale = normalizeLocaleTag(params.systemLocale);
+    const calendarSystem = resolveCalendarSystemSetting(params.calendarSystem, {
+        language: params.language,
+        systemLocale,
+    });
+    if (calendarSystem === 'jalali') return JALALI_LOCALE_TAG;
     if (dateFormat === 'mdy') return 'en-US';
     if (dateFormat === 'dmy') {
         return language === 'en' ? 'en-GB' : LOCALE_TAG_BY_LANGUAGE[language];
@@ -150,6 +374,7 @@ export function resolveDateLocaleTag(params: {
 export function configureDateFormatting(params: {
     language?: string | null;
     dateFormat?: string | null;
+    calendarSystem?: string | null;
     timeFormat?: string | null;
     systemLocale?: string | null;
 } = {}): void {
@@ -157,8 +382,13 @@ export function configureDateFormatting(params: {
     const dateFormat = normalizeDateFormatSetting(params.dateFormat);
     const timeFormat = normalizeTimeFormatSetting(params.timeFormat);
     const systemLocale = normalizeLocaleTag(params.systemLocale);
+    const calendarSystem = resolveCalendarSystemSetting(params.calendarSystem, {
+        language: params.language,
+        systemLocale,
+    });
     activeDateFormatSetting = dateFormat;
     activeTimeFormatSetting = timeFormat;
+    activeCalendarSystem = calendarSystem;
 
     if (dateFormat === 'mdy') {
         activeLocale = enUS;
@@ -192,10 +422,132 @@ export function safeFormatDate(
         const date = typeof dateStr === 'string' ? safeParseDate(dateStr) : dateStr;
         if (!date || !isValid(date)) return fallback;
         const normalizedFormat = normalizeLocalizedFormatTokens(formatStr);
+        if (activeCalendarSystem === 'jalali' && hasLocalizedDateToken(formatStr)) {
+            return formatJalali(date, normalizedFormat, { locale: jalaliFaIR });
+        }
         return format(date, normalizedFormat, { locale: activeLocale });
     } catch {
         return fallback;
     }
+}
+
+export function formatCalendarInputDate(
+    value: string | Date | undefined | null,
+    calendarSystem?: string | null
+): string {
+    if (!value) return '';
+    const date = typeof value === 'string' ? safeParseDate(value) : value;
+    if (!date || !isValid(date)) return typeof value === 'string' ? value : '';
+    if (normalizeCalendarSystemSetting(calendarSystem) === 'jalali') {
+        return formatJalali(date, 'yyyy-MM-dd', { locale: jalaliFaIR });
+    }
+    return formatStoredDate(date);
+}
+
+export function parseCalendarInputDate(
+    value: string,
+    calendarSystem?: string | null
+): string | null {
+    const normalized = String(value || '').trim().replace(/[./]/g, '-');
+    if (!normalized) return '';
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return null;
+
+    if (normalizeCalendarSystemSetting(calendarSystem) === 'jalali') {
+        const parsed = parseJalali(normalized, 'yyyy-MM-dd', new Date());
+        if (!isValid(parsed)) return null;
+        return formatJalali(parsed, 'yyyy-MM-dd') === normalized
+            ? formatStoredDate(parsed)
+            : null;
+    }
+
+    const parsed = safeParseDate(normalized);
+    if (!parsed || !isValid(parsed)) return null;
+    return formatStoredDate(parsed) === normalized ? normalized : null;
+}
+
+export function startOfCalendarMonth(
+    date: Date,
+    calendarSystem?: string | null
+): Date {
+    return normalizeCalendarSystemSetting(calendarSystem) === 'jalali'
+        ? startOfJalaliMonth(date)
+        : startOfGregorianMonth(date);
+}
+
+export function endOfCalendarMonth(
+    date: Date,
+    calendarSystem?: string | null
+): Date {
+    return normalizeCalendarSystemSetting(calendarSystem) === 'jalali'
+        ? endOfJalaliMonth(date)
+        : endOfGregorianMonth(date);
+}
+
+export function addCalendarMonths(
+    date: Date,
+    months: number,
+    calendarSystem?: string | null
+): Date {
+    return normalizeCalendarSystemSetting(calendarSystem) === 'jalali'
+        ? addJalaliMonths(date, months)
+        : addMonths(date, months);
+}
+
+export function getCalendarMonthIndex(
+    date: Date,
+    calendarSystem?: string | null
+): number {
+    return normalizeCalendarSystemSetting(calendarSystem) === 'jalali'
+        ? getJalaliMonth(date)
+        : date.getMonth();
+}
+
+export function getCalendarYear(
+    date: Date,
+    calendarSystem?: string | null
+): number {
+    return normalizeCalendarSystemSetting(calendarSystem) === 'jalali'
+        ? getJalaliYear(date)
+        : getGregorianYear(date);
+}
+
+export function setCalendarMonthIndex(
+    date: Date,
+    monthIndex: number,
+    calendarSystem?: string | null
+): Date {
+    return normalizeCalendarSystemSetting(calendarSystem) === 'jalali'
+        ? setJalaliMonth(date, monthIndex)
+        : setGregorianMonth(date, monthIndex);
+}
+
+export function setCalendarYear(
+    date: Date,
+    year: number,
+    calendarSystem?: string | null
+): Date {
+    return normalizeCalendarSystemSetting(calendarSystem) === 'jalali'
+        ? setJalaliYear(date, year)
+        : setGregorianYear(date, year);
+}
+
+export function isSameCalendarMonth(
+    left: Date,
+    right: Date,
+    calendarSystem?: string | null
+): boolean {
+    return normalizeCalendarSystemSetting(calendarSystem) === 'jalali'
+        ? getJalaliYear(left) === getJalaliYear(right) && getJalaliMonth(left) === getJalaliMonth(right)
+        : isSameGregorianMonth(left, right);
+}
+
+export function getCalendarDayOfMonth(
+    date: Date,
+    calendarSystem?: string | null
+): number {
+    return normalizeCalendarSystemSetting(calendarSystem) === 'jalali'
+        ? getJalaliDate(date)
+        : date.getDate();
 }
 
 /**

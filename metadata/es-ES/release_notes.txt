@@ -1,4 +1,4 @@
-- Agregamos importacion DGT GTD y enlaces a tareas y proyectos dentro de notas Markdown.
-- La edicion Markdown mejora con editores ampliados, acciones en la barra y continuacion automatica de listas.
-- Las notificaciones de revision vuelven al flujo correcto, regresa posponer recordatorios y AI clarify ahora muestra carga.
-- Hoy espera los datos locales antes de cargar, y los ajustes de busqueda/localizacion hacen mas estable la planificacion movil.
+- Registra el tiempo por tarea: las sesiones Pomodoro vinculadas suman sus minutos a un campo sincronizado y editable (opcional).
+- Eliminar, completar y archivar ahora usan Deshacer en lugar de confirmaciones; la semana del calendario sigue tu region.
+- Captura mas rapido con el token %persona, archivos compartidos desde otras apps, el atajo en segundo plano "Anadir a la bandeja de Mindwtr" y widgets de pantalla de bloqueo.
+- Las listas de verificacion son independientes de las notas, los adjuntos se guardan como copias reales, los conflictos de sincronizacion se muestran con claridad y nuevas protecciones evitan perdida de datos.

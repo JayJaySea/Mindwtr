@@ -1,117 +1,66 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
-    createPomodoroState,
-    DEFAULT_POMODORO_DURATIONS,
     formatPomodoroClock,
-    POMODORO_PRESETS,
-    PomodoroDurations,
-    PomodoroState,
+    getPomodoroPresetOptions,
+    PomodoroAutoStartOptions,
     resetPomodoroState,
     Task,
-    tickPomodoroState,
+    translateWithFallback,
     useTaskStore,
 } from '@mindwtr/core';
 import { Play, Pause, RotateCcw, TimerReset, CheckCircle2 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useLanguage } from '../../contexts/language-context';
-import { sendDesktopImmediateNotification } from '../../lib/notification-service';
+import { sendDesktopPomodoroCompletionAlert } from '../../lib/pomodoro-alert';
+import { reconcilePomodoroSnapshot, usePomodoroStore } from '../../store/pomodoro-store';
+
+export { DESKTOP_POMODORO_SESSION_STORAGE_KEY } from '../../store/pomodoro-store';
 
 interface PomodoroPanelProps {
     tasks: Task[];
 }
 
-type PomodoroEvent = 'focus-finished' | 'break-finished' | null;
-
-type PomodoroSnapshot = {
-    durations: PomodoroDurations;
-    timerState: PomodoroState;
-    selectedTaskId?: string;
-    lastEvent: PomodoroEvent;
-    updatedAtMs: number;
-};
-
-const createInitialSnapshot = (): PomodoroSnapshot => ({
-    durations: DEFAULT_POMODORO_DURATIONS,
-    timerState: createPomodoroState(DEFAULT_POMODORO_DURATIONS),
-    selectedTaskId: undefined,
-    lastEvent: null,
-    updatedAtMs: Date.now(),
-});
-
-const advancePomodoro = (
-    timerState: PomodoroState,
-    durations: PomodoroDurations,
-    elapsedSeconds: number
-): { timerState: PomodoroState; lastEvent: PomodoroEvent } => {
-    let nextState = timerState;
-    let lastEvent: PomodoroEvent = null;
-    for (let i = 0; i < elapsedSeconds; i += 1) {
-        const next = tickPomodoroState(nextState, durations);
-        nextState = next.state;
-        if (next.switchedPhase) {
-            lastEvent = next.completedFocusSession ? 'focus-finished' : 'break-finished';
-        }
-    }
-    return { timerState: nextState, lastEvent };
-};
-
-const reconcileSnapshot = (snapshot: PomodoroSnapshot, nowMs: number): PomodoroSnapshot => {
-    if (!snapshot.timerState.isRunning) {
-        return { ...snapshot, updatedAtMs: nowMs };
-    }
-    const elapsedSeconds = Math.floor((nowMs - snapshot.updatedAtMs) / 1000);
-    if (elapsedSeconds <= 0) return snapshot;
-    const advanced = advancePomodoro(snapshot.timerState, snapshot.durations, elapsedSeconds);
-    const updatedAtMs = snapshot.updatedAtMs + elapsedSeconds * 1000;
-    return {
-        ...snapshot,
-        timerState: advanced.timerState,
-        lastEvent: advanced.lastEvent ?? snapshot.lastEvent,
-        updatedAtMs,
-    };
-};
-
-let persistedSnapshot: PomodoroSnapshot = createInitialSnapshot();
-
 export function PomodoroPanel({ tasks }: PomodoroPanelProps) {
     const updateTask = useTaskStore((state) => state.updateTask);
     const notificationsEnabled = useTaskStore((state) => state.settings.notificationsEnabled !== false);
+    const customDurations = useTaskStore((state) => state.settings.gtd?.pomodoro?.customDurations);
+    const linkTaskEnabled = useTaskStore((state) => state.settings.gtd?.pomodoro?.linkTask === true);
+    const autoStartBreaks = useTaskStore((state) => state.settings.gtd?.pomodoro?.autoStartBreaks === true);
+    const autoStartFocus = useTaskStore((state) => state.settings.gtd?.pomodoro?.autoStartFocus === true);
     const { t } = useLanguage();
+    const autoStartOptions = useMemo<PomodoroAutoStartOptions>(
+        () => ({ autoStartBreaks, autoStartFocus }),
+        [autoStartBreaks, autoStartFocus]
+    );
     const resolveText = useCallback((key: string, fallback: string) => {
-        const value = t(key);
-        return value === key ? fallback : value;
+        return translateWithFallback(t, key, fallback);
     }, [t]);
-    const [snapshot, setSnapshot] = useState<PomodoroSnapshot>(() => {
-        persistedSnapshot = reconcileSnapshot(persistedSnapshot, Date.now());
-        return persistedSnapshot;
-    });
-    const previousEventRef = useRef<PomodoroEvent>(snapshot.lastEvent);
+    const snapshot = usePomodoroStore((state) => state.snapshot);
+    const hydratePomodoro = usePomodoroStore((state) => state.hydratePomodoro);
+    const commitSnapshot = usePomodoroStore((state) => state.commitPomodoro);
+    const previousEventRef = useRef(snapshot.lastEvent);
 
-    const commitSnapshot = useCallback((updater: (prev: PomodoroSnapshot) => PomodoroSnapshot) => {
-        setSnapshot((prev) => {
-            const next = updater(prev);
-            persistedSnapshot = next;
-            return next;
-        });
+    useEffect(() => {
+        // Re-read persisted state on mount, including any session that completed while the app was closed.
+        hydratePomodoro(autoStartOptions);
     }, []);
 
     useEffect(() => {
-        if (tasks.length === 0) {
-            if (!snapshot.selectedTaskId) return;
-            commitSnapshot((prev) => ({ ...prev, selectedTaskId: undefined }));
+        if (!linkTaskEnabled) {
             return;
         }
+        if (!snapshot.selectedTaskId) return;
         if (snapshot.selectedTaskId && tasks.some((task) => task.id === snapshot.selectedTaskId)) return;
-        commitSnapshot((prev) => ({ ...prev, selectedTaskId: tasks[0].id }));
-    }, [commitSnapshot, snapshot.selectedTaskId, tasks]);
+        commitSnapshot((prev) => ({ ...prev, selectedTaskId: undefined }));
+    }, [commitSnapshot, linkTaskEnabled, snapshot.selectedTaskId, tasks]);
 
     useEffect(() => {
         if (!snapshot.timerState.isRunning) return;
         const intervalId = window.setInterval(() => {
-            commitSnapshot((prev) => reconcileSnapshot(prev, Date.now()));
+            commitSnapshot((prev) => reconcilePomodoroSnapshot(prev, Date.now(), autoStartOptions));
         }, 1000);
         return () => window.clearInterval(intervalId);
-    }, [commitSnapshot, snapshot.timerState.isRunning]);
+    }, [autoStartOptions, commitSnapshot, snapshot.timerState.isRunning]);
 
     const durations = snapshot.durations;
     const timerState = snapshot.timerState;
@@ -119,34 +68,32 @@ export function PomodoroPanel({ tasks }: PomodoroPanelProps) {
     const lastEvent = snapshot.lastEvent;
 
     const selectedTask = useMemo(
-        () => (selectedTaskId ? tasks.find((task) => task.id === selectedTaskId) : undefined),
-        [selectedTaskId, tasks]
+        () => (linkTaskEnabled && selectedTaskId ? tasks.find((task) => task.id === selectedTaskId) : undefined),
+        [linkTaskEnabled, selectedTaskId, tasks]
     );
+    const presetOptions = useMemo(() => getPomodoroPresetOptions(customDurations), [customDurations]);
 
-    const phaseLabelRaw = timerState.phase === 'focus' ? t('pomodoro.phaseFocus') : t('pomodoro.phaseBreak');
-    const phaseLabel = phaseLabelRaw.startsWith('pomodoro.') ? (timerState.phase === 'focus' ? 'Focus session' : 'Break') : phaseLabelRaw;
-    const cardTitleRaw = t('pomodoro.title');
-    const cardTitle = cardTitleRaw.startsWith('pomodoro.') ? 'Pomodoro Focus' : cardTitleRaw;
-    const subtitleRaw = t('pomodoro.subtitle');
-    const subtitle = subtitleRaw.startsWith('pomodoro.') ? 'Work one task at a time.' : subtitleRaw;
-    const sessionCountRaw = t('pomodoro.sessionsDone');
-    const sessionCountLabel = sessionCountRaw.startsWith('pomodoro.') ? 'Focus sessions completed' : sessionCountRaw;
-    const switchPhaseRaw = t('pomodoro.switchPhase');
-    const switchPhaseLabel = switchPhaseRaw.startsWith('pomodoro.') ? 'Switch phase' : switchPhaseRaw;
-    const markDoneRaw = t('pomodoro.markTaskDone');
-    const markDoneLabel = markDoneRaw.startsWith('pomodoro.') ? 'Mark done' : markDoneRaw;
-    const noTaskRaw = t('pomodoro.noTask');
-    const noTaskLabel = noTaskRaw.startsWith('pomodoro.') ? 'No available focus task' : noTaskRaw;
-    const focusDoneRaw = t('pomodoro.focusComplete');
-    const focusDoneLabel = focusDoneRaw.startsWith('pomodoro.') ? 'Focus session complete. Take a short break.' : focusDoneRaw;
-    const breakDoneRaw = t('pomodoro.breakComplete');
-    const breakDoneLabel = breakDoneRaw.startsWith('pomodoro.') ? 'Break complete. Ready for the next focus session.' : breakDoneRaw;
+    const phaseLabel = timerState.phase === 'focus'
+        ? resolveText('pomodoro.phaseFocus', 'Focus session')
+        : resolveText('pomodoro.phaseBreak', 'Break');
+    const cardTitle = resolveText('pomodoro.title', 'Pomodoro Focus');
+    const subtitle = resolveText('pomodoro.subtitle', 'Work one task at a time.');
+    const sessionCountLabel = resolveText('pomodoro.sessionsDone', 'Focus sessions completed');
+    const switchPhaseLabel = resolveText('pomodoro.switchPhase', 'Switch phase');
+    const markDoneLabel = resolveText('pomodoro.markTaskDone', 'Mark task done');
+    const noTaskLabel = resolveText('pomodoro.noTask', 'No available focus task');
+    const selectedTaskLabel = resolveText('pomodoro.selectedTask', 'Timer task');
+    const timerControlsLabel = resolveText('pomodoro.timerControls', 'Timer');
+    const taskUpdateLabel = resolveText('pomodoro.taskUpdate', 'Task update');
+    const timerOnlyLabel = resolveText('pomodoro.timerOnly', 'Timer only');
+    const focusDoneLabel = resolveText('pomodoro.focusComplete', 'Focus session complete. Take a short break.');
+    const breakDoneLabel = resolveText('pomodoro.breakComplete', 'Break complete. Ready for the next focus session.');
 
     useEffect(() => {
         const previous = previousEventRef.current;
         if (lastEvent && lastEvent !== previous && notificationsEnabled) {
             const message = lastEvent === 'focus-finished' ? focusDoneLabel : breakDoneLabel;
-            void sendDesktopImmediateNotification(cardTitle, message);
+            void sendDesktopPomodoroCompletionAlert(cardTitle, message);
         }
         previousEventRef.current = lastEvent;
     }, [breakDoneLabel, cardTitle, focusDoneLabel, lastEvent, notificationsEnabled]);
@@ -154,7 +101,7 @@ export function PomodoroPanel({ tasks }: PomodoroPanelProps) {
     const handleApplyPreset = (focusMinutes: number, breakMinutes: number) => {
         const nextDurations = { focusMinutes, breakMinutes };
         commitSnapshot((prev) => {
-            const reconciled = reconcileSnapshot(prev, Date.now());
+            const reconciled = reconcilePomodoroSnapshot(prev, Date.now(), autoStartOptions);
             return {
                 ...reconciled,
                 durations: nextDurations,
@@ -167,7 +114,7 @@ export function PomodoroPanel({ tasks }: PomodoroPanelProps) {
 
     const handleToggleRun = () => {
         commitSnapshot((prev) => {
-            const reconciled = reconcileSnapshot(prev, Date.now());
+            const reconciled = reconcilePomodoroSnapshot(prev, Date.now(), autoStartOptions);
             return {
                 ...reconciled,
                 timerState: { ...reconciled.timerState, isRunning: !reconciled.timerState.isRunning },
@@ -178,7 +125,7 @@ export function PomodoroPanel({ tasks }: PomodoroPanelProps) {
 
     const handleReset = () => {
         commitSnapshot((prev) => {
-            const reconciled = reconcileSnapshot(prev, Date.now());
+            const reconciled = reconcilePomodoroSnapshot(prev, Date.now(), autoStartOptions);
             return {
                 ...reconciled,
                 timerState: resetPomodoroState(reconciled.timerState, reconciled.durations, reconciled.timerState.phase),
@@ -190,7 +137,7 @@ export function PomodoroPanel({ tasks }: PomodoroPanelProps) {
 
     const handleSwitchPhase = () => {
         commitSnapshot((prev) => {
-            const reconciled = reconcileSnapshot(prev, Date.now());
+            const reconciled = reconcilePomodoroSnapshot(prev, Date.now(), autoStartOptions);
             return {
                 ...reconciled,
                 timerState: resetPomodoroState(
@@ -230,7 +177,7 @@ export function PomodoroPanel({ tasks }: PomodoroPanelProps) {
             </header>
 
             <div className="flex flex-wrap gap-2">
-                {POMODORO_PRESETS.map((preset) => {
+                {presetOptions.map((preset) => {
                     const active = durations.focusMinutes === preset.focusMinutes && durations.breakMinutes === preset.breakMinutes;
                     return (
                         <button
@@ -257,79 +204,87 @@ export function PomodoroPanel({ tasks }: PomodoroPanelProps) {
                 </p>
             </div>
 
-            <div className="space-y-2">
-                <label className="text-xs text-muted-foreground">
-                    {resolveText('taskEdit.title', 'Task')}
-                </label>
-                <select
-                    className="w-full text-sm px-3 py-2 rounded border border-border bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
-                    value={selectedTaskId ?? ''}
-                    onChange={(event) => {
-                        const nextId = event.target.value || undefined;
-                        commitSnapshot((prev) => ({ ...prev, selectedTaskId: nextId }));
-                    }}
-                >
-                    {tasks.length === 0 ? (
-                        <option value="">{noTaskLabel}</option>
-                    ) : (
-                        tasks.map((task) => (
+            {linkTaskEnabled && (
+                <div className="space-y-2">
+                    <label className="text-xs text-muted-foreground">
+                        {selectedTaskLabel}
+                    </label>
+                    <select
+                        className="w-full text-sm px-3 py-2 rounded border border-border bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        aria-label={selectedTaskLabel}
+                        value={selectedTaskId ?? ''}
+                        onChange={(event) => {
+                            const nextId = event.target.value || undefined;
+                            commitSnapshot((prev) => ({ ...prev, selectedTaskId: nextId }));
+                        }}
+                    >
+                        <option value="">{tasks.length === 0 ? noTaskLabel : timerOnlyLabel}</option>
+                        {tasks.map((task) => (
                             <option key={task.id} value={task.id}>
                                 {task.title}
                             </option>
-                        ))
-                    )}
-                </select>
-            </div>
+                        ))}
+                    </select>
+                </div>
+            )}
 
-            <div className="flex flex-wrap gap-2">
-                <button
-                    type="button"
-                    onClick={handleToggleRun}
-                    disabled={!selectedTask}
-                    className={cn(
-                        'inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border transition-colors',
-                        selectedTask
-                            ? 'bg-primary text-primary-foreground border-primary hover:opacity-90'
-                            : 'bg-muted text-muted-foreground border-border cursor-not-allowed opacity-60'
-                    )}
-                >
-                    {timerState.isRunning ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-                    {timerState.isRunning
-                        ? resolveText('common.pause', 'Pause')
-                        : resolveText('common.start', 'Start')}
-                </button>
-                <button
-                    type="button"
-                    onClick={handleReset}
-                    className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border border-border bg-muted/50 text-muted-foreground hover:bg-muted transition-colors"
-                >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    {resolveText('common.reset', 'Reset')}
-                </button>
-                <button
-                    type="button"
-                    onClick={handleSwitchPhase}
-                    className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border border-border bg-muted/50 text-muted-foreground hover:bg-muted transition-colors"
-                >
-                    <TimerReset className="w-3.5 h-3.5" />
-                    {switchPhaseLabel}
-                </button>
-                <button
-                    type="button"
-                    onClick={() => {
-                        void handleMarkTaskDone();
-                    }}
-                    disabled={!selectedTask}
-                    className={cn(
-                        'inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border transition-colors',
-                        selectedTask
-                            ? 'bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-500'
-                            : 'bg-muted text-muted-foreground border-border cursor-not-allowed opacity-60'
-                    )}
-                >
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    {markDoneLabel}
-                </button>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="space-y-1.5">
+                    <div className="text-[11px] font-semibold uppercase text-muted-foreground">{timerControlsLabel}</div>
+                    <div className="flex flex-wrap gap-2">
+                        <button
+                            type="button"
+                            onClick={handleToggleRun}
+                            className={cn(
+                                'inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border transition-colors',
+                                'bg-primary text-primary-foreground border-primary hover:opacity-90'
+                            )}
+                        >
+                            {timerState.isRunning ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                            {timerState.isRunning
+                                ? resolveText('common.pause', 'Pause')
+                                : resolveText('common.start', 'Start')}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleReset}
+                            className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border border-border bg-muted/50 text-muted-foreground hover:bg-muted transition-colors"
+                        >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            {resolveText('common.reset', 'Reset')}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleSwitchPhase}
+                            className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border border-border bg-muted/50 text-muted-foreground hover:bg-muted transition-colors"
+                        >
+                            <TimerReset className="w-3.5 h-3.5" />
+                            {switchPhaseLabel}
+                        </button>
+                    </div>
+                </div>
+                {linkTaskEnabled && selectedTask && (
+                    <div className="space-y-1.5 sm:ml-auto">
+                        <div className="text-[11px] font-semibold uppercase text-muted-foreground sm:text-right">{taskUpdateLabel}</div>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                void handleMarkTaskDone();
+                            }}
+                            disabled={!selectedTask}
+                            title={markDoneLabel}
+                            className={cn(
+                                'inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded border transition-colors',
+                                selectedTask
+                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-500 hover:bg-emerald-100 dark:bg-emerald-950/20 dark:text-emerald-300 dark:border-emerald-700 dark:hover:bg-emerald-900/30'
+                                    : 'bg-muted text-muted-foreground border-border cursor-not-allowed opacity-60'
+                            )}
+                        >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            {markDoneLabel}
+                        </button>
+                    </div>
+                )}
             </div>
 
             {lastEvent && (

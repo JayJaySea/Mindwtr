@@ -1,22 +1,237 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
+import {
+  Alert,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { createAIProvider, getUsedTaskTokens, parseQuickAdd, type Task, type TimeEstimate, type AIProviderId, useTaskStore } from '@mindwtr/core';
+import { Ionicons } from '@expo/vector-icons';
+import {
+  applyCapturedProject,
+  buildCaptureTaskProps,
+  createAIProvider,
+  DEFAULT_PROJECT_COLOR,
+  getQuickAddProjectInitialProps,
+  getPersonOptionNames,
+  getUsedTaskTokens,
+  isSelectableProjectForTaskAssignment,
+  parseQuickAdd,
+  normalizeClockTimeInput,
+  resolveDefaultNewTaskAreaId,
+  shallow,
+  splitQuickAddBulkLines,
+  tFallback,
+  type AIProviderId,
+  type Attachment,
+  type Project,
+  type Task,
+  type TimeEstimate,
+  useTaskStore,
+} from '@mindwtr/core';
+import { getAttachmentsDir } from '@/lib/attachment-sync-utils';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 import { useToast } from '@/contexts/toast-context';
 import { useLanguage } from '../contexts/language-context';
 import { buildCopilotConfig, isAIKeyRequired, loadAIKey } from '../lib/ai-config';
 import { logError } from '../lib/app-log';
+import { openTaskScreen } from '@/lib/task-meta-navigation';
+
+type CaptureSearchParams = {
+  initialProps?: string;
+  initialValue?: string;
+  project?: string;
+  returnTo?: string;
+  text?: string;
+  title?: string;
+};
+
+const URL_INITIAL_TASK_STATUSES = new Set<Task['status']>(['inbox', 'next', 'waiting', 'someday', 'reference']);
+const BULK_PREVIEW_LINE_LIMIT = 5;
+
+const firstSearchParam = (value: string | string[] | undefined): string => {
+  if (Array.isArray(value)) return value[0] ?? '';
+  return typeof value === 'string' ? value : '';
+};
+
+const decodeSearchParam = (value: string | string[] | undefined): string => {
+  const raw = firstSearchParam(value);
+  if (!raw) return '';
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+};
+
+export const sanitizeCaptureReturnToParam = (value: string | string[] | undefined): string | null => {
+  const decoded = decodeSearchParam(value).trim();
+  if (!decoded || !decoded.startsWith('/') || decoded.startsWith('//')) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(decoded)) return null;
+  if (/[\u0000-\u001F\u007F]/.test(decoded)) return null;
+  return decoded;
+};
+
+const getCreatedTaskId = (result: unknown): string | null => {
+  if (!result || typeof result !== 'object') return null;
+  const maybeId = (result as { id?: unknown }).id;
+  return typeof maybeId === 'string' && maybeId.trim() ? maybeId : null;
+};
+
+const parseInitialPropsJson = (value: string | string[] | undefined): Record<string, unknown> => {
+  const decoded = decodeSearchParam(value);
+  if (!decoded) return {};
+  try {
+    const parsed = JSON.parse(decoded);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return parsed as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+};
+
+const normalizeInitialTokenList = (value: unknown, prefix?: '@' | '#'): string[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const next: string[] = [];
+  value.forEach((item) => {
+    if (typeof item !== 'string') return;
+    const trimmed = item.trim();
+    if (!trimmed) return;
+    const normalized = prefix && !trimmed.startsWith(prefix) ? `${prefix}${trimmed}` : trimmed;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    next.push(normalized);
+  });
+  return next.length > 0 ? next : undefined;
+};
+
+const MAX_INITIAL_ATTACHMENTS = 6;
+
+// Share-intent file captures arrive as attachment records in the route's
+// initialProps (the share handler already copied the bytes into the managed
+// attachments dir). Route params are attacker-reachable via deep links, so
+// only structurally valid file records survive here; buildTaskInputFromInput
+// additionally drops any uri outside the managed attachments dir.
+const sanitizeInitialAttachments = (value: unknown): Attachment[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const next: Attachment[] = [];
+  for (const item of value) {
+    if (next.length >= MAX_INITIAL_ATTACHMENTS) break;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    if (record.kind !== 'file') continue;
+    const id = typeof record.id === 'string' ? record.id.trim() : '';
+    const uri = typeof record.uri === 'string' ? record.uri.trim() : '';
+    if (!id || !uri) continue;
+    const now = new Date().toISOString();
+    const createdAt = typeof record.createdAt === 'string' && record.createdAt ? record.createdAt : now;
+    const attachment: Attachment = {
+      id,
+      kind: 'file',
+      title: typeof record.title === 'string' && record.title.trim() ? record.title.trim() : 'Attachment',
+      uri,
+      createdAt,
+      updatedAt: typeof record.updatedAt === 'string' && record.updatedAt ? record.updatedAt : createdAt,
+      localStatus: 'available',
+    };
+    if (typeof record.mimeType === 'string' && record.mimeType.trim()) {
+      attachment.mimeType = record.mimeType.trim();
+    }
+    if (typeof record.size === 'number' && Number.isFinite(record.size)) {
+      attachment.size = record.size;
+    }
+    next.push(attachment);
+  }
+  return next.length > 0 ? next : undefined;
+};
+
+const filterManagedAttachments = async (attachments: Attachment[]): Promise<Attachment[]> => {
+  const dir = await getAttachmentsDir();
+  if (!dir) return [];
+  return attachments.filter((attachment) => attachment.uri.startsWith(dir));
+};
+
+const sanitizeInitialPropsParam = (
+  value: string | string[] | undefined,
+  projects: Project[],
+  areas: Array<{ id: string; deletedAt?: string | null }>,
+): Partial<Task> => {
+  const parsed = parseInitialPropsJson(value);
+  const next: Partial<Task> = {};
+
+  const attachments = sanitizeInitialAttachments(parsed.attachments);
+  if (attachments) next.attachments = attachments;
+
+  if (typeof parsed.description === 'string' && parsed.description.trim()) {
+    next.description = parsed.description;
+  }
+
+  const tags = normalizeInitialTokenList(parsed.tags, '#');
+  if (tags) next.tags = tags;
+
+  const contexts = normalizeInitialTokenList(parsed.contexts, '@');
+  if (contexts) next.contexts = contexts;
+
+  const status = typeof parsed.status === 'string' ? parsed.status.trim().toLowerCase() : '';
+  if (URL_INITIAL_TASK_STATUSES.has(status as Task['status'])) {
+    next.status = status as Task['status'];
+  }
+
+  const projectId = typeof parsed.projectId === 'string' ? parsed.projectId.trim() : '';
+  if (projectId && projects.some((project) => project.id === projectId && isSelectableProjectForTaskAssignment(project))) {
+    next.projectId = projectId;
+  }
+
+  const areaId = typeof parsed.areaId === 'string' ? parsed.areaId.trim() : '';
+  if (!next.projectId && areaId && areas.some((area) => area.id === areaId && !area.deletedAt)) {
+    next.areaId = areaId;
+  }
+
+  return next;
+};
 
 export default function CaptureScreen() {
-  const params = useLocalSearchParams<{ text?: string }>();
+  const params = useLocalSearchParams<CaptureSearchParams>();
   const router = useRouter();
-  const { addTask, projects, tasks, settings, areas } = useTaskStore();
+  const { addProject, addTask, addTasks, projects, tasks, settings, areas, people } = useTaskStore((state) => ({
+    addProject: state.addProject,
+    addTask: state.addTask,
+    addTasks: state.addTasks,
+    projects: state.projects,
+    tasks: state.tasks,
+    settings: state.settings,
+    areas: state.areas,
+    people: state.people,
+  }), shallow);
   const tc = useThemeColors();
   const { showToast } = useToast();
   const { t } = useLanguage();
-  const initialText = typeof params.text === 'string' ? decodeURIComponent(params.text) : '';
+  const initialText = (
+    decodeSearchParam(params.initialValue)
+    || decodeSearchParam(params.text)
+    || decodeSearchParam(params.title)
+  );
+  const initialProps = React.useMemo(
+    () => sanitizeInitialPropsParam(params.initialProps, projects, areas),
+    [areas, params.initialProps, projects]
+  );
+  const defaultNewTaskAreaId = resolveDefaultNewTaskAreaId(settings, areas);
+  const returnTo = React.useMemo(
+    () => sanitizeCaptureReturnToParam(params.returnTo),
+    [params.returnTo]
+  );
+  const initialDescription = String(initialProps.description ?? '');
+  const initialProjectTitle = decodeSearchParam(params.project).trim();
   const [value, setValue] = useState(initialText);
+  const [descriptionValue, setDescriptionValue] = useState(initialDescription);
   const [copilotSuggestion, setCopilotSuggestion] = useState<{ context?: string; timeEstimate?: TimeEstimate; tags?: string[] } | null>(null);
   const [copilotApplied, setCopilotApplied] = useState(false);
   const [aiKey, setAiKey] = useState('');
@@ -24,6 +239,7 @@ export default function CaptureScreen() {
   const [copilotEstimate, setCopilotEstimate] = useState<TimeEstimate | undefined>(undefined);
   const [copilotTags, setCopilotTags] = useState<string[]>([]);
   const [showHelp, setShowHelp] = useState(false);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
   const inputRef = useRef<TextInput>(null);
   const copilotMountedRef = useRef(true);
   const copilotAbortRef = useRef<AbortController | null>(null);
@@ -33,10 +249,18 @@ export default function CaptureScreen() {
   }, []);
 
   useEffect(() => {
-    if (typeof params.text === 'string') {
-      setValue(decodeURIComponent(params.text));
-    }
-  }, [params.text]);
+    setValue(initialText);
+    setDescriptionValue(initialDescription);
+  }, [initialDescription, initialText]);
+
+  useEffect(() => {
+    const showListener = Keyboard.addListener('keyboardDidShow', () => setKeyboardVisible(true));
+    const hideListener = Keyboard.addListener('keyboardDidHide', () => setKeyboardVisible(false));
+    return () => {
+      showListener.remove();
+      hideListener.remove();
+    };
+  }, []);
 
   const aiEnabled = settings.ai?.enabled === true;
   const aiProvider = (settings.ai?.provider ?? 'openai') as AIProviderId;
@@ -61,6 +285,19 @@ export default function CaptureScreen() {
   const tagOptions = React.useMemo(() => {
     return getUsedTaskTokens(tasks, (task) => task.tags, { prefix: '#' });
   }, [tasks]);
+  const personOptions = React.useMemo(() => {
+    return getPersonOptionNames(people, tasks);
+  }, [people, tasks]);
+  const quickAddParseOptions = React.useMemo(
+    () => ({
+      knownContexts: contextOptions,
+      knownTags: tagOptions,
+      knownPeople: personOptions,
+      defaultScheduleTime: normalizeClockTimeInput(settings.gtd?.defaultScheduleTime) || undefined,
+      preserveText: settings.quickAddAutoClean !== true,
+    }),
+    [contextOptions, tagOptions, personOptions, settings.gtd?.defaultScheduleTime, settings.quickAddAutoClean]
+  );
 
   useEffect(() => {
     if (!aiEnabled || (keyRequired && !aiKey)) {
@@ -84,7 +321,7 @@ export default function CaptureScreen() {
           abortController ? { signal: abortController.signal } : undefined
         );
         if (cancelled || !copilotMountedRef.current) return;
-        if (!suggestion.context && (!timeEstimatesEnabled || !suggestion.timeEstimate)) {
+        if (!suggestion.context && (!timeEstimatesEnabled || !suggestion.timeEstimate) && !suggestion.tags?.length) {
           setCopilotSuggestion(null);
         } else {
           setCopilotSuggestion(suggestion);
@@ -140,122 +377,317 @@ export default function CaptureScreen() {
 
   const placeholderColor = tc.secondaryText;
 
-  const handleCancel = () => {
+  const closeCapture = React.useCallback(() => {
+    if (returnTo) {
+      router.replace(returnTo as never);
+      return;
+    }
     if (router.canGoBack()) {
       router.back();
     } else {
       router.replace('/inbox');
     }
+  }, [returnTo, router]);
+
+  const handleCancel = () => {
+    closeCapture();
   };
 
-  const handleSave = () => {
-    if (!value.trim()) return;
-    const { title, props, invalidDateCommands, detectedDate } = parseQuickAdd(value, projects, new Date(), areas);
-    if (invalidDateCommands && invalidDateCommands.length > 0) {
+  const formatBulkConfirmTitle = (count: number) => (
+    tFallback(t, 'quickAdd.bulkConfirmTitle', 'Create {{count}} tasks?')
+      .replace('{{count}}', String(count))
+  );
+
+  const formatBulkConfirmMessage = (lines: string[]) => {
+    const preview = lines.slice(0, BULK_PREVIEW_LINE_LIMIT).join('\n');
+    const remaining = Math.max(0, lines.length - BULK_PREVIEW_LINE_LIMIT);
+    const suffix = remaining > 0
+      ? `\n${tFallback(t, 'quickAdd.bulkMoreLines', '+{{count}} more').replace('{{count}}', String(remaining))}`
+      : '';
+    return `${preview}${suffix}`;
+  };
+
+  const buildTaskInputFromInput = async (inputValue: string): Promise<{ title: string; initialProps: Partial<Task> } | null> => {
+    if (!inputValue.trim()) return null;
+    const parsed = parseQuickAdd(inputValue, projects, new Date(), areas, quickAddParseOptions);
+    if (parsed.invalidDateCommands && parsed.invalidDateCommands.length > 0) {
       showToast({
         title: t('common.notice'),
-        message: `${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`,
+        message: `${t('quickAdd.invalidDateCommand')}: ${parsed.invalidDateCommands.join(', ')}`,
         tone: 'warning',
         durationMs: 4200,
       });
-      return;
+      return null;
     }
-    const shouldApplyDetectedDate = Boolean(detectedDate?.date && !props.dueDate);
-    const finalTitle = shouldApplyDetectedDate && detectedDate ? detectedDate.titleWithoutDate : (title || value);
-    if (!finalTitle.trim()) return;
-    const initialProps: Partial<Task> = { status: 'inbox', ...props };
-    if (!props.status) initialProps.status = 'inbox';
-    if (shouldApplyDetectedDate && detectedDate) {
-      initialProps.dueDate = detectedDate.date;
+
+    // The deep-link `project` param is contextual (an id or a title). It is a
+    // best-effort fallback, not a typed +Project token: resolve a selectable
+    // match up front, and simply skip it when it names an archived project.
+    const surfaceProps: Partial<Task> = { ...initialProps };
+    if (surfaceProps.attachments?.length) {
+      const managed = await filterManagedAttachments(surfaceProps.attachments);
+      if (managed.length > 0) {
+        surfaceProps.attachments = managed;
+      } else {
+        delete surfaceProps.attachments;
+      }
+    }
+    let fallbackProjectTitleToCreate: string | undefined;
+    if (!parsed.props.projectId && !parsed.projectTitle && initialProjectTitle) {
+      const ref = initialProjectTitle.toLowerCase();
+      const match = projects.find((project) => (
+        project.id === initialProjectTitle || project.title.toLowerCase() === ref
+      ));
+      if (!match) {
+        fallbackProjectTitleToCreate = initialProjectTitle;
+      } else if (isSelectableProjectForTaskAssignment(match)) {
+        surfaceProps.projectId = match.id;
+      }
+    }
+
+    // Capture policy lives in core buildCaptureTaskProps; this modal adds its
+    // description field and copilot suggestions on top.
+    const assembly = buildCaptureTaskProps({
+      parsed: fallbackProjectTitleToCreate
+        ? { ...parsed, projectTitle: fallbackProjectTitleToCreate }
+        : parsed,
+      rawInput: inputValue,
+      projects,
+      initialProps: surfaceProps,
+      selectedAreaId: defaultNewTaskAreaId,
+      starNewTask: false,
+    });
+    if (!assembly.ok) return null;
+    let taskProps = assembly.props;
+    if (assembly.projectToCreate) {
+      const created = await addProject(
+        assembly.projectToCreate.title,
+        assembly.projectToCreate.color,
+        assembly.projectToCreate.initialProps,
+      );
+      if (!created) return null;
+      taskProps = applyCapturedProject(taskProps, created.id);
+    }
+
+    const description = descriptionValue.trim();
+    const parsedDescription = typeof taskProps.description === 'string' ? taskProps.description.trim() : '';
+    if (description) {
+      taskProps.description = parsedDescription && parsedDescription !== description
+        ? `${description}\n${parsedDescription}`
+        : description;
     }
     if (copilotContext) {
-      const nextContexts = Array.from(new Set([...(initialProps.contexts ?? []), copilotContext]));
-      initialProps.contexts = nextContexts;
+      taskProps.contexts = Array.from(new Set([...(taskProps.contexts ?? []), copilotContext]));
     }
-    if (timeEstimatesEnabled && copilotEstimate && !initialProps.timeEstimate) {
-      initialProps.timeEstimate = copilotEstimate;
+    if (timeEstimatesEnabled && copilotEstimate && !taskProps.timeEstimate) {
+      taskProps.timeEstimate = copilotEstimate;
     }
     if (copilotTags.length) {
-      const nextTags = Array.from(new Set([...(initialProps.tags ?? []), ...copilotTags]));
-      initialProps.tags = nextTags;
+      taskProps.tags = Array.from(new Set([...(taskProps.tags ?? []), ...copilotTags]));
     }
-    addTask(finalTitle, initialProps);
-    router.replace('/inbox');
+    return { title: assembly.title, initialProps: taskProps };
+  };
+
+  const createTaskFromInput = async (
+    inputValue: string,
+    { openAfterSave = false }: { openAfterSave?: boolean } = {},
+  ): Promise<boolean> => {
+    const taskInput = await buildTaskInputFromInput(inputValue);
+    if (!taskInput) return false;
+    const addTaskResult = await addTask(taskInput.title, taskInput.initialProps);
+    if (addTaskResult && typeof addTaskResult === 'object' && addTaskResult.success === false) return false;
+    const createdTaskId = getCreatedTaskId(addTaskResult);
+    if (openAfterSave && createdTaskId) {
+      openTaskScreen(createdTaskId, taskInput.initialProps.projectId, 'task');
+      return false;
+    }
+    return true;
+  };
+
+  const createBulkTasks = async (lines: string[]) => {
+    const taskInputs: Array<{ title: string; initialProps: Partial<Task> }> = [];
+    for (const line of lines) {
+      const taskInput = await buildTaskInputFromInput(line);
+      if (!taskInput) return;
+      taskInputs.push(taskInput);
+    }
+    // Shared files belong to one task, not one copy per line: the attachment
+    // records share ids, so duplicating them across tasks would alias files.
+    taskInputs.forEach((taskInput, index) => {
+      if (index > 0) delete taskInput.initialProps.attachments;
+    });
+    const result = await addTasks(taskInputs);
+    if (result && typeof result === 'object' && result.success === false) return;
+    closeCapture();
+  };
+
+  const handleSave = async ({ openAfterSave = false }: { openAfterSave?: boolean } = {}) => {
+    if (!value.trim()) return;
+    const bulkLines = splitQuickAddBulkLines(value);
+    if (bulkLines.length > 1) {
+      Alert.alert(
+        formatBulkConfirmTitle(bulkLines.length),
+        formatBulkConfirmMessage(bulkLines),
+        [
+          { text: t('common.cancel'), style: 'cancel' },
+          {
+            text: tFallback(t, 'quickAdd.bulkConfirmCreate', 'Create tasks'),
+            onPress: () => {
+              void createBulkTasks(bulkLines);
+            },
+          },
+        ],
+      );
+      return;
+    }
+    const shouldClose = await createTaskFromInput(value, { openAfterSave });
+    if (shouldClose) closeCapture();
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: tc.bg }]}>
-      <View style={[styles.card, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
-        <View style={styles.titleRow}>
-          <Text style={[styles.title, { color: tc.text }]}>{t('nav.addTask')}</Text>
-          <TouchableOpacity
-            onPress={() => setShowHelp((prev) => !prev)}
-            style={[styles.helpToggle, { borderColor: tc.border, backgroundColor: tc.inputBg }]}
-          >
-            <Text style={[styles.helpToggleText, { color: tc.secondaryText }]}>?</Text>
-          </TouchableOpacity>
-        </View>
-        <TextInput
-          ref={inputRef}
-          style={[styles.input, { backgroundColor: tc.inputBg, borderColor: tc.border, color: tc.text }]}
-          placeholder={t('quickAdd.example')}
-          placeholderTextColor={placeholderColor}
-          value={value}
-          onChangeText={handleInputChange}
-          onSubmitEditing={handleSave}
-          returnKeyType="done"
-          multiline
-        />
-        {copilotSuggestion && !copilotApplied && (
-          <TouchableOpacity
-            style={[styles.copilotPill, { borderColor: tc.border, backgroundColor: tc.inputBg }]}
-            onPress={() => {
-              setCopilotContext(copilotSuggestion.context);
-              if (timeEstimatesEnabled) setCopilotEstimate(copilotSuggestion.timeEstimate);
-              setCopilotTags(copilotSuggestion.tags ?? []);
-              setCopilotApplied(true);
-            }}
-          >
-            <Text style={[styles.copilotText, { color: tc.text }]}>
-              ✨ {t('copilot.suggested')}{' '}
-              {copilotSuggestion.context ? `${copilotSuggestion.context} ` : ''}
-              {timeEstimatesEnabled && copilotSuggestion.timeEstimate ? `${copilotSuggestion.timeEstimate}` : ''}
-              {copilotSuggestion.tags?.length ? copilotSuggestion.tags.join(' ') : ''}
-            </Text>
-            <Text style={[styles.copilotHint, { color: tc.secondaryText }]}>
-              {t('copilot.applyHint')}
-            </Text>
-          </TouchableOpacity>
-        )}
-        {copilotApplied && (
-          <View style={[styles.copilotPill, { borderColor: tc.border, backgroundColor: tc.inputBg }]}>
-            <Text style={[styles.copilotText, { color: tc.text }]}>
-              ✅ {t('copilot.applied')}{' '}
-              {copilotContext ? `${copilotContext} ` : ''}
-              {timeEstimatesEnabled && copilotEstimate ? `${copilotEstimate}` : ''}
-              {copilotTags.length ? copilotTags.join(' ') : ''}
-            </Text>
+    <KeyboardAvoidingView
+      style={[styles.container, { backgroundColor: tc.bg }]}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <ScrollView
+        contentContainerStyle={styles.content}
+        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={[styles.card, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
+          <View style={styles.titleRow}>
+            <Text style={[styles.title, { color: tc.text }]}>{t('nav.addTask')}</Text>
+            <View style={styles.headerActions}>
+              {keyboardVisible && (
+                <TouchableOpacity
+                  onPress={Keyboard.dismiss}
+                  style={[styles.dismissKeyboardButton, { borderColor: tc.border, backgroundColor: tc.inputBg }]}
+                  accessibilityRole="button"
+                  accessibilityLabel={tFallback(t, 'common.hideKeyboard', 'Hide keyboard')}
+                >
+                  <Ionicons name="chevron-down" size={16} color={tc.text} />
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                onPress={() => setShowHelp((prev) => !prev)}
+                style={[styles.helpToggle, { borderColor: tc.border, backgroundColor: tc.inputBg }]}
+              >
+                <Text style={[styles.helpToggleText, { color: tc.secondaryText }]}>?</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        )}
-        {showHelp && (
-          <Text style={[styles.help, { color: tc.secondaryText }]}>{t('quickAdd.help')}</Text>
-        )}
-        <View style={styles.actions}>
-          <TouchableOpacity onPress={handleCancel} style={[styles.button, styles.cancel, { backgroundColor: tc.inputBg }]}>
-            <Text style={{ color: tc.text }}>{t('common.cancel')}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={handleSave} style={[styles.button, styles.save]}>
-            <Text style={styles.saveText}>{t('common.save')}</Text>
-          </TouchableOpacity>
+          <TextInput
+            ref={inputRef}
+            style={[styles.input, { backgroundColor: tc.inputBg, borderColor: tc.border, color: tc.text }]}
+            placeholder={t('quickAdd.example')}
+            placeholderTextColor={placeholderColor}
+            value={value}
+            onChangeText={handleInputChange}
+            onSubmitEditing={() => {
+              void handleSave();
+            }}
+            returnKeyType="done"
+            multiline
+          />
+          {(initialProps.attachments?.length ?? 0) > 0 && (
+            <View style={styles.fieldGroup}>
+              <Text style={[styles.fieldLabel, { color: tc.secondaryText }]}>{tFallback(t, 'attachments.title', 'Attachments')}</Text>
+              {(initialProps.attachments ?? []).map((attachment) => (
+                <View key={attachment.id} style={styles.attachmentRow}>
+                  <Ionicons name="attach" size={14} color={tc.secondaryText} />
+                  <Text style={[styles.attachmentTitle, { color: tc.text }]} numberOfLines={1}>
+                    {attachment.title}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+          {(initialDescription.trim().length > 0 || descriptionValue.trim().length > 0) && (
+            <View style={styles.fieldGroup}>
+              <Text style={[styles.fieldLabel, { color: tc.secondaryText }]}>{t('taskEdit.descriptionLabel')}</Text>
+              <TextInput
+                style={[styles.descriptionInput, { backgroundColor: tc.inputBg, borderColor: tc.border, color: tc.text }]}
+                placeholder={t('taskEdit.descriptionPlaceholder')}
+                placeholderTextColor={placeholderColor}
+                value={descriptionValue}
+                onChangeText={setDescriptionValue}
+                multiline
+              />
+            </View>
+          )}
+          {copilotSuggestion && !copilotApplied && (
+            <TouchableOpacity
+              style={[styles.copilotPill, { borderColor: tc.border, backgroundColor: tc.inputBg }]}
+              onPress={() => {
+                setCopilotContext(copilotSuggestion.context);
+                if (timeEstimatesEnabled) setCopilotEstimate(copilotSuggestion.timeEstimate);
+                setCopilotTags(copilotSuggestion.tags ?? []);
+                setCopilotApplied(true);
+              }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'flex-start', columnGap: 4 }}>
+                <Text style={[styles.copilotText, { color: tc.text }]}>✨</Text>
+                <Text style={[styles.copilotText, { color: tc.text, flexShrink: 1 }]}>
+                  {t('copilot.suggested')}{' '}
+                  {copilotSuggestion.context ? `${copilotSuggestion.context} ` : ''}
+                  {timeEstimatesEnabled && copilotSuggestion.timeEstimate ? `${copilotSuggestion.timeEstimate}` : ''}
+                  {copilotSuggestion.tags?.length ? copilotSuggestion.tags.join(' ') : ''}
+                </Text>
+              </View>
+              <Text style={[styles.copilotHint, { color: tc.secondaryText }]}>
+                {t('copilot.applyHint')}
+              </Text>
+            </TouchableOpacity>
+          )}
+          {copilotApplied && (
+            <View style={[styles.copilotPill, { borderColor: tc.border, backgroundColor: tc.inputBg }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'flex-start', columnGap: 4 }}>
+                <Text style={[styles.copilotText, { color: tc.text }]}>✅</Text>
+                <Text style={[styles.copilotText, { color: tc.text, flexShrink: 1 }]}>
+                  {t('copilot.applied')}{' '}
+                  {copilotContext ? `${copilotContext} ` : ''}
+                  {timeEstimatesEnabled && copilotEstimate ? `${copilotEstimate}` : ''}
+                  {copilotTags.length ? copilotTags.join(' ') : ''}
+                </Text>
+              </View>
+            </View>
+          )}
+          {showHelp && (
+            <Text style={[styles.help, { color: tc.secondaryText }]}>{t('quickAdd.help')}</Text>
+          )}
+          <View style={styles.actions}>
+            <TouchableOpacity onPress={handleCancel} style={[styles.button, styles.cancel, { backgroundColor: tc.inputBg }]}>
+              <Text style={{ color: tc.text }}>{t('common.cancel')}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => {
+                void handleSave({ openAfterSave: true });
+              }}
+              style={[styles.button, styles.editAfterSave, { borderColor: tc.border }]}
+            >
+                                <Text style={{ color: tc.text }}>{t('quickAdd.saveAndEdit')}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => {
+                void handleSave();
+              }}
+              style={[styles.button, styles.save]}
+            >
+              <Text style={styles.saveText}>{t('common.save')}</Text>
+            </TouchableOpacity>
+          </View>
         </View>
-      </View>
-    </View>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+  },
+  content: {
+    flexGrow: 1,
     padding: 16,
     justifyContent: 'center',
   },
@@ -270,9 +702,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   title: {
     fontSize: 20,
     fontWeight: '600',
+  },
+  dismissKeyboardButton: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
   },
   helpToggle: {
     width: 28,
@@ -296,6 +739,30 @@ const styles = StyleSheet.create({
   },
   help: {
     fontSize: 12,
+  },
+  fieldGroup: {
+    gap: 6,
+  },
+  fieldLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  descriptionInput: {
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 15,
+    minHeight: 70,
+  },
+  attachmentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    columnGap: 6,
+  },
+  attachmentTitle: {
+    flex: 1,
+    fontSize: 14,
   },
   copilotPill: {
     borderWidth: 1,
@@ -325,6 +792,9 @@ const styles = StyleSheet.create({
   cancel: {},
   save: {
     backgroundColor: '#3B82F6',
+  },
+  editAfterSave: {
+    borderWidth: 1,
   },
   saveText: {
     color: '#fff',

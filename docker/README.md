@@ -4,15 +4,84 @@ This folder contains Dockerfiles and a compose file to run:
 - **mindwtr-app**: the desktop web/PWA build, served by Nginx
 - **mindwtr-cloud**: the lightweight sync server
 
-## Quick start (compose)
+## Quick start (HTTP compose)
 
 ```bash
+export MINDWTR_CLOUD_AUTH_TOKENS=your_token_here
+export MINDWTR_CLOUD_CORS_ORIGIN=http://localhost:5173
 docker compose -f docker/compose.yaml up --build
 ```
 
 Then open:
 - PWA: `http://localhost:5173`
 - Cloud health: `http://localhost:8787/health`
+- Self-Hosted URL for local testing: `http://localhost:8787`
+- REST API base URL: `http://localhost:8787/v1`
+
+This HTTP compose file is best for local testing. Mindwtr desktop and mobile clients accept HTTP for localhost, private IPs, and local hostnames. Public URLs should use HTTPS.
+
+## Dropbox sync and the Docker PWA
+
+The `mindwtr-app` Docker image serves the browser/PWA build. Native Dropbox OAuth sync is not available in this runtime because Dropbox connection is implemented by the native desktop and mobile apps. Supplying `VITE_DROPBOX_APP_KEY` or `DROPBOX_APP_KEY` through `.env`, `env_file`, or compose runtime environment will not enable Dropbox in Docker.
+
+For Docker-hosted sync, use the bundled self-hosted cloud server or WebDAV. If the self-hosted endpoint is behind Authelia or another interactive SSO proxy, configure the proxy to let the Mindwtr sync/API path use Mindwtr's bearer token directly; the mobile app cannot complete an Authelia browser login in front of `/v1/data`.
+
+## HTTPS quick start (Cloud + Caddy)
+
+Use the HTTPS compose file when syncing real desktop or mobile clients to a self-hosted cloud server:
+
+```bash
+cp docker/.env.https.example docker/.env.https.local
+```
+
+Edit `docker/.env.https.local`:
+
+```dotenv
+MINDWTR_CLOUD_DOMAIN=mindwtr.example.com
+MINDWTR_CLOUD_AUTH_TOKENS=your_long_random_token
+MINDWTR_CLOUD_CORS_ORIGIN=https://mindwtr.example.com
+MINDWTR_CADDYFILE=Caddyfile.https
+```
+
+Start the HTTPS stack:
+
+```bash
+docker compose --env-file docker/.env.https.local -f docker/compose.https.yaml up -d
+```
+
+Then check:
+
+```bash
+curl https://mindwtr.example.com/health
+```
+
+In Mindwtr Settings -> Sync -> Self-Hosted, use:
+
+```text
+https://mindwtr.example.com
+```
+
+Mindwtr will automatically append `/v1/data`.
+
+### LAN-only HTTPS
+
+For a hostname that only resolves on your home network, change:
+
+```dotenv
+MINDWTR_CLOUD_DOMAIN=mindwtr.home.arpa
+MINDWTR_CLOUD_CORS_ORIGIN=https://mindwtr.home.arpa
+MINDWTR_CADDYFILE=Caddyfile.local-https
+```
+
+This uses Caddy's internal certificate authority. Each client device must trust Caddy's local root certificate before Mindwtr will accept the HTTPS connection. Public Let's Encrypt certificates are the more reliable option for mobile clients.
+
+After the LAN-only stack starts, you can export Caddy's local root certificate with:
+
+```bash
+docker compose --env-file docker/.env.https.local -f docker/compose.https.yaml cp caddy:/data/caddy/pki/authorities/local/root.crt ./mindwtr-caddy-root.crt
+```
+
+Install that certificate as a trusted root on each device that will sync to this hostname.
 
 ## Configure sync token
 
@@ -24,14 +93,20 @@ MINDWTR_CLOUD_AUTH_TOKENS=your_token_here
 
 `MINDWTR_CLOUD_TOKEN` is still accepted for backward compatibility, but deprecated.
 
+For Docker secrets, you can point to a mounted file instead:
+
+```
+MINDWTR_CLOUD_AUTH_TOKENS_FILE=/run/secrets/mindwtr_cloud_tokens
+```
+
 Use the **same token** in Mindwtr Settings → Sync → Self-Hosted.
 Set the Self-Hosted URL to the **base** endpoint, for example:
 
 ```
-http://localhost:8787/v1
+http://localhost:8787
 ```
 
-Mindwtr will automatically append `/data` and store `data.json` (and attachments) under that endpoint.
+Mindwtr will automatically append `/v1/data` and store `data.json` (and attachments) under that endpoint.
 
 Example to generate a token:
 

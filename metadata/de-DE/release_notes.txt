@@ -1,0 +1,4 @@
+- Zeiterfassung pro Aufgabe: verknuepfte Pomodoro-Fokussitzungen zaehlen ihre Minuten zu einem synchronisierten, editierbaren Feld (optional).
+- Loeschen, Erledigen und Archivieren nutzen jetzt Undo statt Bestaetigungsdialogen; die Kalenderwoche folgt deiner Region.
+- Schneller erfassen mit dem %Person-Token, geteilten Dateien aus anderen Apps, dem Kurzbefehl "Zur Mindwtr Inbox" und Sperrbildschirm-Widgets.
+- Checklisten sind von Notizen unabhaengig, Anhaenge werden als echte Kopien gespeichert, Sync-Konflikte klar aufgelistet und neue Schutzmechanismen verhindern Datenverlust.

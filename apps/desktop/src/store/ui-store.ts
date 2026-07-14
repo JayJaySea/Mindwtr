@@ -1,8 +1,80 @@
 import { createWithEqualityFn } from 'zustand/traditional';
-import type { TaskPriority, TimeEstimate } from '@mindwtr/core';
+import type { FilterCriteria } from '@mindwtr/core';
 
 const toastTimeouts = new Map<string, number>();
-type ListNextGroupBy = 'none' | 'context' | 'area';
+type ListNextGroupBy = 'none' | 'context' | 'area' | 'project' | 'energy' | 'priority' | 'person' | 'tag';
+type ListReferenceGroupBy = 'none' | 'context' | 'area' | 'project' | 'tag';
+type ListOptions = {
+    showDetails: boolean;
+    nextGroupBy: ListNextGroupBy;
+    referenceGroupBy: ListReferenceGroupBy;
+    focusTop3Only: boolean;
+};
+
+export const LIST_OPTIONS_STORAGE_KEY = 'mindwtr:list-options:v1';
+
+const DEFAULT_LIST_OPTIONS: ListOptions = {
+    showDetails: false,
+    nextGroupBy: 'none',
+    referenceGroupBy: 'area',
+    focusTop3Only: false,
+};
+
+function isListNextGroupBy(value: unknown): value is ListNextGroupBy {
+    return value === 'none'
+        || value === 'context'
+        || value === 'area'
+        || value === 'project'
+        || value === 'energy'
+        || value === 'priority'
+        || value === 'person'
+        || value === 'tag';
+}
+
+function isListReferenceGroupBy(value: unknown): value is ListReferenceGroupBy {
+    return value === 'none'
+        || value === 'context'
+        || value === 'area'
+        || value === 'project'
+        || value === 'tag';
+}
+
+function getListOptionsStorage(): Storage | null {
+    if (typeof window === 'undefined') return null;
+    try {
+        return window.localStorage;
+    } catch {
+        return null;
+    }
+}
+
+function readStoredListOptions(): ListOptions {
+    const storage = getListOptionsStorage();
+    if (!storage) return DEFAULT_LIST_OPTIONS;
+    try {
+        const raw = storage.getItem(LIST_OPTIONS_STORAGE_KEY);
+        if (!raw) return DEFAULT_LIST_OPTIONS;
+        const parsed = JSON.parse(raw) as Partial<ListOptions> | null;
+        return {
+            showDetails: typeof parsed?.showDetails === 'boolean' ? parsed.showDetails : DEFAULT_LIST_OPTIONS.showDetails,
+            nextGroupBy: isListNextGroupBy(parsed?.nextGroupBy) ? parsed.nextGroupBy : DEFAULT_LIST_OPTIONS.nextGroupBy,
+            referenceGroupBy: isListReferenceGroupBy(parsed?.referenceGroupBy) ? parsed.referenceGroupBy : DEFAULT_LIST_OPTIONS.referenceGroupBy,
+            focusTop3Only: typeof parsed?.focusTop3Only === 'boolean' ? parsed.focusTop3Only : DEFAULT_LIST_OPTIONS.focusTop3Only,
+        };
+    } catch {
+        return DEFAULT_LIST_OPTIONS;
+    }
+}
+
+function saveStoredListOptions(options: ListOptions) {
+    const storage = getListOptionsStorage();
+    if (!storage) return;
+    try {
+        storage.setItem(LIST_OPTIONS_STORAGE_KEY, JSON.stringify(options));
+    } catch {
+        // View options are convenience state; storage failures should not block UI updates.
+    }
+}
 
 interface UiState {
     isFocusMode: boolean;
@@ -22,26 +94,21 @@ interface UiState {
     ) => void;
     dismissToast: (id: string) => void;
     listFilters: {
-        tokens: string[];
-        priorities: TaskPriority[];
-        estimates: TimeEstimate[];
+        criteria: FilterCriteria;
         open: boolean;
     };
     setListFilters: (partial: Partial<UiState['listFilters']>) => void;
     resetListFilters: () => void;
-    listOptions: {
-        showDetails: boolean;
-        nextGroupBy: ListNextGroupBy;
-    };
+    listOptions: ListOptions;
     setListOptions: (partial: Partial<UiState['listOptions']>) => void;
     editingTaskId: string | null;
     setEditingTaskId: (value: string | null) => void;
     expandedTaskIds: Record<string, true>;
+    collapseAllTaskDetails: () => void;
     setTaskExpanded: (taskId: string, expanded: boolean) => void;
     toggleTaskExpanded: (taskId: string) => void;
     boardFilters: {
-        selectedProjectIds: string[];
-        open: boolean;
+        criteria: FilterCriteria;
     };
     setBoardFilters: (partial: Partial<UiState['boardFilters']>) => void;
     projectView: {
@@ -73,9 +140,7 @@ export const useUiStore = createWithEqualityFn<UiState>()((set) => ({
         set((state) => ({ toasts: state.toasts.filter((toast) => toast.id !== id) }));
     },
     listFilters: {
-        tokens: [],
-        priorities: [],
-        estimates: [],
+        criteria: {},
         open: false,
     },
     setListFilters: (partial) =>
@@ -84,20 +149,21 @@ export const useUiStore = createWithEqualityFn<UiState>()((set) => ({
         set((state) => ({
             listFilters: {
                 ...state.listFilters,
-                tokens: [],
-                priorities: [],
-                estimates: [],
+                criteria: {},
             },
         })),
-    listOptions: {
-        showDetails: false,
-        nextGroupBy: 'none',
-    },
+    listOptions: readStoredListOptions(),
     setListOptions: (partial) =>
-        set((state) => ({ listOptions: { ...state.listOptions, ...partial } })),
+        set((state) => {
+            const listOptions = { ...state.listOptions, ...partial };
+            saveStoredListOptions(listOptions);
+            return { listOptions };
+        }),
     editingTaskId: null,
     setEditingTaskId: (value) => set({ editingTaskId: value }),
     expandedTaskIds: {},
+    collapseAllTaskDetails: () =>
+        set((state) => (Object.keys(state.expandedTaskIds).length === 0 ? state : { expandedTaskIds: {} })),
     setTaskExpanded: (taskId, expanded) =>
         set((state) => {
             const currentExpanded = Boolean(state.expandedTaskIds[taskId]);
@@ -130,8 +196,7 @@ export const useUiStore = createWithEqualityFn<UiState>()((set) => ({
             };
         }),
     boardFilters: {
-        selectedProjectIds: [],
-        open: false,
+        criteria: {},
     },
     setBoardFilters: (partial) =>
         set((state) => ({ boardFilters: { ...state.boardFilters, ...partial } })),

@@ -1,30 +1,64 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ErrorBoundary } from '../ErrorBoundary';
-import { ReviewHeader } from './review/ReviewHeader';
+import { ReviewHeader, ReviewListControls } from './review/ReviewHeader';
 import { ReviewFiltersBar } from './review/ReviewFiltersBar';
 import { ReviewBulkActions } from './review/ReviewBulkActions';
 import { ReviewTaskList } from './review/ReviewTaskList';
+import { StoreTaskItem } from './list/StoreTaskItem';
+import { BulkSelectionToolbar } from './list/BulkSelectionToolbar';
+import { TaskBulkOrganizeModal } from './list/TaskBulkOrganizeModal';
 import { DailyReviewGuideModal } from './review/DailyReviewModal';
 import { WeeklyReviewGuideModal } from './review/WeeklyReviewModal';
 
-import { shallow, sortTasksBy, useTaskStore, type Project, type Task, type TaskStatus, type TaskSortBy, isTaskInActiveProject } from '@mindwtr/core';
+import { buildBulkOrganizeTaskUpdates, shallow, sortTasksBy, updateRangeSelection, useTaskStore, type BulkOrganizeTaskUpdateInput, type Project, type RangeSelectionOptions, type Task, type TaskStatus, type TaskSortBy, isTaskInActiveProject } from '@mindwtr/core';
 
 import { PromptModal } from '../PromptModal';
 import { useLanguage } from '../../contexts/language-context';
 import { usePerformanceMonitor } from '../../hooks/usePerformanceMonitor';
 import { checkBudget } from '../../config/performanceBudgets';
-import { resolveAreaFilter, taskMatchesAreaFilter } from '../../lib/area-filter';
+import { resolveAreaFilter, taskMatchesAreaFilter } from '@mindwtr/core';
+import { useUiStore } from '../../store/ui-store';
+import { usePersistedViewState } from '../../hooks/usePersistedViewState';
+import { groupTasks, type ContextsGroupBy, type TaskGroup } from './list/next-grouping';
+import { GroupedTaskSections } from './list/GroupedTaskSections';
 
 const STATUS_OPTIONS: TaskStatus[] = ['inbox', 'next', 'waiting', 'someday', 'done'];
+const REVIEW_VIEW_STATE_STORAGE_KEY = 'mindwtr:view:review:v1';
+const REVIEW_GROUP_BY_VALUES: ContextsGroupBy[] = ['none', 'status', 'context', 'area', 'project', 'tag'];
+
+type ReviewPersistedViewState = {
+    filterStatus: TaskStatus | 'all';
+    groupBy: ContextsGroupBy;
+};
+
+const DEFAULT_REVIEW_VIEW_STATE: ReviewPersistedViewState = {
+    filterStatus: 'all',
+    groupBy: 'none',
+};
+
+function sanitizeReviewViewState(value: unknown, fallback: ReviewPersistedViewState): ReviewPersistedViewState {
+    const parsed = value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Partial<ReviewPersistedViewState>
+        : {};
+    return {
+        filterStatus: parsed.filterStatus === 'all' || STATUS_OPTIONS.includes(parsed.filterStatus as TaskStatus)
+            ? parsed.filterStatus as TaskStatus | 'all'
+            : fallback.filterStatus,
+        groupBy: REVIEW_GROUP_BY_VALUES.includes(parsed.groupBy as ContextsGroupBy)
+            ? parsed.groupBy as ContextsGroupBy
+            : fallback.groupBy,
+    };
+}
 
 export function ReviewView() {
     const perf = usePerformanceMonitor('ReviewView');
-    const { tasks, projects, areas, settings, batchMoveTasks, batchDeleteTasks, batchUpdateTasks, highlightTaskId } = useTaskStore(
+    const { tasks, projects, areas, settings, updateSettings, batchMoveTasks, batchDeleteTasks, batchUpdateTasks, highlightTaskId } = useTaskStore(
         (state) => ({
             tasks: state.tasks,
             projects: state.projects,
             areas: state.areas,
             settings: state.settings,
+            updateSettings: state.updateSettings,
             batchMoveTasks: state.batchMoveTasks,
             batchDeleteTasks: state.batchDeleteTasks,
             batchUpdateTasks: state.batchUpdateTasks,
@@ -33,7 +67,25 @@ export function ReviewView() {
         shallow
     );
     const { t } = useLanguage();
-    const [filterStatus, setFilterStatus] = useState<TaskStatus | 'all'>('all');
+    const [persistedViewState, setPersistedViewState] = usePersistedViewState(
+        REVIEW_VIEW_STATE_STORAGE_KEY,
+        DEFAULT_REVIEW_VIEW_STATE,
+        sanitizeReviewViewState
+    );
+    const filterStatus = persistedViewState.filterStatus;
+    const setFilterStatus = useCallback((value: TaskStatus | 'all') => {
+        setPersistedViewState((current) => ({
+            ...current,
+            filterStatus: value,
+        }));
+    }, [setPersistedViewState]);
+    const groupBy = persistedViewState.groupBy;
+    const setGroupBy = useCallback((value: ContextsGroupBy) => {
+        setPersistedViewState((current) => ({
+            ...current,
+            groupBy: value,
+        }));
+    }, [setPersistedViewState]);
     const [searchQuery, setSearchQuery] = useState('');
     const [selectionMode, setSelectionMode] = useState(false);
     const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set());
@@ -42,6 +94,12 @@ export function ReviewView() {
     const [showGuide, setShowGuide] = useState(false);
     const [showDailyGuide, setShowDailyGuide] = useState(false);
     const [moveToStatus, setMoveToStatus] = useState<TaskStatus | ''>('');
+    const [bulkOrganizeOpen, setBulkOrganizeOpen] = useState(false);
+    const [isBulkOrganizing, setIsBulkOrganizing] = useState(false);
+    const multiSelectAnchorIdRef = useRef<string | null>(null);
+    const showListDetails = useUiStore((state) => state.listOptions.showDetails);
+    const setListOptions = useUiStore((state) => state.setListOptions);
+    const collapseAllTaskDetails = useUiStore((state) => state.collapseAllTaskDetails);
 
     const sortBy = (settings?.taskSortBy ?? 'default') as TaskSortBy;
     const normalizedSearchQuery = searchQuery.trim().toLowerCase();
@@ -61,7 +119,7 @@ export function ReviewView() {
         return () => window.clearTimeout(timer);
     }, [perf.enabled]);
 
-    const { projectMap, tasksById, statusCounts, filteredTasks } = useMemo(() => {
+    const { tasksById, statusCounts, filteredTasks } = useMemo(() => {
         perf.trackUseMemo();
         return perf.measure('reviewData', () => {
             const nextProjectMap: Record<string, Project> = {};
@@ -102,7 +160,6 @@ export function ReviewView() {
                 : sortedTasks;
 
             return {
-                projectMap: nextProjectMap,
                 tasksById: nextTasksById,
                 statusCounts: nextStatusCounts,
                 filteredTasks: searchFilteredTasks,
@@ -111,27 +168,67 @@ export function ReviewView() {
     }, [filterStatus, normalizedSearchQuery, projects, sortBy, tasks, resolvedAreaFilter, projectMapById, areaById]);
 
     const selectedIdsArray = useMemo(() => Array.from(multiSelectedIds), [multiSelectedIds]);
+    const filteredTaskIds = useMemo(() => filteredTasks.map((task) => task.id), [filteredTasks]);
+    const selectedVisibleCount = useMemo(
+        () => filteredTaskIds.filter((id) => multiSelectedIds.has(id)).length,
+        [filteredTaskIds, multiSelectedIds],
+    );
+    const allVisibleTasksSelected = filteredTaskIds.length > 0 && selectedVisibleCount === filteredTaskIds.length;
+    const groupedTasks = useMemo<TaskGroup[]>(
+        () => groupTasks(groupBy, { tasks: filteredTasks, areas, projectMap: projectMapById, t }),
+        [areas, filteredTasks, groupBy, projectMapById, t],
+    );
+    const isGrouping = groupBy !== 'none' && filteredTasks.length > 0;
 
     const bulkStatuses: TaskStatus[] = ['inbox', 'next', 'waiting', 'someday', 'reference', 'done'];
 
     const exitSelectionMode = useCallback(() => {
         setSelectionMode(false);
         setMultiSelectedIds(new Set());
+        multiSelectAnchorIdRef.current = null;
     }, []);
 
     useEffect(() => {
         exitSelectionMode();
     }, [filterStatus, exitSelectionMode]);
 
-    const toggleMultiSelect = useCallback((taskId: string) => {
-        if (!selectionMode) setSelectionMode(true);
-        setMultiSelectedIds(prev => {
-            const next = new Set(prev);
-            if (next.has(taskId)) next.delete(taskId);
-            else next.add(taskId);
+    useEffect(() => {
+        setMultiSelectedIds((prev) => {
+            const visible = new Set(filteredTaskIds);
+            const next = new Set(Array.from(prev).filter((id) => visible.has(id)));
+            if (next.size === prev.size) return prev;
             return next;
         });
-    }, [selectionMode]);
+        if (multiSelectAnchorIdRef.current && !filteredTaskIds.includes(multiSelectAnchorIdRef.current)) {
+            multiSelectAnchorIdRef.current = null;
+        }
+    }, [filteredTaskIds]);
+
+    const toggleMultiSelect = useCallback((taskId: string, options: RangeSelectionOptions = {}) => {
+        if (!selectionMode) setSelectionMode(true);
+        setMultiSelectedIds(prev => {
+            const result = updateRangeSelection({
+                anchorId: multiSelectAnchorIdRef.current,
+                range: options.range,
+                selectedIds: prev,
+                targetId: taskId,
+                visibleIds: filteredTaskIds,
+            });
+            multiSelectAnchorIdRef.current = result.anchorId;
+            return result.selectedIds;
+        });
+    }, [filteredTaskIds, selectionMode]);
+
+    const selectAllVisibleTasks = useCallback(() => {
+        setSelectionMode(true);
+        multiSelectAnchorIdRef.current = filteredTaskIds[0] ?? null;
+        setMultiSelectedIds(new Set(filteredTaskIds));
+    }, [filteredTaskIds]);
+
+    const clearTaskSelection = useCallback(() => {
+        multiSelectAnchorIdRef.current = null;
+        setMultiSelectedIds(new Set());
+    }, []);
 
     const handleBatchMove = useCallback(async (newStatus: TaskStatus) => {
         if (selectedIdsArray.length === 0) return;
@@ -146,11 +243,34 @@ export function ReviewView() {
         exitSelectionMode();
     }, [batchDeleteTasks, selectedIdsArray, exitSelectionMode]);
 
+    const handleApplyTaskBulkOrganize = useCallback(async (input: BulkOrganizeTaskUpdateInput) => {
+        if (selectedIdsArray.length === 0 || isBulkOrganizing) return;
+        const updates = buildBulkOrganizeTaskUpdates(selectedIdsArray, tasksById, input);
+        if (updates.length === 0) return;
+        setIsBulkOrganizing(true);
+        try {
+            await batchUpdateTasks(updates);
+            setBulkOrganizeOpen(false);
+            exitSelectionMode();
+        } finally {
+            setIsBulkOrganizing(false);
+        }
+    }, [batchUpdateTasks, exitSelectionMode, isBulkOrganizing, selectedIdsArray, tasksById]);
+
     const handleBatchAddTag = useCallback(async () => {
         if (selectedIdsArray.length === 0) return;
         setTagPromptIds(selectedIdsArray);
         setTagPromptOpen(true);
     }, [batchUpdateTasks, selectedIdsArray, tasksById, t, exitSelectionMode]);
+
+    const handleToggleDetails = useCallback(() => {
+        if (showListDetails) {
+            collapseAllTaskDetails();
+            setListOptions({ showDetails: false });
+            return;
+        }
+        setListOptions({ showDetails: true });
+    }, [collapseAllTaskDetails, setListOptions, showListDetails]);
 
     return (
         <ErrorBoundary>
@@ -158,60 +278,102 @@ export function ReviewView() {
                 <ReviewHeader
                     title={t('review.title')}
                     taskCountLabel={`${filteredTasks.length} ${t('common.tasks')}`}
-                    selectionMode={selectionMode}
-                    onToggleSelection={() => {
-                        if (selectionMode) exitSelectionMode();
-                        else setSelectionMode(true);
-                    }}
                     onShowDailyGuide={() => setShowDailyGuide(true)}
                     onShowGuide={() => setShowGuide(true)}
+                    filters={(
+                        <ReviewFiltersBar
+                            filterStatus={filterStatus}
+                            statusOptions={statusOptions}
+                            statusCounts={statusCounts}
+                            onSelect={setFilterStatus}
+                            t={t}
+                        />
+                    )}
                     labels={{
-                        select: t('bulk.select'),
-                        exitSelect: t('bulk.exitSelect'),
                         dailyReview: t('dailyReview.title'),
                         weeklyReview: t('review.openGuide'),
                     }}
                 />
-
-                <ReviewFiltersBar
-                    filterStatus={filterStatus}
-                    statusOptions={statusOptions}
-                    statusCounts={statusCounts}
-                    onSelect={setFilterStatus}
-                    t={t}
-                />
-                <input
-                    type="text"
-                    data-view-filter-input
-                    placeholder={t('common.search')}
-                    value={searchQuery}
-                    onChange={(event) => setSearchQuery(event.target.value)}
-                    className="w-full text-sm px-3 py-2 rounded border border-border bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
-                />
+                <div className="flex flex-wrap items-center gap-2">
+                    <input
+                        type="text"
+                        data-view-filter-input
+                        placeholder={t('common.search')}
+                        value={searchQuery}
+                        onChange={(event) => setSearchQuery(event.target.value)}
+                        className="h-9 min-w-[200px] flex-1 rounded-lg border border-border bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <ReviewListControls
+                        selectionMode={selectionMode}
+                        onToggleSelection={() => {
+                            if (selectionMode) exitSelectionMode();
+                            else setSelectionMode(true);
+                        }}
+                        sortBy={sortBy}
+                        onChangeSortBy={(value) => updateSettings({ taskSortBy: value })}
+                        groupBy={groupBy}
+                        onChangeGroupBy={setGroupBy}
+                        showListDetails={showListDetails}
+                        onToggleDetails={handleToggleDetails}
+                        t={t}
+                        labels={{
+                            select: t('bulk.select'),
+                            exitSelect: t('bulk.exitSelect'),
+                        }}
+                    />
+                </div>
 
                 {selectionMode && (
-                    <ReviewBulkActions
-                        selectionCount={selectedIdsArray.length}
-                        moveToStatus={moveToStatus}
-                        onMoveToStatus={handleBatchMove}
-                        onChangeMoveToStatus={setMoveToStatus}
-                        onAddTag={handleBatchAddTag}
-                        onDelete={handleBatchDelete}
-                        statusOptions={bulkStatuses}
+                    <div className="space-y-3">
+                        <BulkSelectionToolbar
+                            selectionCount={selectedIdsArray.length}
+                            totalCount={filteredTasks.length}
+                            allSelected={allVisibleTasksSelected}
+                            onSelectAll={selectAllVisibleTasks}
+                            onClearSelection={clearTaskSelection}
+                            t={t}
+                        />
+                        <ReviewBulkActions
+                            selectionCount={selectedIdsArray.length}
+                            moveToStatus={moveToStatus}
+                            onMoveToStatus={handleBatchMove}
+                            onChangeMoveToStatus={setMoveToStatus}
+                            onBulkOrganize={() => setBulkOrganizeOpen(true)}
+                            onAddTag={handleBatchAddTag}
+                            onDelete={handleBatchDelete}
+                            statusOptions={bulkStatuses}
+                            t={t}
+                        />
+                    </div>
+                )}
+
+                {isGrouping ? (
+                    <GroupedTaskSections
+                        groups={groupedTasks}
+                        renderTask={(task) => (
+                            <StoreTaskItem
+                                key={task.id}
+                                taskId={task.id}
+                                compactMetaEnabled={showListDetails}
+                                showProjectBadgeInActions={false}
+                                selectionMode={selectionMode}
+                                isMultiSelected={multiSelectedIds.has(task.id)}
+                                onToggleSelectId={toggleMultiSelect}
+                            />
+                        )}
+                    />
+                ) : (
+                    <ReviewTaskList
+                        tasks={filteredTasks}
+                        showListDetails={showListDetails}
+                        selectionMode={selectionMode}
+                        multiSelectedIds={multiSelectedIds}
+                        highlightTaskId={highlightTaskId}
+                        onToggleSelect={toggleMultiSelect}
+                        emptyMessage={normalizedSearchQuery ? t('filters.noMatch') : t('review.noTasks')}
                         t={t}
                     />
                 )}
-
-                <ReviewTaskList
-                    tasks={filteredTasks}
-                    projectMap={projectMap}
-                    selectionMode={selectionMode}
-                    multiSelectedIds={multiSelectedIds}
-                    highlightTaskId={highlightTaskId}
-                    onToggleSelect={toggleMultiSelect}
-                    emptyMessage={normalizedSearchQuery ? t('filters.noMatch') : t('review.noTasks')}
-                    t={t}
-                />
 
                 {showGuide && (
                     <WeeklyReviewGuideModal onClose={() => setShowGuide(false)} />
@@ -221,11 +383,22 @@ export function ReviewView() {
                     <DailyReviewGuideModal onClose={() => setShowDailyGuide(false)} />
                 )}
 
+                <TaskBulkOrganizeModal
+                    isOpen={bulkOrganizeOpen}
+                    selectedCount={selectedIdsArray.length}
+                    projects={projects}
+                    areas={areas}
+                    isApplying={isBulkOrganizing}
+                    t={t}
+                    onCancel={() => setBulkOrganizeOpen(false)}
+                    onApply={handleApplyTaskBulkOrganize}
+                />
+
                 <PromptModal
                     isOpen={tagPromptOpen}
                     title={t('bulk.addTag')}
                     description={t('bulk.addTag')}
-                    placeholder="#tag"
+                    placeholder={t('bulk.tagPlaceholder')}
                     defaultValue=""
                     confirmLabel={t('common.save')}
                     cancelLabel={t('common.cancel')}

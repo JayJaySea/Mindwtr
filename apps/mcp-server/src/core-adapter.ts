@@ -1,11 +1,13 @@
-import type { Area, Project, Task } from './queries.js';
+import type { Area, Person, Project, Section, Task } from './queries.js';
 import { ensureMindwtrDbPath, type DbOptions } from './db.js';
 
 type CoreStore = {
   getState: () => {
     _allTasks: Task[];
     _allProjects: Project[];
+    _allSections: Section[];
     _allAreas: Area[];
+    _allPeople: Person[];
     fetchData: () => Promise<void>;
     addTask: (title: string, initialProps?: Partial<Task>) => Promise<CoreActionResult>;
     updateTask: (id: string, updates: Partial<Task>) => Promise<CoreActionResult>;
@@ -14,9 +16,16 @@ type CoreStore = {
     addProject: (title: string, color: string, initialProps?: Partial<Project>) => Promise<Project | null>;
     updateProject: (id: string, updates: Partial<Project>) => Promise<CoreActionResult>;
     deleteProject: (id: string) => Promise<CoreActionResult>;
+    addSection: (projectId: string, title: string, initialProps?: Partial<Section>) => Promise<Section | null>;
+    updateSection: (id: string, updates: Partial<Section>) => Promise<CoreActionResult>;
+    deleteSection: (id: string) => Promise<CoreActionResult>;
     addArea: (name: string, initialProps?: Partial<Area>) => Promise<Area | null>;
     updateArea: (id: string, updates: Partial<Area>) => Promise<CoreActionResult>;
     deleteArea: (id: string) => Promise<CoreActionResult>;
+    addPerson: (name: string, initialProps?: Partial<Person>) => Promise<Person | null>;
+    updatePerson: (id: string, updates: Partial<Person>) => Promise<CoreActionResult>;
+    renamePerson: (id: string, name: string, options?: { updateTasks?: boolean }) => Promise<CoreActionResult>;
+    deletePerson: (id: string) => Promise<CoreActionResult>;
   };
 };
 
@@ -28,8 +37,13 @@ type CoreActionResult = {
 type CoreModule = {
   setStorageAdapter: (adapter: unknown) => void;
   flushPendingSave: () => Promise<void>;
+  createSerializedAsyncQueue: () => SerializedAsyncQueue;
   useTaskStore: CoreStore;
   SqliteAdapter: new (client: unknown) => { ensureSchema: () => Promise<void> };
+};
+
+type SerializedAsyncQueue = {
+  run: <T>(fn: () => Promise<T> | T) => Promise<T>;
 };
 
 type CoreService = {
@@ -41,18 +55,27 @@ type CoreService = {
   addProject: (input: { title: string; color: string; props?: Partial<Project> }) => Promise<Project>;
   updateProject: (input: { id: string; updates: Partial<Project> }) => Promise<Project>;
   deleteProject: (id: string) => Promise<Project>;
+  addSection: (input: { projectId: string; title: string; props?: Partial<Section> }) => Promise<Section>;
+  updateSection: (input: { id: string; updates: Partial<Section> }) => Promise<Section>;
+  deleteSection: (id: string) => Promise<Section>;
   addArea: (input: { name: string; props?: Partial<Area> }) => Promise<Area>;
   updateArea: (input: { id: string; updates: Partial<Area> }) => Promise<Area>;
   deleteArea: (id: string) => Promise<Area>;
+  addPerson: (input: { name: string; props?: Partial<Person> }) => Promise<Person>;
+  updatePerson: (input: { id: string; updates: Partial<Person> }) => Promise<Person>;
+  renamePerson: (input: { id: string; name: string; updateTasks?: boolean }) => Promise<Person>;
+  deletePerson: (id: string) => Promise<Person>;
 };
 
 let coreService: CoreService | null = null;
 let coreDbPath: string | undefined;
 let coreReadonly = false;
 let coreReady: Promise<void> | null = null;
-let coreQueue: Promise<void> = Promise.resolve();
+let coreQueue: SerializedAsyncQueue | null = null;
 
-const isBun = () => typeof (globalThis as any).Bun !== 'undefined';
+const CORE_SQLITE_BUSY_TIMEOUT_MS = 0;
+
+const isBun = () => typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined';
 
 const createSqliteClient = async (dbPath: string, readonly: boolean) => {
   if (isBun()) {
@@ -68,15 +91,18 @@ const createSqliteClient = async (dbPath: string, readonly: boolean) => {
     const exec = async (sql: string) => {
       db.exec(sql);
     };
+    await exec(`PRAGMA busy_timeout = ${CORE_SQLITE_BUSY_TIMEOUT_MS};`);
     await exec('PRAGMA journal_mode = WAL;');
     await exec('PRAGMA foreign_keys = ON;');
-    await exec('PRAGMA busy_timeout = 5000;');
     return { client: { run, all, get, exec }, close: () => db.close() };
   }
 
   const mod = await import('better-sqlite3');
   const Database = mod.default;
-  const db = new Database(dbPath, { readonly, fileMustExist: true });
+  const db = new Database(dbPath, {
+    readonly,
+    fileMustExist: true,
+  });
   const run = async (sql: string, params: unknown[] = []) => {
     db.prepare(sql).run(params);
   };
@@ -87,36 +113,15 @@ const createSqliteClient = async (dbPath: string, readonly: boolean) => {
   const exec = async (sql: string) => {
     db.exec(sql);
   };
+  await exec(`PRAGMA busy_timeout = ${CORE_SQLITE_BUSY_TIMEOUT_MS};`);
   await exec('PRAGMA journal_mode = WAL;');
   await exec('PRAGMA foreign_keys = ON;');
-  await exec('PRAGMA busy_timeout = 5000;');
   return { client: { run, all, get, exec }, close: () => db.close() };
 };
 
 const loadCoreModules = async (): Promise<CoreModule> => {
   const core = await import('@mindwtr/core');
   return core as CoreModule;
-};
-
-const runSerialized = async <T>(fn: () => Promise<T>): Promise<T> => {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const result = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  coreQueue = coreQueue
-    .then(async () => {
-      try {
-        resolve(await fn());
-      } catch (error) {
-        reject(error);
-      }
-    })
-    .catch(() => {
-      // swallow to keep queue alive
-    });
-  return result;
 };
 
 const getErrorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -141,37 +146,42 @@ const ensureCoreReady = async (options: DbOptions) => {
   coreReadonly = Boolean(options.readonly);
   coreReady = (async () => {
     const core = await loadCoreModules();
-    const { client } = await createSqliteClient(coreDbPath!, coreReadonly);
-    const ensureOrderNumColumn = async (tableName: 'tasks' | 'projects') => {
-      let columns: Array<{ name?: string }> = [];
-      try {
-        columns = await client.all<{ name?: string }>(`PRAGMA table_info(${tableName})`);
-      } catch (error) {
-        throw new Error(`Failed to inspect ${tableName} schema during MCP preflight: ${getErrorMessage(error)}`);
-      }
-      const hasOrderNum = columns.some((col) => col.name === 'orderNum');
-      if (hasOrderNum || coreReadonly) return;
-      try {
-        await client.run(`ALTER TABLE ${tableName} ADD COLUMN orderNum INTEGER`);
-      } catch (error) {
-        if (isDuplicateColumnError(error)) return;
-        throw new Error(`Failed to add ${tableName}.orderNum during MCP preflight: ${getErrorMessage(error)}`);
-      }
-    };
-    // Preflight for older DBs missing orderNum column.
-    await ensureOrderNumColumn('tasks');
-    await ensureOrderNumColumn('projects');
-    const sqliteAdapter = new core.SqliteAdapter(client);
-    await sqliteAdapter.ensureSchema();
-    core.setStorageAdapter(sqliteAdapter);
-    await core.useTaskStore.getState().fetchData();
+    coreQueue ??= core.createSerializedAsyncQueue();
+    let closeClient: (() => void) | null = null;
+    try {
+      const { client, close } = await createSqliteClient(coreDbPath!, coreReadonly);
+      closeClient = close;
+      const ensureOrderNumColumn = async (tableName: 'tasks' | 'projects') => {
+        let columns: Array<{ name?: string }> = [];
+        try {
+          columns = await client.all<{ name?: string }>(`PRAGMA table_info(${tableName})`);
+        } catch (error) {
+          throw new Error(`Failed to inspect ${tableName} schema during MCP preflight: ${getErrorMessage(error)}`);
+        }
+        const hasOrderNum = columns.some((col) => col.name === 'orderNum');
+        if (hasOrderNum || coreReadonly) return;
+        try {
+          await client.run(`ALTER TABLE ${tableName} ADD COLUMN orderNum INTEGER`);
+        } catch (error) {
+          if (isDuplicateColumnError(error)) return;
+          throw new Error(`Failed to add ${tableName}.orderNum during MCP preflight: ${getErrorMessage(error)}`);
+        }
+      };
+      // Preflight for older DBs missing orderNum column.
+      await ensureOrderNumColumn('tasks');
+      await ensureOrderNumColumn('projects');
+      const sqliteAdapter = new core.SqliteAdapter(client);
+      await sqliteAdapter.ensureSchema();
+      core.setStorageAdapter(sqliteAdapter);
+      await core.useTaskStore.getState().fetchData();
 
-    coreService = {
+      coreService = {
       addTask: async ({ title, props }) => {
         const state = core.useTaskStore.getState();
         await state.fetchData();
-        const before = new Set(state._allTasks.map((t) => t.id));
-        ensureActionSucceeded('create task', await state.addTask(title, props));
+        const refreshedState = core.useTaskStore.getState();
+        const before = new Set(refreshedState._allTasks.map((t) => t.id));
+        ensureActionSucceeded('create task', await refreshedState.addTask(title, props));
         await core.flushPendingSave();
         const after = core.useTaskStore.getState()._allTasks;
         const created = after.find((t) => !before.has(t.id));
@@ -233,16 +243,44 @@ const ensureCoreReady = async (options: DbOptions) => {
         if (!updated) throw new Error(`Project not found after update: ${id}`);
         return updated as Project;
       },
-      deleteProject: async (id) => {
-        const state = core.useTaskStore.getState();
-        await state.fetchData();
-        ensureActionSucceeded('delete project', await state.deleteProject(id));
-        await core.flushPendingSave();
-        const updated = core.useTaskStore.getState()._allProjects.find((project) => project.id === id);
-        if (!updated) throw new Error(`Project not found after delete: ${id}`);
-        return updated as Project;
-      },
-      addArea: async ({ name, props }) => {
+    deleteProject: async (id) => {
+      const state = core.useTaskStore.getState();
+      await state.fetchData();
+      ensureActionSucceeded('delete project', await state.deleteProject(id));
+      await core.flushPendingSave();
+      const updated = core.useTaskStore.getState()._allProjects.find((project) => project.id === id);
+      if (!updated) throw new Error(`Project not found after delete: ${id}`);
+      return updated as Project;
+    },
+    addSection: async ({ projectId, title, props }) => {
+      const state = core.useTaskStore.getState();
+      await state.fetchData();
+      const created = await state.addSection(projectId, title, props);
+      if (!created) throw new Error('Failed to create section.');
+      await core.flushPendingSave();
+      const saved = core.useTaskStore.getState()._allSections.find((section) => section.id === created.id);
+      if (!saved) throw new Error(`Section not found after create: ${created.id}`);
+      return saved as Section;
+    },
+    updateSection: async ({ id, updates }) => {
+      const state = core.useTaskStore.getState();
+      await state.fetchData();
+      ensureActionSucceeded('update section', await state.updateSection(id, updates));
+      await core.flushPendingSave();
+      const updated = core.useTaskStore.getState()._allSections.find((section) => section.id === id);
+      if (!updated) throw new Error(`Section not found after update: ${id}`);
+      return updated as Section;
+    },
+    deleteSection: async (id) => {
+      const state = core.useTaskStore.getState();
+      await state.fetchData();
+      ensureActionSucceeded('delete section', await state.deleteSection(id));
+      await core.flushPendingSave();
+      const updated = core.useTaskStore.getState()._allSections.find((section) => section.id === id);
+      if (!updated) throw new Error(`Section not found after delete: ${id}`);
+      return updated as Section;
+    },
+    addArea: async ({ name, props }) => {
         const state = core.useTaskStore.getState();
         await state.fetchData();
         const created = await state.addArea(name, props);
@@ -270,8 +308,55 @@ const ensureCoreReady = async (options: DbOptions) => {
         if (!updated) throw new Error(`Area not found after delete: ${id}`);
         return updated as Area;
       },
+      addPerson: async ({ name, props }) => {
+        const state = core.useTaskStore.getState();
+        await state.fetchData();
+        const created = await state.addPerson(name, props);
+        if (!created) throw new Error('Failed to create person.');
+        await core.flushPendingSave();
+        const saved = core.useTaskStore.getState()._allPeople.find((person) => person.id === created.id);
+        if (!saved) throw new Error(`Person not found after create: ${created.id}`);
+        return saved as Person;
+      },
+      updatePerson: async ({ id, updates }) => {
+        const state = core.useTaskStore.getState();
+        await state.fetchData();
+        ensureActionSucceeded('update person', await state.updatePerson(id, updates));
+        await core.flushPendingSave();
+        const updated = core.useTaskStore.getState()._allPeople.find((person) => person.id === id);
+        if (!updated) throw new Error(`Person not found after update: ${id}`);
+        return updated as Person;
+      },
+      renamePerson: async ({ id, name, updateTasks }) => {
+        const state = core.useTaskStore.getState();
+        await state.fetchData();
+        ensureActionSucceeded('rename person', await state.renamePerson(id, name, { updateTasks }));
+        await core.flushPendingSave();
+        const updated = core.useTaskStore.getState()._allPeople.find((person) => person.id === id);
+        if (!updated) throw new Error(`Person not found after rename: ${id}`);
+        return updated as Person;
+      },
+      deletePerson: async (id) => {
+        const state = core.useTaskStore.getState();
+        await state.fetchData();
+        ensureActionSucceeded('delete person', await state.deletePerson(id));
+        await core.flushPendingSave();
+        const updated = core.useTaskStore.getState()._allPeople.find((person) => person.id === id);
+        if (!updated) throw new Error(`Person not found after delete: ${id}`);
+        return updated as Person;
+      },
     };
-  })();
+      closeClient = null;
+    } finally {
+      closeClient?.();
+    }
+  })().catch((error) => {
+    if (coreDbPath === resolvedPath && coreReadonly === Boolean(options.readonly)) {
+      coreReady = null;
+      coreService = null;
+    }
+    throw error;
+  });
 
   return coreReady;
 };
@@ -286,5 +371,8 @@ export const getCoreService = async (options: DbOptions): Promise<CoreService> =
 
 export const runCoreService = async <T>(options: DbOptions, fn: (service: CoreService) => Promise<T>): Promise<T> => {
   const service = await getCoreService(options);
-  return runSerialized(() => fn(service));
+  if (!coreQueue) {
+    throw new Error('Core service queue failed to initialize.');
+  }
+  return coreQueue.run(() => fn(service));
 };

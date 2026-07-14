@@ -1,25 +1,33 @@
-import { Calendar as CalendarIcon, Tag, Trash2, ArrowRight, Repeat, Check, Clock, Timer, Paperclip, RotateCcw, Copy, MapPin, Hourglass, BookOpen, PauseCircle, Star, Zap } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import type { Area, Attachment, Project, Task, TaskStatus, RecurrenceRule, RecurrenceStrategy, Language } from '@mindwtr/core';
-import { DEFAULT_AREA_COLOR, getChecklistProgress, getTaskAgeLabel, getTaskStaleness, getTaskUrgency, hasTimeComponent, safeFormatDate, resolveTaskTextDirection } from '@mindwtr/core';
+import { AlertTriangle, Calendar as CalendarIcon, Tag, Trash2, ArrowRight, Repeat, Check, Clock, Timer, Link2, Paperclip, RotateCcw, Copy, MapPin, History, Hourglass, Play, Zap, MoreHorizontal } from 'lucide-react';
+import type { Area, Attachment, Project, RangeSelectionOptions, Task, TaskStatus, RecurrenceRule, RecurrenceStrategy, Language } from '@mindwtr/core';
+import { DEFAULT_AREA_COLOR, formatRecurrenceLabel, formatTimeEstimateLabel, getChecklistProgress, getInlineMarkdownPreview, getRecurringTaskPreviewDate, getTaskAgeLabel, getTaskDateCoherenceIssues, getTaskStaleness, getTaskUrgency, hasTimeComponent, safeFormatDate, resolveTaskTextDirection, tFallback } from '@mindwtr/core';
 import { cn } from '../../lib/utils';
+import { useBareFileReferenceCheck } from '../../lib/attachment-reference';
 import { getAttachmentDisplayTitle } from '../../lib/attachment-utils';
 import { getContextColor } from '../../lib/context-color';
 import { MetadataBadge } from '../ui/MetadataBadge';
 import { AttachmentProgressIndicator } from '../AttachmentProgressIndicator';
+import { RichMarkdown } from '../RichMarkdown';
+import { InlineMarkdown } from '../Markdown';
 import type { KeyboardEvent, MouseEvent, ReactNode } from 'react';
-import { useEffect, useRef } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { isImageAttachment } from './task-item-attachment-utils';
+import { AttachmentImage } from './AttachmentImage';
+import { FocusStarIcon } from '../FocusStarIcon';
 
 interface TaskItemDisplayActions {
-    onToggleSelect?: () => void;
+    onToggleSelect?: (options?: RangeSelectionOptions) => void;
     onToggleView: () => void;
     onEdit: () => void;
+    onRenameTitle?: (title: string) => void;
     onDelete: () => void;
     onDuplicate: () => void;
     onStatusChange: (status: TaskStatus) => void;
-    onMoveToWaitingWithPrompt?: () => void;
+    onRequestBackdatedComplete?: () => void;
+    onEditCompletedAt?: () => void;
+    onOpenQuickActions?: (event: MouseEvent<HTMLButtonElement>) => void;
     onOpenProject?: (projectId: string) => void;
+    onOpenContextToken?: (token: string) => void;
     openAttachment: (attachment: Attachment) => void;
     onToggleChecklistItem?: (index: number) => void;
     focusToggle?: {
@@ -29,6 +37,10 @@ interface TaskItemDisplayActions {
         title: string;
         ariaLabel: string;
         alwaysVisible?: boolean;
+    };
+    pomodoroQuickStart?: {
+        onStart: () => void;
+        sessionCount: number;
     };
 }
 
@@ -40,22 +52,28 @@ interface TaskItemDisplayProps {
     projectColor?: string;
     selectionMode: boolean;
     isViewOpen: boolean;
+    quickActionsOpen?: boolean;
     actions: TaskItemDisplayActions;
     visibleAttachments: Attachment[];
     recurrenceRule: RecurrenceRule | '';
     recurrenceStrategy: RecurrenceStrategy;
     prioritiesEnabled: boolean;
     timeEstimatesEnabled: boolean;
+    timeSpentEnabled?: boolean;
     isStagnant: boolean;
     showQuickDone: boolean;
     showStatusSelect?: boolean;
     showProjectBadgeInActions?: boolean;
+    showProjectBadgeInMetadata?: boolean;
     readOnly: boolean;
     compactMetaEnabled?: boolean;
     dense?: boolean;
     actionsOverlay?: boolean;
     dragHandle?: ReactNode;
+    showTaskAge?: boolean;
     showHoverHint?: boolean;
+    projectDeadlineLabel?: string;
+    renameRequestToken?: number;
     t: (key: string) => string;
 }
 
@@ -69,15 +87,16 @@ const getUrgencyColor = (task: Task) => {
     }
 };
 
-const formatTimeEstimate = (estimate: string) => {
-    const value = String(estimate);
-    if (value.endsWith('min')) return value.replace('min', 'm');
-    if (value.endsWith('hr+')) return value.replace('hr+', 'h+');
-    if (value.endsWith('hr')) return value.replace('hr', 'h');
-    return value;
+const formatTimeEstimate = formatTimeEstimateLabel;
+
+const formatTimeSpent = (minutes: number) => {
+    const hrs = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    if (hrs <= 0) return `${mins}m`;
+    return mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`;
 };
 
-export function TaskItemDisplay({
+export const TaskItemDisplay = memo(function TaskItemDisplay({
     task,
     language,
     project,
@@ -85,50 +104,90 @@ export function TaskItemDisplay({
     projectColor,
     selectionMode,
     isViewOpen,
+    quickActionsOpen = false,
     actions,
     visibleAttachments,
-    recurrenceRule,
-    recurrenceStrategy,
     prioritiesEnabled,
     timeEstimatesEnabled,
+    timeSpentEnabled = false,
     isStagnant,
     showQuickDone,
     showStatusSelect = true,
     showProjectBadgeInActions = true,
+    showProjectBadgeInMetadata = true,
     readOnly,
     compactMetaEnabled = true,
     dense = false,
     actionsOverlay = false,
     dragHandle,
+    showTaskAge = false,
     showHoverHint = true,
+    projectDeadlineLabel,
+    renameRequestToken = 0,
     t,
 }: TaskItemDisplayProps) {
     const {
         onToggleSelect,
         onToggleView,
         onEdit,
+        onRenameTitle,
         onDelete,
         onDuplicate,
         onStatusChange,
-        onMoveToWaitingWithPrompt,
+        onRequestBackdatedComplete,
+        onEditCompletedAt,
+        onOpenQuickActions,
         onOpenProject,
+        onOpenContextToken,
         openAttachment,
         onToggleChecklistItem,
         focusToggle,
+        pomodoroQuickStart,
     } = actions;
-    const checklistProgress = getChecklistProgress(task);
+    const pomodoroQuickStartTitle = pomodoroQuickStart
+        ? tFallback(t, 'pomodoro.startForTask', 'Start focus session')
+            + (pomodoroQuickStart.sessionCount > 0
+                ? ` · ${tFallback(t, 'pomodoro.sessionsDone', 'Focus sessions completed')}: ${pomodoroQuickStart.sessionCount}`
+                : '')
+        : '';
+    const isReference = task.status === 'reference';
+    const checklistProgress = isReference ? null : getChecklistProgress(task);
+    const recurrenceLabel = formatRecurrenceLabel({ recurrence: task.recurrence, t });
+    const projectedRecurrenceDateLabel = recurrenceLabel
+        ? safeFormatDate(getRecurringTaskPreviewDate(task), 'PP')
+        : '';
+    const recurrencePreviewLabel = recurrenceLabel && projectedRecurrenceDateLabel
+        ? `${recurrenceLabel} · ${tFallback(t, 'recurrence.nextCalendarPreview', 'Next calendar preview')}: ${projectedRecurrenceDateLabel}`
+        : recurrenceLabel;
     const ageLabel = getTaskAgeLabel(task.createdAt, language);
+    const isBareFileReference = useBareFileReferenceCheck();
     const showCompactMeta = compactMetaEnabled && !isViewOpen;
-    const showAgeBadge = task.status !== 'done' && Boolean(ageLabel);
+    const descriptionPreview = useMemo(
+        () => getInlineMarkdownPreview(task.description ?? ''),
+        [task.description],
+    );
+    const showAgeBadge = showTaskAge && task.status !== 'done' && Boolean(ageLabel);
+    const completionTimestamp = task.status === 'done' || task.status === 'archived'
+        ? task.completedAt || task.updatedAt
+        : undefined;
+    const completionLabel = completionTimestamp
+        ? safeFormatDate(completionTimestamp, 'Pp', completionTimestamp)
+        : '';
+    const dateIssueLabel = getTaskDateCoherenceIssues(task).some((issue) => issue.code === 'start_after_due')
+        ? tFallback(t, 'task.dateIssue.startAfterDue', 'Starts after due date')
+        : '';
     const hasMetadata = Boolean(
-        project
+        (showProjectBadgeInMetadata && project)
         || area
+        || projectDeadlineLabel
+        || completionLabel
         || task.startTime
         || task.dueDate
+        || dateIssueLabel
         || task.location
-        || recurrenceRule
+        || recurrencePreviewLabel
         || (prioritiesEnabled && task.priority)
-        || (task.status !== 'reference' && task.energyLevel)
+        || (!isReference && task.energyLevel)
         || task.assignedTo
         || (task.contexts?.length ?? 0) > 0
         || task.tags.length > 0
@@ -139,17 +198,16 @@ export function TaskItemDisplay({
     const resolvedDirection = resolveTaskTextDirection(task);
     const isRtl = resolvedDirection === 'rtl';
     const hoverHintText = showHoverHint
-        ? (() => {
-            const hint = t('task.hoverHint');
-            return hint === 'task.hoverHint'
-                ? 'Click to toggle details / Double-click to edit'
-                : hint;
-        })()
+        ? tFallback(t, 'task.hoverHint', 'Click to toggle details / Double-click to edit')
         : '';
-    const moveToWaitingWithDueLabel = (() => {
-        const label = t('task.moveToWaitingWithDue');
-        return label === 'task.moveToWaitingWithDue' ? 'Move to Waiting and set due date' : label;
-    })();
+    const moreOptionsLabel = tFallback(t, 'taskEdit.moreOptions', 'More options');
+    const openContextFilterLabel = tFallback(t, 'contexts.filter', 'Filter tasks');
+    const imageAttachments = visibleAttachments.filter((attachment) => {
+        if (!isImageAttachment(attachment)) return false;
+        if (!attachment.uri) return false;
+        return attachment.localStatus !== 'missing';
+    });
+    const otherAttachments = visibleAttachments.filter((attachment) => !imageAttachments.includes(attachment));
     const clickTimerRef = useRef<number | null>(null);
     const clearClickTimer = () => {
         if (clickTimerRef.current !== null) {
@@ -162,9 +220,26 @@ export function TaskItemDisplay({
             clearClickTimer();
         };
     }, []);
+    const [renameDraft, setRenameDraft] = useState<string | null>(null);
+    const canInlineRename = !readOnly && !selectionMode && Boolean(onRenameTitle);
+    // Rename is requested from the quick-actions menu (TaskItem bumps the token);
+    // double-click stays reserved for opening the full editor.
+    const lastRenameTokenRef = useRef(renameRequestToken);
+    useEffect(() => {
+        if (renameRequestToken === lastRenameTokenRef.current) return;
+        lastRenameTokenRef.current = renameRequestToken;
+        if (canInlineRename) setRenameDraft(task.title);
+    }, [renameRequestToken, canInlineRename, task.title]);
+    const commitInlineRename = () => {
+        if (renameDraft === null) return;
+        const next = renameDraft.replace(/\s+/g, ' ').trim();
+        setRenameDraft(null);
+        if (next && next !== task.title) onRenameTitle?.(next);
+    };
+    const cancelInlineRename = () => setRenameDraft(null);
     const handleTitleClick = (event: MouseEvent<HTMLButtonElement>) => {
         if (selectionMode) {
-            onToggleSelect?.();
+            onToggleSelect?.({ range: event.shiftKey });
             return;
         }
         // Keyboard activation should not be delayed.
@@ -173,6 +248,7 @@ export function TaskItemDisplay({
             return;
         }
         if (!readOnly && event.detail >= 2) {
+            event.stopPropagation();
             clearClickTimer();
             onEdit();
             return;
@@ -183,8 +259,9 @@ export function TaskItemDisplay({
             clickTimerRef.current = null;
         }, 180);
     };
-    const handleTitleDoubleClick = () => {
+    const handleTitleDoubleClick = (event: MouseEvent<HTMLButtonElement>) => {
         if (selectionMode || readOnly) return;
+        event.stopPropagation();
         clearClickTimer();
         onEdit();
     };
@@ -197,6 +274,17 @@ export function TaskItemDisplay({
             event.preventDefault();
             event.stopPropagation();
             onOpenProject?.(projectId);
+        }
+    };
+    const handleTokenClick = (event: MouseEvent<HTMLSpanElement>, token: string) => {
+        event.stopPropagation();
+        onOpenContextToken?.(token);
+    };
+    const handleTokenKeyDown = (event: KeyboardEvent<HTMLSpanElement>, token: string) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            event.stopPropagation();
+            onOpenContextToken?.(token);
         }
     };
     const renderProjectBadge = () => {
@@ -227,6 +315,54 @@ export function TaskItemDisplay({
             </span>
         );
     };
+    const renderContextBadge = (ctx: string) => {
+        const badge = (
+            <MetadataBadge
+                key={ctx}
+                variant="context"
+                label={ctx}
+                dotColor={getContextColor(ctx)}
+            />
+        );
+        if (!onOpenContextToken) return badge;
+        return (
+            <span
+                key={ctx}
+                role="button"
+                tabIndex={0}
+                onClick={(event) => handleTokenClick(event, ctx)}
+                onKeyDown={(event) => handleTokenKeyDown(event, ctx)}
+                className="inline-flex metadata-badge--interactive"
+                aria-label={`${openContextFilterLabel}: ${ctx}`}
+            >
+                {badge}
+            </span>
+        );
+    };
+    const renderTagBadge = (tag: string) => {
+        const badge = (
+            <MetadataBadge
+                key={tag}
+                variant="tag"
+                icon={Tag}
+                label={tag}
+            />
+        );
+        if (!onOpenContextToken) return badge;
+        return (
+            <span
+                key={tag}
+                role="button"
+                tabIndex={0}
+                onClick={(event) => handleTokenClick(event, tag)}
+                onKeyDown={(event) => handleTokenKeyDown(event, tag)}
+                className="inline-flex metadata-badge--interactive"
+                aria-label={`${openContextFilterLabel}: ${tag}`}
+            >
+                {badge}
+            </span>
+        );
+    };
 
     const showQuickDoneButton = showQuickDone
         && !selectionMode
@@ -234,9 +370,49 @@ export function TaskItemDisplay({
         && task.status !== 'done'
         && task.status !== 'archived'
         && task.status !== 'reference';
+    const renderCompletionMetadataBadge = () => {
+        if (!completionLabel) return null;
+        const badge = (
+            <MetadataBadge
+                variant="info"
+                icon={Check}
+                label={`${tFallback(t, 'list.done', 'Completed')}: ${completionLabel}`}
+            />
+        );
+        // Done/archived rows are readOnly by design, but correcting the completion
+        // timestamp is exactly for those rows — only selection mode disables it.
+        if (!onEditCompletedAt || selectionMode) return badge;
+        const editCompletedAtLabel = tFallback(t, 'task.editCompletedAt', 'Edit completion time');
+        return (
+            <button
+                type="button"
+                onClick={(event) => {
+                    event.stopPropagation();
+                    onEditCompletedAt();
+                }}
+                title={editCompletedAtLabel}
+                aria-label={editCompletedAtLabel}
+                className="rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 hover:opacity-80 transition-opacity"
+            >
+                {badge}
+            </button>
+        );
+    };
+    const renderProjectDeadlineMetadataBadge = () => {
+        if (!projectDeadlineLabel) return null;
+        return (
+            <MetadataBadge
+                variant="info"
+                icon={CalendarIcon}
+                label={projectDeadlineLabel}
+                className="text-amber-600 dark:text-amber-300"
+            />
+        );
+    };
     const renderMetadataRow = (className?: string) => (
         <div className={cn("flex flex-wrap items-center text-xs", className)}>
-            {renderProjectBadge()}
+            {showProjectBadgeInMetadata && renderProjectBadge()}
+            {renderProjectDeadlineMetadataBadge()}
             {!project && area && (
                 <MetadataBadge
                     variant="project"
@@ -244,6 +420,7 @@ export function TaskItemDisplay({
                     dotColor={area.color || DEFAULT_AREA_COLOR}
                 />
             )}
+            {renderCompletionMetadataBadge()}
             {task.startTime && (
                 <MetadataBadge
                     variant="info"
@@ -268,6 +445,14 @@ export function TaskItemDisplay({
                     )}
                 </div>
             )}
+            {dateIssueLabel && (
+                <MetadataBadge
+                    variant="info"
+                    icon={AlertTriangle}
+                    label={dateIssueLabel}
+                    className="text-amber-500 dark:text-amber-300"
+                />
+            )}
             {task.location && (
                 <MetadataBadge
                     variant="info"
@@ -275,11 +460,11 @@ export function TaskItemDisplay({
                     label={task.location}
                 />
             )}
-            {recurrenceRule && (
+            {recurrencePreviewLabel && (
                 <MetadataBadge
                     variant="info"
                     icon={Repeat}
-                    label={`${t(`recurrence.${recurrenceRule}`)}${recurrenceStrategy === 'fluid' ? ` · ${t('recurrence.afterCompletionShort')}` : ''}`}
+                    label={recurrencePreviewLabel}
                 />
             )}
             {prioritiesEnabled && task.priority && (
@@ -302,17 +487,13 @@ export function TaskItemDisplay({
                 />
             )}
             {task.contexts?.length > 0 && (
-                <div className="flex items-center gap-2">
-                    {task.contexts.map((ctx) => (
-                        <MetadataBadge key={ctx} variant="context" label={ctx} dotColor={getContextColor(ctx)} />
-                    ))}
+                <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">
+                    {task.contexts.map((ctx) => renderContextBadge(ctx))}
                 </div>
             )}
             {task.tags.length > 0 && (
-                <div className="flex items-center gap-2">
-                    {task.tags.map((tag) => (
-                        <MetadataBadge key={tag} variant="tag" icon={Tag} label={tag} />
-                    ))}
+                <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">
+                    {task.tags.map((tag) => renderTagBadge(tag))}
                 </div>
             )}
             {checklistProgress && (
@@ -351,14 +532,58 @@ export function TaskItemDisplay({
                     label={formatTimeEstimate(task.timeEstimate)}
                 />
             )}
+            {timeSpentEnabled && Boolean(task.timeSpentMinutes) && (
+                <MetadataBadge
+                    variant="estimate"
+                    icon={History}
+                    label={formatTimeSpent(task.timeSpentMinutes as number)}
+                    ariaLabel={`${t('taskEdit.timeSpentLabel')}: ${formatTimeSpent(task.timeSpentMinutes as number)}`}
+                />
+            )}
         </div>
     );
     const overlayDragHandle = actionsOverlay && !!dragHandle;
     const overlayQuickDone = actionsOverlay && showQuickDoneButton;
     const inlineLeftControls = !actionsOverlay && (showQuickDoneButton || dragHandle);
+    const showActionTags = !actionsOverlay && !isViewOpen && task.tags.length > 0;
+
+    // Inbox items are unprocessed captures, not a done/not-done checklist, so the
+    // quick-complete check stays hidden at rest and only reveals on row hover (for the
+    // 2-minute rule). Actionable lists (next, projects, focus) show it at rest.
+    const isInboxItem = task.status === 'inbox';
+    // Waiting/Someday tasks promote to Next instead of completing — the natural
+    // transition when an item unblocks, matching the mobile swipe action.
+    const quickActionIsPromote = task.status === 'waiting' || task.status === 'someday';
+    const canBackdateComplete = !quickActionIsPromote && Boolean(onRequestBackdatedComplete);
+    const quickDoneButton = (
+        <button
+            type="button"
+            onClick={(event) => {
+                event.stopPropagation();
+                onStatusChange(quickActionIsPromote ? 'next' : 'done');
+            }}
+            onContextMenu={canBackdateComplete ? (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onRequestBackdatedComplete?.();
+            } : undefined}
+            title={canBackdateComplete
+                ? tFallback(t, 'task.completeBackdateHint', 'Right-click to complete with a different time')
+                : undefined}
+            aria-label={quickActionIsPromote ? t('status.next') : t('status.done')}
+            className={cn(
+                quickActionIsPromote
+                    ? "text-sky-400 hover:text-sky-300 p-1 rounded hover:bg-sky-500/20"
+                    : "text-emerald-400 hover:text-emerald-300 p-1 rounded hover:bg-emerald-500/20",
+                isInboxItem && "opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity",
+            )}
+        >
+            {quickActionIsPromote ? <ArrowRight className="w-4 h-4" /> : <Check className="w-4 h-4" />}
+        </button>
+    );
 
     return (
-        <div className={cn("flex-1 min-w-0 flex items-start gap-3", actionsOverlay && "relative")}>
+        <div className={cn("task-item-display flex-1 min-w-0 flex items-start gap-3", actionsOverlay && "relative")}>
             {overlayDragHandle && (
                 <div
                     className="absolute left-0 top-2 flex items-center -translate-x-2 z-10"
@@ -372,20 +597,10 @@ export function TaskItemDisplay({
                     className="absolute left-4 top-2 flex items-center z-10"
                     onPointerDown={(event) => event.stopPropagation()}
                 >
-                    <button
-                        type="button"
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            onStatusChange('done');
-                        }}
-                        aria-label={t('status.done')}
-                        className="text-emerald-400 hover:text-emerald-300 p-1 rounded hover:bg-emerald-500/20"
-                    >
-                        <Check className="w-4 h-4" />
-                    </button>
+                    {quickDoneButton}
                 </div>
             )}
-            <div className={cn("flex min-w-0 flex-1 items-start gap-2")}>
+            <div className={cn("task-item-display__main flex min-w-0 flex-1 items-start gap-2")}>
                 {inlineLeftControls && (
                     <div
                         className={cn(
@@ -394,19 +609,7 @@ export function TaskItemDisplay({
                         )}
                     >
                         {dragHandle}
-                        {showQuickDoneButton && (
-                            <button
-                                type="button"
-                                onClick={(event) => {
-                                    event.stopPropagation();
-                                    onStatusChange('done');
-                                }}
-                                aria-label={t('status.done')}
-                                className="text-emerald-400 hover:text-emerald-300 p-1 rounded hover:bg-emerald-500/20"
-                            >
-                                <Check className="w-4 h-4" />
-                            </button>
-                        )}
+                        {showQuickDoneButton && quickDoneButton}
                     </div>
                 )}
                 <div
@@ -415,16 +618,6 @@ export function TaskItemDisplay({
                         selectionMode ? "cursor-pointer hover:bg-muted/40" : "cursor-default",
                     )}
                 >
-                    {!selectionMode && !readOnly && showHoverHint && (
-                        <span
-                            className={cn(
-                                "pointer-events-none absolute right-2 top-1 text-[10px] text-muted-foreground/70 opacity-0 transition-opacity group-hover/content:opacity-100",
-                                isRtl && "left-2 right-auto"
-                            )}
-                        >
-                            {hoverHintText}
-                        </span>
-                    )}
                     <button
                         type="button"
                         data-task-edit-trigger
@@ -433,8 +626,38 @@ export function TaskItemDisplay({
                         aria-label={t('common.edit')}
                         tabIndex={-1}
                     />
+                    {renameDraft !== null ? (
+                        <input
+                            type="text"
+                            value={renameDraft}
+                            autoFocus
+                            onFocus={(event) => event.currentTarget.select()}
+                            onChange={(event) => setRenameDraft(event.target.value)}
+                            onClick={(event) => event.stopPropagation()}
+                            onDoubleClick={(event) => event.stopPropagation()}
+                            onKeyDown={(event) => {
+                                if (event.key === 'Enter') {
+                                    event.preventDefault();
+                                    commitInlineRename();
+                                } else if (event.key === 'Escape') {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    cancelInlineRename();
+                                }
+                            }}
+                            onBlur={commitInlineRename}
+                            aria-label={tFallback(t, 'task.renameTitle', 'Rename task')}
+                            className={cn(
+                                "w-full rounded border border-border bg-background px-0.5 py-0.5 font-semibold text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40",
+                                dense ? "text-sm" : "text-base",
+                                isRtl && "text-right"
+                            )}
+                            dir={resolvedDirection}
+                        />
+                    ) : (
                     <button
                         type="button"
+                        data-task-view-toggle
                         onClick={handleTitleClick}
                         onDoubleClick={handleTitleDoubleClick}
                         className={cn(
@@ -444,11 +667,12 @@ export function TaskItemDisplay({
                         )}
                         aria-expanded={isViewOpen}
                         aria-label={t('task.toggleDetails') || 'Toggle task details'}
+                        title={!selectionMode && !readOnly && showHoverHint ? hoverHintText : undefined}
                         dir={resolvedDirection}
                     >
                         <div
                             className={cn(
-                                "font-semibold truncate text-foreground group-hover/content:text-primary transition-colors",
+                                "task-item-display__title font-semibold whitespace-normal break-words text-foreground group-hover/content:text-primary transition-colors",
                                 dense ? "text-sm" : "text-base",
                                 task.status === 'done' && "line-through text-muted-foreground",
                                 actionsOverlay && "pr-20",
@@ -458,91 +682,99 @@ export function TaskItemDisplay({
                             {task.title}
                         </div>
                     </button>
+                    )}
+                    {showCompactMeta && descriptionPreview && (
+                        <div
+                            className={cn(
+                                "task-item-display__description-preview mt-0.5 truncate text-xs font-normal text-muted-foreground",
+                                (overlayDragHandle || overlayQuickDone) && "pl-12",
+                                isRtl && "text-right"
+                            )}
+                            dir={resolvedDirection}
+                        >
+                            <InlineMarkdown markdown={descriptionPreview} interactiveLinks={false} />
+                        </div>
+                    )}
                     {showCompactMeta && hasMetadata && renderMetadataRow(cn(
                         "gap-2 text-muted-foreground",
                         dense ? "mt-0.5" : "mt-1",
                         (overlayDragHandle || overlayQuickDone) && "pl-12"
                     ))}
+                    {!showCompactMeta && !isViewOpen && (completionLabel || projectDeadlineLabel) && (
+                        <div className={cn(
+                            "flex flex-wrap items-center gap-2 text-xs text-muted-foreground",
+                            dense ? "mt-0.5" : "mt-1",
+                            (overlayDragHandle || overlayQuickDone) && "pl-12"
+                        )}>
+                            {renderCompletionMetadataBadge()}
+                            {renderProjectDeadlineMetadataBadge()}
+                        </div>
+                    )}
 
                     {isViewOpen && (
                         <div onClick={(e) => e.stopPropagation()}>
                             {task.description && (
                                 <div
                                     className={cn(
-                                        "font-normal text-muted-foreground mt-1 w-full break-words",
+                                        "font-normal text-muted-foreground mt-1 w-full break-words select-text cursor-text",
                                         dense ? "text-xs" : "text-sm",
                                         isRtl && "text-right"
                                     )}
                                     dir={resolvedDirection}
+                                    onMouseDown={(event) => event.stopPropagation()}
                                 >
-                                    <ReactMarkdown
-                                        remarkPlugins={[remarkGfm]}
-                                        disallowedElements={['img']}
-                                        components={{
-                                            a: ({ className, ...props }: any) => (
-                                                <a
-                                                    className={cn("text-primary underline hover:text-primary/80", className)}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    {...props}
-                                                />
-                                            ),
-                                            ul: ({ className, ...props }: any) => (
-                                                <ul className={cn("list-disc pl-4 py-1 space-y-0.5", className)} {...props} />
-                                            ),
-                                            ol: ({ className, ...props }: any) => (
-                                                <ol className={cn("list-decimal pl-4 py-1 space-y-0.5", className)} {...props} />
-                                            ),
-                                            li: ({ className, ...props }: any) => (
-                                                <li className={cn("pl-1", className)} {...props} />
-                                            ),
-                                            p: ({ className, children, ...props }: any) => (
-                                                <p className={cn("mb-1 last:mb-0 leading-relaxed", className)} {...props}>
-                                                    {children}
-                                                </p>
-                                            ),
-                                            code: ({ className, ...props }: any) => (
-                                                <code className={cn("bg-muted px-1 py-0.5 rounded text-[0.9em] font-mono", className)} {...props} />
-                                            ),
-                                            pre: ({ className, ...props }: any) => (
-                                                <pre className={cn("bg-muted p-2 rounded-md overflow-x-auto my-1", className)} {...props} />
-                                            ),
-                                            blockquote: ({ className, ...props }: any) => (
-                                                <blockquote className={cn("border-l-2 border-primary/50 pl-3 italic my-1 text-muted-foreground/80", className)} {...props} />
-                                            ),
-                                            table: ({ className, ...props }: any) => (
-                                                <div className="overflow-x-auto my-2">
-                                                    <table className={cn("min-w-full divide-y divide-border", className)} {...props} />
-                                                </div>
-                                            ),
-                                            th: ({ className, ...props }: any) => (
-                                                <th className={cn("px-2 py-1 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider bg-muted/50", className)} {...props} />
-                                            ),
-                                            td: ({ className, ...props }: any) => (
-                                                <td className={cn("px-2 py-1 text-sm border-b border-border/50", className)} {...props} />
-                                            ),
-                                            // Handle task lists (GFM)
-                                            input: ({ type, ...props }: any) => {
-                                                if (type === 'checkbox') {
-                                                    return <input type="checkbox" className="mr-2 accent-primary" {...props} />;
-                                                }
-                                                return <input type={type} {...props} />;
-                                            }
-                                        }}
-                                    >
-                                        {task.description}
-                                    </ReactMarkdown>
+                                    <RichMarkdown markdown={task.description} />
                                 </div>
                             )}
                             {visibleAttachments.length > 0 && (
-                                <div className="flex flex-wrap items-center gap-2 mt-2 text-xs text-muted-foreground">
+                                <div className="mt-2 space-y-2 text-xs text-muted-foreground">
                                     <Paperclip className="w-3 h-3" aria-hidden="true" />
                                     <span className="sr-only">{t('attachments.title') || 'Attachments'}</span>
-                                    {visibleAttachments.map((attachment) => {
+                                    {imageAttachments.length > 0 ? (
+                                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+                                            {imageAttachments.map((attachment) => {
+                                                const displayTitle = getAttachmentDisplayTitle(attachment);
+                                                const fullTitle = attachment.kind === 'link' ? attachment.uri : attachment.title;
+                                                const isDownloading = attachment.localStatus === 'downloading';
+                                                return (
+                                                    <button
+                                                        key={attachment.id}
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.preventDefault();
+                                                            e.stopPropagation();
+                                                            openAttachment(attachment);
+                                                        }}
+                                                        className="group rounded-lg border border-border bg-card overflow-hidden text-left hover:border-primary/40 hover:bg-muted/20 transition-colors"
+                                                        title={fullTitle || displayTitle}
+                                                        aria-label={`${t('attachments.open') || 'Open'}: ${displayTitle}`}
+                                                    >
+                                                        <AttachmentImage
+                                                            attachment={attachment}
+                                                            alt={displayTitle}
+                                                            className="block h-28 w-full object-cover bg-muted/30"
+                                                        />
+                                                        <div className="flex items-start justify-between gap-2 px-2 py-1.5">
+                                                            <div className="min-w-0">
+                                                                <div className="truncate text-foreground">{displayTitle}</div>
+                                                                {isDownloading ? (
+                                                                    <div className="text-[11px] text-muted-foreground">{t('common.loading')}</div>
+                                                                ) : null}
+                                                            </div>
+                                                            <AttachmentProgressIndicator attachmentId={attachment.id} />
+                                                        </div>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    ) : null}
+                                    {otherAttachments.map((attachment) => {
                                         const displayTitle = getAttachmentDisplayTitle(attachment);
-                                        const fullTitle = attachment.kind === 'link' ? attachment.uri : attachment.title;
+                                        const isPointer = attachment.kind === 'link' || isBareFileReference(attachment);
+                                        const fullTitle = isPointer ? attachment.uri : attachment.title;
                                         return (
                                             <div key={attachment.id} className="flex items-center gap-2">
+                                                {isPointer && <Link2 className="w-3 h-3 shrink-0" aria-hidden="true" />}
                                                 <button
                                                     type="button"
                                                     onClick={(e) => {
@@ -564,7 +796,7 @@ export function TaskItemDisplay({
                             )}
                             {hasMetadata && renderMetadataRow("gap-3 mt-2")}
 
-                            {(task.checklist || []).length > 0 && (
+                            {!isReference && (task.checklist || []).length > 0 && (
                                 <div
                                     className="mt-3 space-y-1 pl-1"
                                     onPointerDown={(e) => e.stopPropagation()}
@@ -595,7 +827,11 @@ export function TaskItemDisplay({
                                             >
                                                 {item.isCompleted && <Check className="w-2 h-2" />}
                                             </span>
-                                            <span className={cn(item.isCompleted && "line-through")}>{item.title}</span>
+                                            <InlineMarkdown
+                                                markdown={item.title}
+                                                className={cn(item.isCompleted && "line-through")}
+                                                interactiveLinks={false}
+                                            />
                                         </button>
                                     ))}
                                 </div>
@@ -608,12 +844,13 @@ export function TaskItemDisplay({
             {!selectionMode && (
                 <div
                     className={cn(
-                        "relative flex items-center gap-2",
+                        "task-item-display__actions relative z-20 flex shrink-0 items-center gap-2",
                         actionsOverlay && "absolute top-1 right-1 z-10"
                     )}
                     onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
                 >
-                    {!isViewOpen && task.tags.length > 0 && (
+                    {showActionTags && (
                         <div className="flex items-center gap-1 max-w-[240px] overflow-hidden">
                             {task.tags.slice(0, 2).map((tag) => (
                                 <MetadataBadge
@@ -635,6 +872,25 @@ export function TaskItemDisplay({
                             {renderProjectBadge()}
                         </div>
                     )}
+                    {pomodoroQuickStart && (
+                        <button
+                            type="button"
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                pomodoroQuickStart.onStart();
+                            }}
+                            title={pomodoroQuickStartTitle}
+                            aria-label={pomodoroQuickStartTitle}
+                            className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-primary p-1 rounded hover:bg-muted/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 inline-flex items-center gap-0.5"
+                        >
+                            <Play className="w-4 h-4" />
+                            {pomodoroQuickStart.sessionCount > 0 && (
+                                <span className="text-[10px] font-medium tabular-nums">
+                                    {pomodoroQuickStart.sessionCount}
+                                </span>
+                            )}
+                        </button>
+                    )}
                     {focusToggle && (
                         <button
                             type="button"
@@ -655,7 +911,21 @@ export function TaskItemDisplay({
                                         : "text-muted-foreground/30 cursor-not-allowed"
                             )}
                         >
-                            <Star className={cn("w-4 h-4", focusToggle.isFocused && "fill-current")} />
+                            <FocusStarIcon className="w-4 h-4" filled={focusToggle.isFocused} />
+                        </button>
+                    )}
+                    {onOpenQuickActions && (
+                        <button
+                            type="button"
+                            onClick={onOpenQuickActions}
+                            data-task-quick-actions-trigger
+                            aria-haspopup="menu"
+                            aria-expanded={quickActionsOpen}
+                            aria-label={moreOptionsLabel}
+                            title={moreOptionsLabel}
+                            className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                        >
+                            <MoreHorizontal className="w-4 h-4" />
                         </button>
                     )}
                     {readOnly ? (
@@ -665,7 +935,7 @@ export function TaskItemDisplay({
                                 onClick={onDuplicate}
                                 aria-label={t('taskEdit.duplicateTask')}
                                 title={t('taskEdit.duplicateTask')}
-                                className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted/50"
+                                className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
                             >
                                 <Copy className="w-4 h-4" />
                             </button>
@@ -674,48 +944,32 @@ export function TaskItemDisplay({
                                 onClick={() => onStatusChange('next')}
                                 aria-label={t('waiting.moveToNext')}
                                 title={t('waiting.moveToNext')}
-                                className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted/50"
+                                className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
                             >
                                 <RotateCcw className="w-4 h-4" />
                             </button>
                             <button
                                 onClick={onDelete}
                                 aria-label={t('task.aria.delete')}
-                                className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-muted-foreground/70 p-1 rounded hover:bg-muted/50"
+                                className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-muted-foreground/70 p-1 rounded hover:bg-muted/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
                             >
                                 <Trash2 className="w-4 h-4" />
                             </button>
                         </>
                     ) : (
                         <>
-                            {task.status !== 'reference' && (
-                                <button
-                                    type="button"
-                                    onClick={() => onStatusChange('reference')}
-                                    aria-label={t('task.convertToReference')}
-                                    title={t('task.convertToReference')}
-                                    className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted/50"
-                                >
-                                    <BookOpen className="w-4 h-4" />
-                                </button>
-                            )}
-                            {task.status === 'next' && onMoveToWaitingWithPrompt && (
-                                <button
-                                    type="button"
-                                    onClick={onMoveToWaitingWithPrompt}
-                                    aria-label={moveToWaitingWithDueLabel}
-                                    title={moveToWaitingWithDueLabel}
-                                    className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded hover:bg-muted/50"
-                                >
-                                    <PauseCircle className="w-4 h-4" />
-                                </button>
-                            )}
                             {showStatusSelect && (
                                 <select
                                     value={task.status}
                                     aria-label={t('task.aria.status')}
-                                    onChange={(e) => onStatusChange(e.target.value as TaskStatus)}
-                                    className="text-[11px] font-medium px-2.5 py-0.5 rounded-full cursor-pointer appearance-none bg-primary/10 text-primary border-none hover:bg-primary/15 focus:outline-none focus:ring-2 focus:ring-primary/40"
+                                onChange={(e) => {
+                                    const nextStatus = e.target.value as TaskStatus;
+                                    if (nextStatus === 'waiting' && task.status !== 'waiting') {
+                                        e.currentTarget.blur();
+                                    }
+                                    onStatusChange(nextStatus);
+                                }}
+                                    className="text-[11px] font-medium px-2.5 py-0.5 rounded-full cursor-pointer appearance-none bg-primary/10 text-blue-700 border-none hover:bg-primary/15 focus:outline-none focus:ring-2 focus:ring-primary/40 dark:text-primary"
                                 >
                                     <option value="inbox">{t('status.inbox')}</option>
                                     <option value="next">{t('status.next')}</option>
@@ -728,17 +982,10 @@ export function TaskItemDisplay({
                                     <option value="archived">{t('status.archived')}</option>
                                 </select>
                             )}
-                            <button
-                                onClick={onDelete}
-                                aria-label={t('task.aria.delete')}
-                                className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-muted-foreground/70 p-1 rounded hover:bg-muted/50"
-                            >
-                                <Trash2 className="w-4 h-4" />
-                            </button>
                         </>
                     )}
                 </div>
             )}
         </div>
     );
-}
+});

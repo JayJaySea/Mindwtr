@@ -2,7 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, LayoutAnimation, Platform, UIManager } from 'react-native';
 import { useThemeColors } from '@/hooks/use-theme-colors';
 
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+const isFabricEnabled = Boolean((globalThis as { nativeFabricUIManager?: unknown }).nativeFabricUIManager);
+
+if (Platform.OS === 'android' && !isFabricEnabled && UIManager.setLayoutAnimationEnabledExperimental) {
     UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
@@ -37,8 +39,14 @@ export function CollapsibleSection({
 
     return (
         <View style={[styles.container, { borderColor: tc.border }]}>
-            <Pressable style={styles.header} onPress={toggle}>
-                <Text style={[styles.chevron, { color: tc.secondaryText }]}>{expanded ? '▼' : '▶'}</Text>
+            <Pressable
+                style={styles.header}
+                onPress={toggle}
+                accessibilityRole="button"
+                accessibilityLabel={title}
+                accessibilityState={{ expanded }}
+            >
+                <Text style={[styles.chevron, { color: tc.secondaryText }]}>{expanded ? '▾' : '▸'}</Text>
                 <Text style={[styles.title, { color: tc.text }]}>{title}</Text>
                 {badge > 0 && (
                     <View style={[styles.badge, { backgroundColor: tc.tint }]}>

@@ -8,22 +8,35 @@ interface CreateSyncOrchestratorOptions<Arg, Result> {
     onDrained?: () => void;
     onQueuedRunComplete?: (result: Result) => void;
     onQueuedRunError?: (error: unknown) => void;
+    /** Delay before a queued follow-up cycle starts, derived from how long the
+     *  finished cycle took. Slow cycles (large datasets, slow storage) otherwise
+     *  chain back-to-back and starve user interactions between them. */
+    getFollowUpDelayMs?: (lastCycleDurationMs: number) => number;
 }
 
 export interface SyncOrchestrator<Arg, Result> {
     run: (arg: Arg) => Promise<Result>;
     requestFollowUp: (nextArg?: Arg) => void;
+    clearFollowUp: () => void;
     reset: () => void;
     getState: () => { inFlight: boolean; queued: boolean };
 }
 
 export const createSyncOrchestrator = <Arg, Result>(
-    options: CreateSyncOrchestratorOptions<Arg, Result>
+    options: CreateSyncOrchestratorOptions<Arg, Result>,
 ): SyncOrchestrator<Arg, Result> => {
-    const { runCycle, onQueueStateChange, onDrained, onQueuedRunComplete, onQueuedRunError } = options;
+    const { runCycle, onQueueStateChange, onDrained, onQueuedRunComplete, onQueuedRunError, getFollowUpDelayMs } = options;
     let inFlight: Promise<Result> | null = null;
     let queued = false;
     let queuedArg: Arg | undefined;
+    let followUpTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const cancelFollowUpTimer = () => {
+        if (followUpTimer) {
+            clearTimeout(followUpTimer);
+            followUpTimer = null;
+        }
+    };
 
     const setQueued = (next: boolean) => {
         if (queued === next) return;
@@ -36,20 +49,41 @@ export const createSyncOrchestrator = <Arg, Result>(
         setQueued(true);
     };
 
+    const clearFollowUp = () => {
+        cancelFollowUpTimer();
+        queuedArg = undefined;
+        setQueued(false);
+    };
+
     const run = (arg: Arg): Promise<Result> => {
         if (inFlight) {
             requestFollowUp(arg);
             return inFlight;
         }
 
+        cancelFollowUpTimer();
         setQueued(false);
         const cycleArg = queuedArg ?? arg;
         queuedArg = undefined;
+        const cycleStartedAt = Date.now();
 
-        const current = runCycle(cycleArg, {
-            requestFollowUp: (nextArg?: Arg) => requestFollowUp(nextArg ?? cycleArg),
+        let resolveDeferred!: (value: Result) => void;
+        let rejectDeferred!: (error: unknown) => void;
+        const current = new Promise<Result>((resolve, reject) => {
+            resolveDeferred = resolve;
+            rejectDeferred = reject;
         });
         inFlight = current;
+        try {
+            void runCycle(cycleArg, {
+                requestFollowUp: (nextArg?: Arg) => requestFollowUp(nextArg ?? cycleArg),
+            }).then(
+                (result) => resolveDeferred(result),
+                (error) => rejectDeferred(error),
+            );
+        } catch (error) {
+            rejectDeferred(error);
+        }
 
         current.finally(() => {
             if (inFlight !== current) return;
@@ -60,16 +94,28 @@ export const createSyncOrchestrator = <Arg, Result>(
                 return;
             }
 
-            const nextArg = queuedArg ?? cycleArg;
-            setQueued(false);
-            queuedArg = undefined;
-            void run(nextArg)
-                .then((result) => {
-                    onQueuedRunComplete?.(result);
-                })
-                .catch((error) => {
-                    onQueuedRunError?.(error);
-                });
+            const startQueuedRun = () => {
+                followUpTimer = null;
+                // A direct run() during the delay window already consumed the queue.
+                if (inFlight || !queued) return;
+                const nextArg = queuedArg ?? cycleArg;
+                setQueued(false);
+                queuedArg = undefined;
+                void run(nextArg)
+                    .then((result) => {
+                        onQueuedRunComplete?.(result);
+                    })
+                    .catch((error) => {
+                        onQueuedRunError?.(error);
+                    });
+            };
+
+            const delayMs = getFollowUpDelayMs?.(Date.now() - cycleStartedAt) ?? 0;
+            if (delayMs > 0) {
+                followUpTimer = setTimeout(startQueuedRun, delayMs);
+                return;
+            }
+            startQueuedRun();
         });
 
         return current;
@@ -78,7 +124,9 @@ export const createSyncOrchestrator = <Arg, Result>(
     return {
         run,
         requestFollowUp,
+        clearFollowUp,
         reset: () => {
+            cancelFollowUpTimer();
             inFlight = null;
             queuedArg = undefined;
             setQueued(false);

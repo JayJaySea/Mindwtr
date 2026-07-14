@@ -46,6 +46,7 @@ const createManualScheduler = (startMs = 0) => {
         setTimer,
         clearTimer,
         advanceBy,
+        getTimerCount: () => timers.size,
     };
 };
 
@@ -81,6 +82,7 @@ describe('createDesktopAutoSyncController', () => {
             reportError: vi.fn(),
             isRuntimeActive: () => true,
             minIntervalMs: 0,
+            periodicSyncIntervalMs: null,
         });
 
         const first = controller.requestSync();
@@ -105,6 +107,7 @@ describe('createDesktopAutoSyncController', () => {
             now: scheduler.now,
             setTimer: scheduler.setTimer,
             clearTimer: scheduler.clearTimer,
+            periodicSyncIntervalMs: null,
         });
 
         await controller.requestSync();
@@ -133,6 +136,7 @@ describe('createDesktopAutoSyncController', () => {
             isRuntimeActive: () => true,
             setTimer: scheduler.setTimer,
             clearTimer: scheduler.clearTimer,
+            periodicSyncIntervalMs: null,
         });
 
         controller.handleDataChange();
@@ -146,6 +150,100 @@ describe('createDesktopAutoSyncController', () => {
         await scheduler.advanceBy(1);
         await waitForAssertion(() => {
             expect(performSync).toHaveBeenCalledTimes(1);
+        });
+    });
+
+    it('backs off automatic retries after a failed sync without blocking manual sync', async () => {
+        const scheduler = createManualScheduler();
+        const logInfo = vi.fn();
+
+        const performSync = vi.fn(async () => ({
+            success: false,
+            error: 'WebDAV error: 503 Service Unavailable',
+        }));
+        const controller = createDesktopAutoSyncController({
+            canSync: async () => true,
+            performSync,
+            flushPendingSave: async () => undefined,
+            reportError: vi.fn(),
+            isRuntimeActive: () => true,
+            now: scheduler.now,
+            setTimer: scheduler.setTimer,
+            clearTimer: scheduler.clearTimer,
+            minIntervalMs: 0,
+            autoFailureCooldownMs: 60_000,
+            periodicSyncIntervalMs: null,
+            logInfo,
+        });
+
+        controller.handleDataChange();
+        await scheduler.advanceBy(2_000);
+        await waitForAssertion(() => {
+            expect(performSync).toHaveBeenCalledTimes(1);
+        });
+
+        controller.handleDataChange();
+        await scheduler.advanceBy(2_000);
+        await Promise.resolve();
+
+        expect(performSync).toHaveBeenCalledTimes(1);
+        expect(logInfo).toHaveBeenCalledWith(
+            'Auto sync skipped during failure cooldown',
+            expect.objectContaining({ source: 'data-change' })
+        );
+
+        await controller.requestSync(0);
+
+        expect(performSync).toHaveBeenCalledTimes(2);
+    });
+
+    it('delays a queued auto follow-up when the in-flight sync enters failure cooldown', async () => {
+        const scheduler = createManualScheduler();
+        const logInfo = vi.fn();
+        let finishSync: (result: { success: boolean; error?: string }) => void = () => undefined;
+        const performSync = vi.fn(() => new Promise<{ success: boolean; error?: string }>((resolve) => {
+            finishSync = resolve;
+        }));
+        const controller = createDesktopAutoSyncController({
+            canSync: async () => true,
+            performSync,
+            flushPendingSave: async () => undefined,
+            reportError: vi.fn(),
+            isRuntimeActive: () => true,
+            now: scheduler.now,
+            setTimer: scheduler.setTimer,
+            clearTimer: scheduler.clearTimer,
+            minIntervalMs: 0,
+            autoFailureCooldownMs: 60_000,
+            periodicSyncIntervalMs: null,
+            logInfo,
+        });
+
+        controller.handleDataChange();
+        await scheduler.advanceBy(2_000);
+        await waitForAssertion(() => {
+            expect(performSync).toHaveBeenCalledTimes(1);
+        });
+
+        controller.handleBlur();
+        finishSync({ success: false, error: 'WebDAV error: 503 Service Unavailable' });
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(performSync).toHaveBeenCalledTimes(1);
+        await waitForAssertion(() => {
+            expect(logInfo).toHaveBeenCalledWith(
+                'Auto sync skipped during failure cooldown',
+                expect.objectContaining({ source: 'blur' })
+            );
+        });
+
+        await scheduler.advanceBy(59_999);
+        expect(performSync).toHaveBeenCalledTimes(1);
+
+        await scheduler.advanceBy(1);
+        await waitForAssertion(() => {
+            expect(performSync).toHaveBeenCalledTimes(2);
         });
     });
 
@@ -165,6 +263,7 @@ describe('createDesktopAutoSyncController', () => {
             setTimer: scheduler.setTimer,
             clearTimer: scheduler.clearTimer,
             minIntervalMs: 0,
+            periodicSyncIntervalMs: null,
         });
 
         controller.handleBlur();
@@ -184,5 +283,137 @@ describe('createDesktopAutoSyncController', () => {
         await waitForAssertion(() => {
             expect(performSync).toHaveBeenCalledTimes(2);
         });
+    });
+
+    it('keeps focus sync for remote pulls but skips blur sync when there are no pending local changes', async () => {
+        const scheduler = createManualScheduler(50_000);
+        let pendingLocalChanges = false;
+
+        const performSync = vi.fn(async () => ({ success: true }));
+        const controller = createDesktopAutoSyncController({
+            canSync: async () => true,
+            performSync,
+            flushPendingSave: async () => undefined,
+            reportError: vi.fn(),
+            isRuntimeActive: () => true,
+            hasPendingLocalChanges: () => pendingLocalChanges,
+            now: scheduler.now,
+            setTimer: scheduler.setTimer,
+            clearTimer: scheduler.clearTimer,
+            minIntervalMs: 0,
+            periodicSyncIntervalMs: null,
+        });
+
+        controller.handleBlur();
+        await Promise.resolve();
+
+        expect(performSync).not.toHaveBeenCalled();
+
+        controller.handleFocus();
+        await waitForAssertion(() => {
+            expect(performSync).toHaveBeenCalledTimes(1);
+        });
+
+        pendingLocalChanges = true;
+        controller.handleBlur();
+        await waitForAssertion(() => {
+            expect(performSync).toHaveBeenCalledTimes(2);
+        });
+    });
+
+    it('dedupes duplicate focus events before they queue a follow-up sync', async () => {
+        const scheduler = createManualScheduler(50_000);
+        let finishSync: (result: { success: boolean }) => void = () => undefined;
+        const performSync = vi.fn(() => new Promise<{ success: boolean }>((resolve) => {
+            finishSync = resolve;
+        }));
+        const controller = createDesktopAutoSyncController({
+            canSync: async () => true,
+            performSync,
+            flushPendingSave: async () => undefined,
+            reportError: vi.fn(),
+            isRuntimeActive: () => true,
+            now: scheduler.now,
+            setTimer: scheduler.setTimer,
+            clearTimer: scheduler.clearTimer,
+            minIntervalMs: 0,
+            periodicSyncIntervalMs: null,
+        });
+
+        controller.handleFocus();
+        controller.handleFocus();
+        await waitForAssertion(() => {
+            expect(performSync).toHaveBeenCalledTimes(1);
+        });
+
+        finishSync({ success: true });
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(performSync).toHaveBeenCalledTimes(1);
+    });
+
+    it('runs a periodic heartbeat while the runtime is active', async () => {
+        const scheduler = createManualScheduler();
+        let pauseWindowSync = false;
+
+        const performSync = vi.fn(async () => ({ success: true }));
+        const controller = createDesktopAutoSyncController({
+            canSync: async () => true,
+            performSync,
+            flushPendingSave: async () => undefined,
+            reportError: vi.fn(),
+            isRuntimeActive: () => true,
+            shouldPauseWindowSync: () => pauseWindowSync,
+            now: scheduler.now,
+            setTimer: scheduler.setTimer,
+            clearTimer: scheduler.clearTimer,
+            minIntervalMs: 0,
+            periodicSyncIntervalMs: 15 * 60 * 1000,
+        });
+
+        await scheduler.advanceBy(15 * 60 * 1000 - 1);
+        expect(performSync).not.toHaveBeenCalled();
+
+        await scheduler.advanceBy(1);
+        await waitForAssertion(() => {
+            expect(performSync).toHaveBeenCalledTimes(1);
+        });
+
+        pauseWindowSync = true;
+        await scheduler.advanceBy(15 * 60 * 1000);
+        expect(performSync).toHaveBeenCalledTimes(1);
+
+        pauseWindowSync = false;
+        await scheduler.advanceBy(15 * 60 * 1000);
+        await waitForAssertion(() => {
+            expect(performSync).toHaveBeenCalledTimes(2);
+        });
+
+        controller.dispose();
+    });
+
+    it('cleans up the periodic heartbeat timer on dispose', async () => {
+        const scheduler = createManualScheduler();
+
+        const performSync = vi.fn(async () => ({ success: true }));
+        const controller = createDesktopAutoSyncController({
+            canSync: async () => true,
+            performSync,
+            flushPendingSave: async () => undefined,
+            reportError: vi.fn(),
+            isRuntimeActive: () => true,
+            now: scheduler.now,
+            setTimer: scheduler.setTimer,
+            clearTimer: scheduler.clearTimer,
+            periodicSyncIntervalMs: 15 * 60 * 1000,
+        });
+
+        expect(scheduler.getTimerCount()).toBe(1);
+        controller.dispose();
+        expect(scheduler.getTimerCount()).toBe(0);
+
+        await scheduler.advanceBy(15 * 60 * 1000);
+        expect(performSync).not.toHaveBeenCalled();
     });
 });

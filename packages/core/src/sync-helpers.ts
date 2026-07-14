@@ -1,19 +1,48 @@
 import type { AppData, Attachment } from './types';
+import { normalizeSavedFilters } from './saved-filters';
+import { SYNC_FILE_NAME } from './sync-service-utils';
 
-const SYNC_FILE_NAME = 'data.json';
+const MISSING_ATTACHMENT_TIMESTAMP_SENTINEL = '1970-01-01T00:00:00.000Z';
+
+export type SoftDeletable = {
+    deletedAt?: string | null;
+};
+
+export function filterNotDeleted<T extends SoftDeletable>(items: readonly T[]): T[] {
+    return items.filter((item) => !item.deletedAt);
+}
 
 export type PendingAttachmentUpload = {
     ownerType: 'task' | 'project';
     ownerId: string;
     attachmentId: string;
     title: string;
+    uriScheme: string;
+    localStatus?: Attachment['localStatus'];
 };
 
 export const normalizeWebdavUrl = (rawUrl: string): string => {
-    const trimmed = rawUrl.replace(/\/+$/, '');
-    return trimmed.toLowerCase().endsWith(`/${SYNC_FILE_NAME}`) || trimmed.toLowerCase().endsWith('.json')
-        ? trimmed
-        : `${trimmed}/${SYNC_FILE_NAME}`;
+    const splitIndex = rawUrl.search(/[?#]/);
+    const pathEnd = splitIndex >= 0 ? splitIndex : rawUrl.length;
+    const path = rawUrl.slice(0, pathEnd).replace(/\/+$/, '');
+    const suffix = rawUrl.slice(pathEnd);
+    const lowerPath = path.toLowerCase();
+    const normalizedPath = lowerPath.endsWith(`/${SYNC_FILE_NAME}`) || lowerPath.endsWith('.json')
+        ? path
+        : `${path}/${SYNC_FILE_NAME}`;
+
+    if (!suffix) return normalizedPath;
+    const hashIndex = suffix.indexOf('#');
+    const queryPart = suffix.startsWith('?')
+        ? suffix.slice(0, hashIndex >= 0 ? hashIndex : suffix.length)
+        : '';
+    const hashPart = hashIndex >= 0 ? suffix.slice(hashIndex) : (suffix.startsWith('#') ? suffix : '');
+    if (!queryPart) return `${normalizedPath}${hashPart}`;
+
+    const params = new URLSearchParams(queryPart.slice(1));
+    params.delete('_');
+    const query = params.toString();
+    return `${normalizedPath}${query ? `?${query}` : ''}${hashPart}`;
 };
 
 export const normalizeCloudUrl = (rawUrl: string): string => {
@@ -37,6 +66,17 @@ const isLocalAttachmentUri = (uri: string): boolean => {
     return !/^https?:\/\//i.test(trimmed);
 };
 
+const getAttachmentUriScheme = (uri: string): string => {
+    const trimmed = uri.trim();
+    const match = /^([a-z][a-z0-9+.-]*):/i.exec(trimmed);
+    return match?.[1]?.toLowerCase() ?? (trimmed ? 'file' : 'empty');
+};
+
+const isLocalCalendarSourceUrl = (url: string): boolean => {
+    const normalized = url.trim().toLowerCase();
+    return normalized.startsWith('file://') || normalized.startsWith('content://');
+};
+
 const collectPendingUploads = (
     ownerType: PendingAttachmentUpload['ownerType'],
     ownerId: string,
@@ -58,6 +98,8 @@ const collectPendingUploads = (
             ownerId,
             attachmentId: attachment.id,
             title: attachment.title,
+            uriScheme: getAttachmentUriScheme(attachment.uri),
+            localStatus: attachment.localStatus,
         }));
 };
 
@@ -91,6 +133,12 @@ export const assertNoPendingAttachmentUploads = (data: AppData): void => {
     );
 };
 
+export const hasPendingSyncSideEffects = (data: AppData): boolean => (
+    Boolean(data.settings.pendingRemoteWriteAt)
+    || findPendingAttachmentUploads(data).length > 0
+    || Boolean(data.settings.attachments?.pendingRemoteDeletes?.length)
+);
+
 export const sanitizeAppDataForRemote = (data: AppData): AppData => {
     const hasNonEmptyValue = (value: unknown): boolean => (
         typeof value === 'string' && value.trim().length > 0
@@ -99,14 +147,12 @@ export const sanitizeAppDataForRemote = (data: AppData): AppData => {
         if (!attachments) return attachments;
         return attachments.map((attachment) => {
             if (attachment.kind !== 'file') return attachment;
-            const hasUri = hasNonEmptyValue(attachment.uri);
             const hasCloudKey = hasNonEmptyValue(attachment.cloudKey);
             if (!attachment.deletedAt) {
-                if ((ownerDeleted && !hasCloudKey) || (!hasUri && !hasCloudKey)) {
-                    const nowIso = new Date().toISOString();
+                if ((ownerDeleted && !hasCloudKey) || (attachment.localStatus === 'missing' && !hasCloudKey)) {
                     const fallbackUpdatedAt = hasNonEmptyValue(attachment.updatedAt)
                         ? attachment.updatedAt
-                        : nowIso;
+                        : MISSING_ATTACHMENT_TIMESTAMP_SENTINEL;
                     return {
                         ...attachment,
                         deletedAt: fallbackUpdatedAt,
@@ -148,9 +194,38 @@ export const sanitizeAppDataForRemote = (data: AppData): AppData => {
             next.timeFormat = settings.timeFormat;
         }
 
+        if (prefs.gtd === true) {
+            // This allowlist must stay in step with the gtd group in
+            // mergeSettingsForSync (sync-merge-settings.ts) — a field present in
+            // the merge but missing here silently never leaves the device.
+            if (
+                settings.gtd?.defaultScheduleTime !== undefined
+                || settings.gtd?.defaultAreaMode !== undefined
+                || settings.gtd?.defaultAreaId !== undefined
+                || settings.gtd?.focusTaskLimit !== undefined
+                || settings.gtd?.focusGroupBy !== undefined
+                || settings.gtd?.defaultProjectFlowMode !== undefined
+            ) {
+                next.gtd = {
+                    ...(settings.gtd.defaultScheduleTime !== undefined ? { defaultScheduleTime: settings.gtd.defaultScheduleTime } : {}),
+                    ...(settings.gtd.defaultAreaMode !== undefined ? { defaultAreaMode: settings.gtd.defaultAreaMode } : {}),
+                    ...(settings.gtd.defaultAreaId !== undefined ? { defaultAreaId: settings.gtd.defaultAreaId } : {}),
+                    ...(settings.gtd.focusTaskLimit !== undefined ? { focusTaskLimit: settings.gtd.focusTaskLimit } : {}),
+                    ...(settings.gtd.focusGroupBy !== undefined ? { focusGroupBy: settings.gtd.focusGroupBy } : {}),
+                    ...(settings.gtd.defaultProjectFlowMode !== undefined ? { defaultProjectFlowMode: settings.gtd.defaultProjectFlowMode } : {}),
+                };
+            }
+        }
+
+        if (prefs.savedFilters === true) {
+            next.savedFilters = normalizeSavedFilters(settings.savedFilters);
+        }
+
         if (prefs.externalCalendars === true) {
             next.externalCalendars = settings.externalCalendars
-                ? settings.externalCalendars.map((item) => ({ ...item }))
+                ? settings.externalCalendars
+                    .filter((item) => !isLocalCalendarSourceUrl(item.url))
+                    .map((item) => ({ ...item }))
                 : settings.externalCalendars;
         }
 
@@ -201,6 +276,31 @@ const normalizeForSyncComparison = (value: unknown): unknown => {
 
 export const areSyncPayloadsEqual = (left: AppData, right: AppData): boolean =>
     JSON.stringify(normalizeForSyncComparison(left)) === JSON.stringify(normalizeForSyncComparison(right));
+
+export const toStableSyncJson = (value: unknown): string =>
+    JSON.stringify(normalizeForSyncComparison(value));
+
+const hashStableSyncJson = (value: string): string => {
+    let left = 0x811c9dc5;
+    let right = 0x9e3779b9;
+    for (let index = 0; index < value.length; index += 1) {
+        const code = value.charCodeAt(index);
+        left ^= code;
+        left = Math.imul(left, 0x01000193);
+        right ^= code + index;
+        right = Math.imul(right, 0x85ebca6b);
+        right ^= right >>> 13;
+    }
+    return `${(left >>> 0).toString(16).padStart(8, '0')}${(right >>> 0).toString(16).padStart(8, '0')}`;
+};
+
+export const computeStableValueFingerprint = (value: unknown): string => {
+    const json = toStableSyncJson(value);
+    return `stable-v1:${json.length}:${hashStableSyncJson(json)}`;
+};
+
+export const computeSyncPayloadFingerprint = (data: AppData): string =>
+    computeStableValueFingerprint(sanitizeAppDataForRemote(data));
 
 type ExternalCalendarProvider = {
     load: () => Promise<AppData['settings']['externalCalendars'] | undefined>;

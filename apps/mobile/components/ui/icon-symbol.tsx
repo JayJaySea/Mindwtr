@@ -20,12 +20,14 @@ const MAPPING = {
   'calendar.fill': 'calendar',
   'calendar': 'calendar-outline',
   'checkmark.circle.fill': 'checkmark-circle',
+  'clipboard.fill': 'clipboard',
   'circle': 'ellipse-outline',
   'arrow.up.circle.fill': 'arrow-up-circle',
   'book.closed.fill': 'book',
   'archivebox.fill': 'archive',
   'trash.fill': 'trash',
   'gearshape.fill': 'settings',
+  'questionmark.circle.fill': 'help-circle',
 } as const;
 
 /**

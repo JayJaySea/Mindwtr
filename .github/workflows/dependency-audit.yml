@@ -25,12 +25,12 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lockb') }}
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Audit Bun dependencies
         run: |
@@ -56,9 +56,18 @@ jobs:
       - name: Audit Rust dependencies
         run: |
           set -euo pipefail
-          # Temporary ignore for a new rand advisory that is currently only
-          # reachable through upstream Tauri/wry transitive dependencies.
-          if ! cargo audit --deny warnings --ignore RUSTSEC-2026-0097 --file apps/desktop/src-tauri/Cargo.lock; then
+          # Temporary ignores:
+          # - RUSTSEC-2026-0097: rand advisory only reachable through upstream
+          #   Tauri/wry transitive dependencies.
+          # - RUSTSEC-2026-0194 / RUSTSEC-2026-0195: quick-xml DoS advisories.
+          #   The only remaining <0.41 copy comes from wayland-scanner (build-time
+          #   codegen over bundled Wayland protocol XML, no untrusted input);
+          #   drop these once wayland-rs moves to quick-xml >=0.41.
+          if ! cargo audit --deny warnings \
+            --ignore RUSTSEC-2026-0097 \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195 \
+            --file apps/desktop/src-tauri/Cargo.lock; then
             echo "cargo audit reported vulnerabilities or warnings, or failed." >&2
             exit 1
           fi

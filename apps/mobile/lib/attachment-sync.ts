@@ -1,14 +1,19 @@
 export {
-  buildCloudKey,
-  cleanupAttachmentTempFiles,
-  getBaseSyncUrl,
-  getCloudBaseUrl,
-  persistAttachmentLocally,
+    buildCloudKey,
+    cleanupAttachmentTempFiles,
+    ATTACHMENT_LOCAL_MIGRATION_MAX_PER_SYNC,
+    getBaseSyncUrl,
+    getCloudBaseUrl,
+    hasPendingAttachmentSyncWork,
+    persistAttachmentLocally,
+    persistAttachmentLocallyDetailed,
 } from './attachment-sync-utils';
+export type { PersistAttachmentOutcome } from './attachment-sync-utils';
 export {
-  syncCloudAttachments,
-  syncDropboxAttachments,
-  syncFileAttachments,
-  syncWebdavAttachments,
+    syncCloudAttachments,
+    syncCloudKitAttachments,
+    syncDropboxAttachments,
+    syncFileAttachments,
+    syncWebdavAttachments,
 } from './attachment-sync-backends';
 export { ensureAttachmentAvailable } from './attachment-sync-availability';

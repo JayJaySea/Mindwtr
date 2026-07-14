@@ -1,8 +1,21 @@
-import type { AppData, TaskEditorFieldId, TaskEditorSectionId } from '@mindwtr/core';
-import { translateText } from '@mindwtr/core';
+import type { AppSettings, Area, DefaultProjectFlowMode, FeatureSettings, GtdSettings, TaskEditorFieldId, TaskEditorPresentation, TaskEditorSectionId } from '@mindwtr/core';
+import {
+    FOCUS_TASK_LIMIT_OPTIONS,
+    normalizeClockTimeInput,
+    normalizeFocusTaskLimit,
+    getDefaultTaskAreaMode,
+    resolveDefaultNewTaskAreaId,
+    sanitizePomodoroDurations,
+    translateText,
+} from '@mindwtr/core';
 
+import type { ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { reportError } from '../../../lib/report-error';
+import { dispatchDesktopOnboardingEvent } from '../../../lib/desktop-onboarding-events';
+import { useUiStore } from '../../../store/ui-store';
 import type { Language } from '../../../contexts/language-context';
 import {
     DEFAULT_TASK_EDITOR_ORDER,
@@ -17,11 +30,25 @@ import {
 } from '../../Task/task-item-helpers';
 
 type Labels = {
+    gtdDesc: string;
     features: string;
     featuresDesc: string;
     autoArchive: string;
     autoArchiveDesc: string;
     autoArchiveNever: string;
+    autoArchiveDayUnit: string;
+    defaultScheduleTime: string;
+    defaultScheduleTimeDesc: string;
+    defaultArea: string;
+    defaultAreaDesc: string;
+    defaultAreaNone: string;
+    defaultAreaActive: string;
+    focusTaskLimit: string;
+    focusTaskLimitDesc: string;
+    defaultProjectFlowMode: string;
+    defaultProjectFlowModeDesc: string;
+    projectFlowParallel: string;
+    projectFlowSequential: string;
     inboxProcessing: string;
     inboxProcessingDesc: string;
     inboxDefaultMode: string;
@@ -41,9 +68,19 @@ type Labels = {
     captureDefaultAudio: string;
     captureSaveAudio: string;
     captureSaveAudioDesc: string;
+    quickAddAutoClean: string;
+    quickAddAutoCleanDesc: string;
+    markdownEditorAssist: string;
+    markdownEditorAssistDesc: string;
     taskEditorLayout: string;
     taskEditorLayoutDesc: string;
     taskEditorLayoutHint: string;
+    taskEditorPresentation: string;
+    taskEditorPresentationDesc: string;
+    taskEditorPresentationInline: string;
+    taskEditorPresentationInlineDesc: string;
+    taskEditorPresentationModal: string;
+    taskEditorPresentationModalDesc: string;
     taskEditorLayoutReset: string;
     taskEditorSection: string;
     taskEditorDefaultOpen: string;
@@ -58,6 +95,7 @@ type Labels = {
     taskEditorFieldAssignedTo: string;
     taskEditorFieldContexts: string;
     taskEditorFieldDescription: string;
+    taskEditorFieldLocation: string;
     taskEditorFieldTags: string;
     taskEditorFieldTimeEstimate: string;
     taskEditorFieldRecurrence: string;
@@ -72,6 +110,16 @@ type Labels = {
     featureTimeEstimatesDesc: string;
     featurePomodoro: string;
     featurePomodoroDesc: string;
+    pomodoroCustomPreset: string;
+    pomodoroCustomPresetDesc: string;
+    pomodoroFocusMinutes: string;
+    pomodoroBreakMinutes: string;
+    pomodoroLinkTask: string;
+    pomodoroLinkTaskDesc: string;
+    pomodoroAutoStartBreaks: string;
+    pomodoroAutoStartBreaksDesc: string;
+    pomodoroAutoStartFocus: string;
+    pomodoroAutoStartFocusDesc: string;
     weeklyReviewConfig: string;
     weeklyReviewConfigDesc: string;
     weeklyReviewIncludeContextsStep: string;
@@ -80,14 +128,63 @@ type Labels = {
     hidden: string;
 };
 
+const DEFAULT_AREA_ACTIVE_SELECT_VALUE = '__active-area__';
+
+type PomodoroSettings = NonNullable<GtdSettings['pomodoro']>;
+type InboxProcessingSettings = NonNullable<GtdSettings['inboxProcessing']>;
+
 type SettingsGtdPageProps = {
     t: Labels;
     language: Language;
-    settings?: AppData['settings'];
-    updateSettings: (updates: Partial<AppData['settings']>) => Promise<void>;
+    settings?: AppSettings;
+    updateSettings: (updates: Partial<AppSettings>) => Promise<void>;
     showSaved: () => void;
     autoArchiveDays: number;
+    areas: Area[];
 };
+
+type SettingsDisclosureCardProps = {
+    title: string;
+    description?: string;
+    hint?: string;
+    open: boolean;
+    onToggle: () => void;
+    children: ReactNode;
+};
+
+const SHOW_TEMP_ONBOARDING_TRIGGER = false;
+
+function SettingsDisclosureCard({
+    title,
+    description,
+    hint,
+    open,
+    onToggle,
+    children,
+}: SettingsDisclosureCardProps) {
+    return (
+        <div className="bg-card border border-border rounded-lg">
+            <button
+                type="button"
+                onClick={onToggle}
+                aria-expanded={open}
+                className="w-full p-4 flex items-center justify-between gap-4 text-left"
+            >
+                <div className="min-w-0">
+                    <div className="text-sm font-medium">{title}</div>
+                    {description ? <div className="text-xs text-muted-foreground mt-1">{description}</div> : null}
+                    {hint ? <div className="text-xs text-muted-foreground">{hint}</div> : null}
+                </div>
+                {open ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+            </button>
+            {open ? (
+                <div className="border-t border-border divide-y divide-border">
+                    {children}
+                </div>
+            ) : null}
+        </div>
+    );
+}
 
 export function SettingsGtdPage({
     t,
@@ -96,31 +193,20 @@ export function SettingsGtdPage({
     updateSettings,
     showSaved,
     autoArchiveDays,
+    areas,
 }: SettingsGtdPageProps) {
-    const safeSettings = settings ?? ({} as AppData['settings']);
+    const safeSettings = settings ?? ({} as AppSettings);
+    const [featuresOpen, setFeaturesOpen] = useState(false);
+    const [captureOpen, setCaptureOpen] = useState(false);
+    const [reviewOpen, setReviewOpen] = useState(false);
+    const [inboxOpen, setInboxOpen] = useState(false);
+    const [taskEditorOpen, setTaskEditorOpen] = useState(false);
+    const showToast = useUiStore((state) => state.showToast);
+    const pomodoroAutoStartNoticeShownRef = useRef(false);
     const autoArchiveOptions = [0, 1, 3, 7, 14, 30, 60];
     const formatArchiveLabel = (days: number) => {
         if (days <= 0) return t.autoArchiveNever;
-        const dayLabelMap: Record<Language, string> = {
-            en: 'days',
-            zh: '天',
-            'zh-Hant': '天',
-            es: 'días',
-            hi: 'दिन',
-            ar: 'أيام',
-            de: translateText('days', 'de'),
-            ru: translateText('days', 'ru'),
-            ja: translateText('days', 'ja'),
-            fr: translateText('days', 'fr'),
-            pt: translateText('days', 'pt'),
-            pl: translateText('days', 'pl'),
-            nl: translateText('days', 'nl'),
-            ko: translateText('days', 'ko'),
-            it: translateText('days', 'it'),
-            tr: translateText('days', 'tr'),
-        };
-        const label = dayLabelMap[language] ?? 'days';
-        return `${days} ${label}`;
+        return `${days} ${t.autoArchiveDayUnit}`;
     };
     const featureHiddenFields = new Set<TaskEditorFieldId>();
     if (safeSettings.features?.priorities === false) {
@@ -144,8 +230,21 @@ export function SettingsGtdPage({
     const hiddenSet = new Set(savedHidden);
     const taskEditorSections = getTaskEditorSectionAssignments(safeSettings.gtd?.taskEditor);
     const taskEditorSectionOpen = getTaskEditorSectionOpenDefaults(safeSettings.gtd?.taskEditor);
+    const taskEditorPresentation: TaskEditorPresentation = safeSettings.gtd?.taskEditor?.presentation === 'modal'
+        ? 'modal'
+        : 'inline';
     const defaultCaptureMethod = safeSettings.gtd?.defaultCaptureMethod ?? 'text';
+    const defaultAreaMode = getDefaultTaskAreaMode(safeSettings);
+    const sortedAreas = [...areas]
+        .filter((area) => !area.deletedAt)
+        .sort((a, b) => (a.order - b.order) || a.name.localeCompare(b.name));
+    const defaultAreaId = resolveDefaultNewTaskAreaId(safeSettings, sortedAreas) ?? '';
+    const defaultAreaSelectValue = defaultAreaMode === 'active'
+        ? DEFAULT_AREA_ACTIVE_SELECT_VALUE
+        : defaultAreaId;
     const saveAudioAttachments = safeSettings.gtd?.saveAudioAttachments !== false;
+    const quickAddAutoClean = safeSettings.quickAddAutoClean === true;
+    const markdownEditorAssist = safeSettings.markdownEditorAssist !== false;
     const speechEnabled = safeSettings.ai?.speechToText?.enabled === true;
     const inboxProcessing = safeSettings.gtd?.inboxProcessing ?? {};
     const inboxDefaultMode = inboxProcessing.defaultMode === 'quick' ? 'quick' : 'guided';
@@ -154,9 +253,92 @@ export function SettingsGtdPage({
     const inboxProjectFirst = inboxProcessing.projectFirst === true;
     const inboxContextStepEnabled = inboxProcessing.contextStepEnabled !== false;
     const inboxScheduleEnabled = inboxProcessing.scheduleEnabled === true;
-    const inboxReferenceEnabled = inboxProcessing.referenceEnabled === true;
     const includeContextStep = safeSettings.gtd?.weeklyReview?.includeContextStep !== false;
+    const defaultScheduleTime = normalizeClockTimeInput(safeSettings.gtd?.defaultScheduleTime) || '';
+    const focusTaskLimit = normalizeFocusTaskLimit(safeSettings.gtd?.focusTaskLimit);
+    const defaultProjectFlowMode: DefaultProjectFlowMode = safeSettings.gtd?.defaultProjectFlowMode === 'sequential'
+        ? 'sequential'
+        : 'parallel';
     const pomodoroEnabled = safeSettings.features?.pomodoro === true;
+    const pomodoroCustomDurations = sanitizePomodoroDurations(safeSettings.gtd?.pomodoro?.customDurations);
+    const pomodoroLinkTask = safeSettings.gtd?.pomodoro?.linkTask === true;
+    const pomodoroAutoStartBreaks = safeSettings.gtd?.pomodoro?.autoStartBreaks === true;
+    const pomodoroAutoStartFocus = safeSettings.gtd?.pomodoro?.autoStartFocus === true;
+    const [pomodoroFocusDraft, setPomodoroFocusDraft] = useState(String(pomodoroCustomDurations.focusMinutes));
+    const [pomodoroBreakDraft, setPomodoroBreakDraft] = useState(String(pomodoroCustomDurations.breakMinutes));
+    const [defaultScheduleTimeDraft, setDefaultScheduleTimeDraft] = useState(defaultScheduleTime);
+
+    useEffect(() => {
+        setPomodoroFocusDraft(String(pomodoroCustomDurations.focusMinutes));
+        setPomodoroBreakDraft(String(pomodoroCustomDurations.breakMinutes));
+    }, [pomodoroCustomDurations.breakMinutes, pomodoroCustomDurations.focusMinutes]);
+
+    useEffect(() => {
+        setDefaultScheduleTimeDraft(defaultScheduleTime);
+    }, [defaultScheduleTime]);
+
+    const showPomodoroAutoStartNotice = () => {
+        if (pomodoroAutoStartNoticeShownRef.current) return;
+        pomodoroAutoStartNoticeShownRef.current = true;
+        showToast('Pomodoro will now advance phases automatically.', 'info', 5000);
+    };
+
+    const updatePomodoroSettings = (
+        partial: Partial<PomodoroSettings>,
+        options?: { showAutoStartNotice?: boolean }
+    ) => {
+        updateSettings({
+            gtd: {
+                ...(safeSettings.gtd ?? {}),
+                pomodoro: {
+                    ...(safeSettings.gtd?.pomodoro ?? {}),
+                    ...partial,
+                },
+            },
+        }).then(() => {
+            showSaved();
+            if (options?.showAutoStartNotice) {
+                showPomodoroAutoStartNotice();
+            }
+        }).catch((error) => reportError('Failed to update Pomodoro settings', error));
+    };
+
+    const savePomodoroCustomDurations = (nextDurations: { focusMinutes: number; breakMinutes: number }) => {
+        updatePomodoroSettings({ customDurations: nextDurations });
+        return nextDurations;
+    };
+
+    const updateGtdSettings = (partial: Partial<GtdSettings>) => {
+        updateSettings({
+            gtd: {
+                ...(safeSettings.gtd ?? {}),
+                ...partial,
+            },
+        }).then(showSaved).catch((error) => reportError('Failed to update GTD settings', error));
+    };
+
+    const commitDefaultScheduleTime = () => {
+        const normalized = normalizeClockTimeInput(defaultScheduleTimeDraft);
+        if (normalized === null) {
+            setDefaultScheduleTimeDraft(defaultScheduleTime);
+            return;
+        }
+        setDefaultScheduleTimeDraft(normalized);
+        if (normalized === defaultScheduleTime) return;
+        updateGtdSettings({ defaultScheduleTime: normalized });
+    };
+
+    const commitPomodoroMinutes = () => {
+        const focusValue = Number.parseInt(pomodoroFocusDraft, 10);
+        const breakValue = Number.parseInt(pomodoroBreakDraft, 10);
+        const nextDurations = savePomodoroCustomDurations(sanitizePomodoroDurations({
+            focusMinutes: Number.isFinite(focusValue) ? focusValue : pomodoroCustomDurations.focusMinutes,
+            breakMinutes: Number.isFinite(breakValue) ? breakValue : pomodoroCustomDurations.breakMinutes,
+        }));
+        setPomodoroFocusDraft(String(nextDurations.focusMinutes));
+        setPomodoroBreakDraft(String(nextDurations.breakMinutes));
+    };
+
     const fieldLabel = (fieldId: TaskEditorFieldId) => {
         switch (fieldId) {
             case 'status':
@@ -177,6 +359,8 @@ export function SettingsGtdPage({
                 return t.taskEditorFieldContexts;
             case 'description':
                 return t.taskEditorFieldDescription;
+            case 'location':
+                return t.taskEditorFieldLocation;
             case 'tags':
                 return t.taskEditorFieldTags;
             case 'timeEstimate':
@@ -203,8 +387,9 @@ export function SettingsGtdPage({
             hidden?: TaskEditorFieldId[];
             sections?: Partial<Record<TaskEditorFieldId, TaskEditorSectionId>>;
             sectionOpen?: Partial<Record<TaskEditorSectionId, boolean>>;
+            presentation?: TaskEditorPresentation;
         },
-        nextFeatures?: AppData['settings']['features']
+        nextFeatures?: FeatureSettings
     ) => {
         updateSettings({
             ...(nextFeatures ? { features: nextFeatures } : null),
@@ -233,7 +418,7 @@ export function SettingsGtdPage({
         }
         saveTaskEditor({ order: taskEditorOrder, hidden: Array.from(nextHidden) }, nextFeatures);
     };
-    const updateInboxProcessing = (partial: Partial<NonNullable<AppData['settings']['gtd']>['inboxProcessing']>) => {
+    const updateInboxProcessing = (partial: Partial<InboxProcessingSettings>) => {
         updateSettings({
             gtd: {
                 ...(safeSettings.gtd ?? {}),
@@ -244,7 +429,7 @@ export function SettingsGtdPage({
             },
         }).then(showSaved).catch((error) => reportError('Failed to update inbox processing settings', error));
     };
-    const updateWeeklyReviewConfig = (partial: NonNullable<AppData['settings']['gtd']>['weeklyReview']) => {
+    const updateWeeklyReviewConfig = (partial: GtdSettings['weeklyReview']) => {
         updateSettings({
             gtd: {
                 ...(safeSettings.gtd ?? {}),
@@ -291,6 +476,13 @@ export function SettingsGtdPage({
         }
         saveTaskEditor({ sectionOpen: nextSectionOpen });
     };
+    const updateTaskEditorPresentation = (presentation: TaskEditorPresentation) => {
+        if (presentation === taskEditorPresentation) return;
+        saveTaskEditor({ presentation });
+    };
+    const handleOpenOnboardingFlow = () => {
+        dispatchDesktopOnboardingEvent();
+    };
 
     const taskEditorSectionLabel = (sectionId: TaskEditorSectionId) => {
         switch (sectionId) {
@@ -318,6 +510,26 @@ export function SettingsGtdPage({
 
     return (
         <div className="space-y-6">
+            <p className="max-w-2xl text-sm text-muted-foreground">
+                {t.gtdDesc}
+            </p>
+            {SHOW_TEMP_ONBOARDING_TRIGGER ? (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                        <div className="text-sm font-medium text-foreground">Temporary onboarding test</div>
+                        <div className="text-xs text-muted-foreground mt-1">
+                            Opens the desktop first-run onboarding flow so you can test Sync, Import, and Start fresh.
+                        </div>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={handleOpenOnboardingFlow}
+                        className="shrink-0 rounded-md border border-amber-500/40 bg-amber-500/15 px-3 py-2 text-sm font-medium text-foreground hover:bg-amber-500/25 focus:outline-none focus:ring-2 focus:ring-amber-500/40"
+                    >
+                        Open onboarding flow
+                    </button>
+                </div>
+            ) : null}
             <div className="bg-card border border-border rounded-lg divide-y divide-border">
                 <div className="p-4 flex items-center justify-between gap-6">
                     <div className="min-w-0">
@@ -346,12 +558,95 @@ export function SettingsGtdPage({
                         </select>
                     </div>
                 </div>
-            </div>
-            <div className="bg-card border border-border rounded-lg divide-y divide-border">
-                <div className="p-4">
-                    <div className="text-sm font-medium">{t.features}</div>
-                    <div className="text-xs text-muted-foreground mt-1">{t.featuresDesc}</div>
+                <div className="p-4 flex items-center justify-between gap-6">
+                    <div className="min-w-0">
+                        <div className="text-sm font-medium">{t.defaultScheduleTime}</div>
+                        <div className="text-xs text-muted-foreground mt-1">{t.defaultScheduleTimeDesc}</div>
+                    </div>
+                    <input
+                        type="text"
+                        inputMode="numeric"
+                        aria-label={t.defaultScheduleTime}
+                        value={defaultScheduleTimeDraft}
+                        placeholder="HH:MM"
+                        onChange={(event) => setDefaultScheduleTimeDraft(event.target.value)}
+                        onBlur={commitDefaultScheduleTime}
+                        onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                                event.currentTarget.blur();
+                            }
+                        }}
+                        className="w-24 shrink-0 text-sm bg-muted/50 text-foreground border border-border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/40"
+                    />
                 </div>
+                <div className="p-4 flex items-center justify-between gap-6">
+                    <div className="min-w-0">
+                        <div className="text-sm font-medium">{t.focusTaskLimit}</div>
+                        <div className="text-xs text-muted-foreground mt-1">{t.focusTaskLimitDesc}</div>
+                    </div>
+                    <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-1 shrink-0">
+                        {FOCUS_TASK_LIMIT_OPTIONS.map((option) => {
+                            const selected = focusTaskLimit === option;
+                            return (
+                                <button
+                                    key={option}
+                                    type="button"
+                                    aria-pressed={selected}
+                                    onClick={() => {
+                                        updateGtdSettings({ focusTaskLimit: option });
+                                    }}
+                                    className={cn(
+                                        'min-w-9 rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40',
+                                        selected
+                                            ? 'bg-background text-foreground shadow-sm'
+                                            : 'text-muted-foreground hover:text-foreground hover:bg-background/60'
+                                    )}
+                                >
+                                    {option}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+                <div className="p-4 flex items-center justify-between gap-6">
+                    <div className="min-w-0">
+                        <div className="text-sm font-medium">{t.defaultProjectFlowMode}</div>
+                        <div className="text-xs text-muted-foreground mt-1">{t.defaultProjectFlowModeDesc}</div>
+                    </div>
+                    <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-1 shrink-0">
+                        {([
+                            { id: 'parallel', label: t.projectFlowParallel },
+                            { id: 'sequential', label: t.projectFlowSequential },
+                        ] satisfies Array<{ id: DefaultProjectFlowMode; label: string }>).map((option) => {
+                            const selected = defaultProjectFlowMode === option.id;
+                            return (
+                                <button
+                                    key={option.id}
+                                    type="button"
+                                    aria-pressed={selected}
+                                    onClick={() => {
+                                        updateGtdSettings({ defaultProjectFlowMode: option.id });
+                                    }}
+                                    className={cn(
+                                        'rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40',
+                                        selected
+                                            ? 'bg-background text-foreground shadow-sm'
+                                            : 'text-muted-foreground hover:text-foreground hover:bg-background/60'
+                                    )}
+                                >
+                                    {option.label}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+            </div>
+            <SettingsDisclosureCard
+                title={t.features}
+                description={t.featuresDesc}
+                open={featuresOpen}
+                onToggle={() => setFeaturesOpen((prev) => !prev)}
+            >
                 <div className="p-4 flex items-center justify-between gap-6">
                     <div className="min-w-0">
                         <div className="text-sm font-medium">{t.featurePomodoro}</div>
@@ -370,7 +665,7 @@ export function SettingsGtdPage({
                             }).then(showSaved).catch((error) => reportError('Failed to update feature flags', error));
                         }}
                         className={cn(
-                            'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                            'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
                             pomodoroEnabled ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
                         )}
                     >
@@ -382,13 +677,137 @@ export function SettingsGtdPage({
                         />
                     </button>
                 </div>
-            </div>
-            <div className="bg-card border border-border rounded-lg divide-y divide-border">
-                <div className="p-4 space-y-3">
-                    <div>
-                        <div className="text-sm font-medium">{t.captureDefault}</div>
-                        <div className="text-xs text-muted-foreground mt-1">{t.captureDefaultDesc}</div>
+                {pomodoroEnabled && (
+                    <div className="p-4 space-y-3">
+                        <div>
+                            <div className="text-sm font-medium">{t.pomodoroCustomPreset}</div>
+                            <div className="text-xs text-muted-foreground mt-1">{t.pomodoroCustomPresetDesc}</div>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <label className="space-y-1.5">
+                                <span className="text-xs font-medium text-muted-foreground">{t.pomodoroFocusMinutes}</span>
+                                <input
+                                    type="number"
+                                    min={1}
+                                    max={180}
+                                    inputMode="numeric"
+                                    value={pomodoroFocusDraft}
+                                    onChange={(event) => setPomodoroFocusDraft(event.target.value)}
+                                    onBlur={commitPomodoroMinutes}
+                                    onKeyDown={(event) => {
+                                        if (event.key === 'Enter') {
+                                            event.currentTarget.blur();
+                                        }
+                                    }}
+                                    className="w-full text-sm bg-muted/50 text-foreground border border-border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/40"
+                                />
+                            </label>
+                            <label className="space-y-1.5">
+                                <span className="text-xs font-medium text-muted-foreground">{t.pomodoroBreakMinutes}</span>
+                                <input
+                                    type="number"
+                                    min={1}
+                                    max={180}
+                                    inputMode="numeric"
+                                    value={pomodoroBreakDraft}
+                                    onChange={(event) => setPomodoroBreakDraft(event.target.value)}
+                                    onBlur={commitPomodoroMinutes}
+                                    onKeyDown={(event) => {
+                                        if (event.key === 'Enter') {
+                                            event.currentTarget.blur();
+                                        }
+                                    }}
+                                    className="w-full text-sm bg-muted/50 text-foreground border border-border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/40"
+                                />
+                            </label>
+                        </div>
+                        <div className="rounded-lg border border-border divide-y divide-border">
+                            <div className="p-3 flex items-center justify-between gap-6">
+                                <div className="min-w-0">
+                                    <div className="text-sm font-medium">{t.pomodoroLinkTask}</div>
+                                    <div className="text-xs text-muted-foreground mt-1">{t.pomodoroLinkTaskDesc}</div>
+                                </div>
+                                <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={pomodoroLinkTask}
+                                    onClick={() => updatePomodoroSettings({ linkTask: !pomodoroLinkTask })}
+                                    className={cn(
+                                        'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
+                                        pomodoroLinkTask ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
+                                    )}
+                                >
+                                    <span
+                                        className={cn(
+                                            'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                                            pomodoroLinkTask ? 'translate-x-4' : 'translate-x-1'
+                                        )}
+                                    />
+                                </button>
+                            </div>
+                            <div className="p-3 flex items-center justify-between gap-6">
+                                <div className="min-w-0">
+                                    <div className="text-sm font-medium">{t.pomodoroAutoStartBreaks}</div>
+                                    <div className="text-xs text-muted-foreground mt-1">{t.pomodoroAutoStartBreaksDesc}</div>
+                                </div>
+                                <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={pomodoroAutoStartBreaks}
+                                    onClick={() => updatePomodoroSettings(
+                                        { autoStartBreaks: !pomodoroAutoStartBreaks },
+                                        { showAutoStartNotice: !pomodoroAutoStartBreaks }
+                                    )}
+                                    className={cn(
+                                        'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
+                                        pomodoroAutoStartBreaks ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
+                                    )}
+                                >
+                                    <span
+                                        className={cn(
+                                            'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                                            pomodoroAutoStartBreaks ? 'translate-x-4' : 'translate-x-1'
+                                        )}
+                                    />
+                                </button>
+                            </div>
+                            <div className="p-3 flex items-center justify-between gap-6">
+                                <div className="min-w-0">
+                                    <div className="text-sm font-medium">{t.pomodoroAutoStartFocus}</div>
+                                    <div className="text-xs text-muted-foreground mt-1">{t.pomodoroAutoStartFocusDesc}</div>
+                                </div>
+                                <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={pomodoroAutoStartFocus}
+                                    onClick={() => updatePomodoroSettings(
+                                        { autoStartFocus: !pomodoroAutoStartFocus },
+                                        { showAutoStartNotice: !pomodoroAutoStartFocus }
+                                    )}
+                                    className={cn(
+                                        'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
+                                        pomodoroAutoStartFocus ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
+                                    )}
+                                >
+                                    <span
+                                        className={cn(
+                                            'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                                            pomodoroAutoStartFocus ? 'translate-x-4' : 'translate-x-1'
+                                        )}
+                                    />
+                                </button>
+                            </div>
+                        </div>
                     </div>
+                )}
+            </SettingsDisclosureCard>
+            <SettingsDisclosureCard
+                title={t.captureDefault}
+                description={t.captureDefaultDesc}
+                open={captureOpen}
+                onToggle={() => setCaptureOpen((prev) => !prev)}
+            >
+                <div className="p-4 space-y-3">
                     <div className="inline-flex rounded-lg border border-border bg-muted/40 p-1">
                         <button
                             type="button"
@@ -430,6 +849,33 @@ export function SettingsGtdPage({
                         </button>
                     </div>
                 </div>
+                <div className="p-4 flex items-center justify-between gap-6">
+                    <div className="min-w-0">
+                        <div className="text-sm font-medium">{t.defaultArea}</div>
+                        <div className="text-xs text-muted-foreground mt-1">{t.defaultAreaDesc}</div>
+                    </div>
+                    <select
+                        value={defaultAreaSelectValue}
+                        aria-label={t.defaultArea}
+                        onChange={(event) => {
+                            const value = event.target.value;
+                            if (value === DEFAULT_AREA_ACTIVE_SELECT_VALUE) {
+                                updateGtdSettings({ defaultAreaMode: 'active', defaultAreaId: null });
+                            } else if (value) {
+                                updateGtdSettings({ defaultAreaMode: 'fixed', defaultAreaId: value });
+                            } else {
+                                updateGtdSettings({ defaultAreaMode: 'none', defaultAreaId: null });
+                            }
+                        }}
+                        className="max-w-56 shrink-0 text-sm bg-muted/50 text-foreground border border-border rounded px-3 py-2 hover:bg-muted focus:outline-none focus:ring-2 focus:ring-primary/40"
+                    >
+                        <option value="">{t.defaultAreaNone}</option>
+                        <option value={DEFAULT_AREA_ACTIVE_SELECT_VALUE}>{t.defaultAreaActive}</option>
+                        {sortedAreas.map((area) => (
+                            <option key={area.id} value={area.id}>{area.name}</option>
+                        ))}
+                    </select>
+                </div>
                 {defaultCaptureMethod === 'audio' && speechEnabled ? (
                     <div className="p-4 flex items-center justify-between gap-6">
                         <div className="min-w-0">
@@ -449,7 +895,7 @@ export function SettingsGtdPage({
                                 }).then(showSaved).catch((error) => reportError('Failed to update audio capture settings', error));
                             }}
                             className={cn(
-                                'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                                'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
                                 saveAudioAttachments ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
                             )}
                         >
@@ -462,14 +908,67 @@ export function SettingsGtdPage({
                         </button>
                     </div>
                 ) : null}
-            </div>
-            <div className="bg-card border border-border rounded-lg divide-y divide-border">
                 <div className="p-4 flex items-center justify-between gap-6">
                     <div className="min-w-0">
-                        <div className="text-sm font-medium">{t.weeklyReviewConfig}</div>
-                        <div className="text-xs text-muted-foreground mt-1">{t.weeklyReviewConfigDesc}</div>
+                        <div className="text-sm font-medium">{t.quickAddAutoClean}</div>
+                        <div className="text-xs text-muted-foreground mt-1">{t.quickAddAutoCleanDesc}</div>
                     </div>
+                    <button
+                        type="button"
+                        role="switch"
+                        aria-checked={quickAddAutoClean}
+                        onClick={() => {
+                            updateSettings({ quickAddAutoClean: !quickAddAutoClean })
+                                .then(showSaved)
+                                .catch((error) => reportError('Failed to update quick add settings', error));
+                        }}
+                        className={cn(
+                            'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
+                            quickAddAutoClean ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
+                        )}
+                    >
+                        <span
+                            className={cn(
+                                'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                                quickAddAutoClean ? 'translate-x-4' : 'translate-x-1'
+                            )}
+                        />
+                    </button>
                 </div>
+                <div className="p-4 flex items-center justify-between gap-6">
+                    <div className="min-w-0">
+                        <div className="text-sm font-medium">{t.markdownEditorAssist}</div>
+                        <div className="text-xs text-muted-foreground mt-1">{t.markdownEditorAssistDesc}</div>
+                    </div>
+                    <button
+                        type="button"
+                        role="switch"
+                        aria-checked={markdownEditorAssist}
+                        onClick={() => {
+                            updateSettings({ markdownEditorAssist: !markdownEditorAssist })
+                                .then(showSaved)
+                                .catch((error) => reportError('Failed to update editor settings', error));
+                        }}
+                        className={cn(
+                            'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
+                            markdownEditorAssist ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
+                        )}
+                    >
+                        <span
+                            className={cn(
+                                'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
+                                markdownEditorAssist ? 'translate-x-4' : 'translate-x-1'
+                            )}
+                        />
+                    </button>
+                </div>
+            </SettingsDisclosureCard>
+            <SettingsDisclosureCard
+                title={t.weeklyReviewConfig}
+                description={t.weeklyReviewConfigDesc}
+                open={reviewOpen}
+                onToggle={() => setReviewOpen((prev) => !prev)}
+            >
                 <div className="p-4 flex items-center justify-between gap-6">
                     <div className="min-w-0">
                         <div className="text-sm font-medium">{t.weeklyReviewIncludeContextsStep}</div>
@@ -481,7 +980,7 @@ export function SettingsGtdPage({
                         aria-checked={includeContextStep}
                         onClick={() => updateWeeklyReviewConfig({ includeContextStep: !includeContextStep })}
                         className={cn(
-                            'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                            'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
                             includeContextStep ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
                         )}
                     >
@@ -493,18 +992,21 @@ export function SettingsGtdPage({
                         />
                     </button>
                 </div>
-            </div>
-            <details className="bg-card border border-border rounded-lg">
-                <summary className="list-none cursor-pointer p-4">
-                    <div className="flex items-center justify-between">
-                        <div className="min-w-0">
-                            <div className="text-sm font-medium">{t.inboxProcessing}</div>
-                            <div className="text-xs text-muted-foreground mt-1">{t.inboxProcessingDesc}</div>
-                        </div>
-                        <span className="text-xs text-muted-foreground">▸</span>
+            </SettingsDisclosureCard>
+            <div className="bg-card border border-border rounded-lg">
+                <button
+                    type="button"
+                    onClick={() => setInboxOpen((prev) => !prev)}
+                    aria-expanded={inboxOpen}
+                    className="w-full p-4 flex items-center justify-between gap-4 text-left"
+                >
+                    <div className="min-w-0">
+                        <div className="text-sm font-medium">{t.inboxProcessing}</div>
+                        <div className="text-xs text-muted-foreground mt-1">{t.inboxProcessingDesc}</div>
                     </div>
-                </summary>
-                <div className="divide-y divide-border border-t border-border">
+                    {inboxOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                </button>
+                {inboxOpen && <div className="divide-y divide-border border-t border-border">
                     <div className="p-4 space-y-3">
                         <div className="text-sm font-medium">{t.inboxDefaultMode}</div>
                         <div className="inline-flex rounded-lg border border-border bg-muted/40 p-1">
@@ -544,7 +1046,7 @@ export function SettingsGtdPage({
                             aria-checked={inboxTwoMinuteEnabled}
                             onClick={() => updateInboxProcessing({ twoMinuteEnabled: !inboxTwoMinuteEnabled })}
                             className={cn(
-                                'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                                'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
                                 inboxTwoMinuteEnabled ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
                             )}
                         >
@@ -567,7 +1069,7 @@ export function SettingsGtdPage({
                             disabled={!inboxTwoMinuteEnabled}
                             onClick={() => updateInboxProcessing({ twoMinuteFirst: !inboxTwoMinuteFirst })}
                             className={cn(
-                                'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                                'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
                                 inboxTwoMinuteFirst ? 'bg-primary border-primary' : 'bg-muted/50 border-border',
                                 !inboxTwoMinuteEnabled && 'opacity-50 cursor-not-allowed'
                             )}
@@ -590,7 +1092,7 @@ export function SettingsGtdPage({
                             aria-checked={inboxProjectFirst}
                             onClick={() => updateInboxProcessing({ projectFirst: !inboxProjectFirst })}
                             className={cn(
-                                'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                                'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
                                 inboxProjectFirst ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
                             )}
                         >
@@ -612,7 +1114,7 @@ export function SettingsGtdPage({
                             aria-checked={inboxContextStepEnabled}
                             onClick={() => updateInboxProcessing({ contextStepEnabled: !inboxContextStepEnabled })}
                             className={cn(
-                                'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                                'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
                                 inboxContextStepEnabled ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
                             )}
                         >
@@ -634,7 +1136,7 @@ export function SettingsGtdPage({
                             aria-checked={inboxScheduleEnabled}
                             onClick={() => updateInboxProcessing({ scheduleEnabled: !inboxScheduleEnabled })}
                             className={cn(
-                                'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                                'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
                                 inboxScheduleEnabled ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
                             )}
                         >
@@ -646,42 +1148,67 @@ export function SettingsGtdPage({
                             />
                         </button>
                     </div>
-                    <div className="p-4 flex items-center justify-between gap-6">
-                        <div className="min-w-0">
-                            <div className="text-sm font-medium">{t.inboxReferenceEnabled}</div>
-                        </div>
-                        <button
-                            type="button"
-                            role="switch"
-                            aria-checked={inboxReferenceEnabled}
-                            onClick={() => updateInboxProcessing({ referenceEnabled: !inboxReferenceEnabled })}
-                            className={cn(
-                                'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
-                                inboxReferenceEnabled ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
-                            )}
-                        >
-                            <span
-                                className={cn(
-                                    'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
-                                    inboxReferenceEnabled ? 'translate-x-4' : 'translate-x-1'
-                                )}
-                            />
-                        </button>
+                </div>}
+            </div>
+            <div className="bg-card border border-border rounded-lg">
+                <button
+                    type="button"
+                    onClick={() => setTaskEditorOpen((prev) => !prev)}
+                    aria-expanded={taskEditorOpen}
+                    className="w-full p-4 flex items-center justify-between gap-4 text-left"
+                >
+                    <div className="min-w-0">
+                        <div className="text-sm font-medium">{t.taskEditorLayout}</div>
+                        <div className="text-xs text-muted-foreground mt-1">{t.taskEditorLayoutDesc}</div>
+                        <div className="text-xs text-muted-foreground">{t.taskEditorLayoutHint}</div>
                     </div>
-                </div>
-            </details>
-            <details className="bg-card border border-border rounded-lg p-4">
-                <summary className="list-none cursor-pointer">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <div className="text-sm font-medium">{t.taskEditorLayout}</div>
-                            <div className="text-xs text-muted-foreground mt-1">{t.taskEditorLayoutDesc}</div>
-                            <div className="text-xs text-muted-foreground">{t.taskEditorLayoutHint}</div>
+                    {taskEditorOpen ? <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" /> : <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />}
+                </button>
+                {taskEditorOpen && <div className="p-4 space-y-4">
+                    <div className="rounded-md border border-border bg-muted/20 p-3">
+                        <div className="mb-3">
+                            <div className="text-sm font-medium">{t.taskEditorPresentation}</div>
+                            <div className="text-xs text-muted-foreground mt-1">{t.taskEditorPresentationDesc}</div>
                         </div>
-                        <span className="text-xs text-muted-foreground">▼</span>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                            {([
+                                {
+                                    value: 'inline',
+                                    label: t.taskEditorPresentationInline,
+                                    description: t.taskEditorPresentationInlineDesc,
+                                },
+                                {
+                                    value: 'modal',
+                                    label: t.taskEditorPresentationModal,
+                                    description: t.taskEditorPresentationModalDesc,
+                                },
+                            ] as const).map((option) => {
+                                const selected = taskEditorPresentation === option.value;
+                                return (
+                                    <button
+                                        key={option.value}
+                                        type="button"
+                                        aria-pressed={selected}
+                                        onClick={() => updateTaskEditorPresentation(option.value)}
+                                        className={cn(
+                                            'rounded-md border px-3 py-2 text-left transition-colors',
+                                            selected
+                                                ? 'border-primary bg-primary/10 text-primary'
+                                                : 'border-border bg-background text-foreground hover:bg-muted/50'
+                                        )}
+                                    >
+                                        <div className="text-sm font-medium">{option.label}</div>
+                                        <div className={cn(
+                                            'mt-1 text-xs',
+                                            selected ? 'text-primary/80' : 'text-muted-foreground'
+                                        )}>
+                                            {option.description}
+                                        </div>
+                                    </button>
+                                );
+                            })}
+                        </div>
                     </div>
-                </summary>
-                <div className="space-y-4 mt-4">
                     <div className="flex justify-end">
                         <button
                             type="button"
@@ -723,7 +1250,7 @@ export function SettingsGtdPage({
                                                 aria-label={`${group.title}: ${t.taskEditorOpenByDefault}`}
                                                 onClick={() => updateSectionOpenDefault(sectionOpenSectionId, !isOpenByDefault)}
                                                 className={cn(
-                                                    'relative inline-flex h-5 w-9 items-center rounded-full border transition-colors',
+                                                    'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
                                                     isOpenByDefault ? 'bg-primary border-primary' : 'bg-muted/50 border-border'
                                                 )}
                                             >
@@ -808,8 +1335,8 @@ export function SettingsGtdPage({
                             </div>
                         );
                     })}
-                </div>
-            </details>
+                </div>}
+            </div>
         </div>
     );
 }

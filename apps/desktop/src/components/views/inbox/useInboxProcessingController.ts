@@ -1,40 +1,29 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import {
     addBreadcrumb,
     DEFAULT_PROJECT_COLOR,
-    getFrequentTaskTokens,
-    getRecentTaskTokens,
+    getPersonOptionNames,
+    isTaskInActiveProject,
     parseQuickAddDateCommands,
-    safeParseDate,
+    tFallback,
+    useTaskStore,
     type AppData,
     type Area,
     type Project,
     type Task,
-    type TaskEnergyLevel,
-    type TaskPriority,
 } from '@mindwtr/core';
 
-import type {
-    InboxProcessingQuickPanelProps,
-    QuickActionabilityChoice,
-    QuickExecutionChoice,
-    QuickTwoMinuteChoice,
-} from '../../InboxProcessingQuickPanel';
-import type { InboxProcessingScheduleFieldsControls } from '../../InboxProcessingScheduleFields';
+import type { InboxProcessingQuickPanelProps } from '../../InboxProcessingQuickPanel';
 import type { InboxProcessingWizardProps, ProcessingStep } from '../../InboxProcessingWizard';
-import { DEFAULT_TASK_EDITOR_HIDDEN } from '../../Task/task-item-helpers';
-import { resolveAreaFilter, taskMatchesAreaFilter } from '../../../lib/area-filter';
 import { reportError } from '../../../lib/report-error';
 import { useUiStore } from '../../../store/ui-store';
 import {
     buildDateTimeUpdate,
-    getDateFieldDraft,
-    mergeSuggestedTokens,
     parseTokenListInput,
-    resolveCommittedTime,
 } from './inbox-processing-utils';
+import { useInboxProcessingState } from './useInboxProcessingState';
 
-type ProcessingMode = 'guided' | 'quick';
+const formatTokenListInput = (tokens: string[]): string => tokens.join(', ');
 
 type UseInboxProcessingControllerParams = {
     t: (key: string) => string;
@@ -42,10 +31,12 @@ type UseInboxProcessingControllerParams = {
     projects: Project[];
     areas: Area[];
     settings?: AppData['settings'];
-    addProject: (title: string, color: string) => Promise<Project | null>;
+    addProject: (title: string, color: string, initialProps?: Partial<Project>) => Promise<Project | null>;
+    addTask: (title: string, initialProps?: Partial<Task>) => Promise<unknown>;
     updateTask: (id: string, updates: Partial<Task>) => Promise<unknown>;
     deleteTask: (id: string) => Promise<unknown>;
     allContexts: string[];
+    allTags: string[];
     isProcessing: boolean;
     setIsProcessing: (value: boolean) => void;
 };
@@ -65,219 +56,153 @@ export function useInboxProcessingController({
     areas,
     settings,
     addProject,
+    addTask,
     updateTask,
     deleteTask,
     allContexts,
+    allTags,
     isProcessing,
     setIsProcessing,
 }: UseInboxProcessingControllerParams): UseInboxProcessingControllerResult {
     const showToast = useUiStore((state) => state.showToast);
-    const [processingMode, setProcessingMode] = useState<ProcessingMode>('guided');
-    const [processingTask, setProcessingTask] = useState<Task | null>(null);
-    const [processingStep, setProcessingStep] = useState<ProcessingStep>('actionable');
-    const [stepHistory, setStepHistory] = useState<ProcessingStep[]>([]);
-    const [quickActionability, setQuickActionability] = useState<QuickActionabilityChoice>('actionable');
-    const [quickTwoMinuteChoice, setQuickTwoMinuteChoice] = useState<QuickTwoMinuteChoice>('no');
-    const [quickExecutionChoice, setQuickExecutionChoice] = useState<QuickExecutionChoice>('defer');
-    const [selectedContexts, setSelectedContexts] = useState<string[]>([]);
-    const [selectedTags, setSelectedTags] = useState<string[]>([]);
-    const [selectedEnergyLevel, setSelectedEnergyLevel] = useState<TaskEnergyLevel | undefined>(undefined);
-    const [selectedAssignedTo, setSelectedAssignedTo] = useState('');
-    const [selectedPriority, setSelectedPriority] = useState<TaskPriority | undefined>(undefined);
-    const [delegateWho, setDelegateWho] = useState('');
-    const [delegateFollowUp, setDelegateFollowUp] = useState('');
-    const [projectSearch, setProjectSearch] = useState('');
-    const [processingTitle, setProcessingTitle] = useState('');
-    const [processingDescription, setProcessingDescription] = useState('');
-    const [convertToProject, setConvertToProject] = useState(false);
-    const [projectTitleDraft, setProjectTitleDraft] = useState('');
-    const [nextActionDraft, setNextActionDraft] = useState('');
-    const [customContext, setCustomContext] = useState('');
-    const [customTag, setCustomTag] = useState('');
-    const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-    const [selectedAreaId, setSelectedAreaId] = useState<string | null>(null);
-    const [scheduleDate, setScheduleDate] = useState('');
-    const [scheduleTime, setScheduleTime] = useState('');
-    const [scheduleTimeDraft, setScheduleTimeDraft] = useState('');
-    const [dueDate, setDueDate] = useState('');
-    const [dueTime, setDueTime] = useState('');
-    const [dueTimeDraft, setDueTimeDraft] = useState('');
-    const [reviewDate, setReviewDate] = useState('');
-    const [reviewTime, setReviewTime] = useState('');
-    const [reviewTimeDraft, setReviewTimeDraft] = useState('');
-    const [skippedIds, setSkippedIds] = useState<Set<string>>(new Set());
-
-    const inboxProcessing = settings?.gtd?.inboxProcessing ?? {};
-    const defaultProcessingMode = inboxProcessing.defaultMode === 'quick' ? 'quick' : 'guided';
-    const twoMinuteEnabled = inboxProcessing.twoMinuteEnabled !== false;
-    const twoMinuteFirst = inboxProcessing.twoMinuteFirst === true;
-    const projectFirst = inboxProcessing.projectFirst === true;
-    const contextStepEnabled = inboxProcessing.contextStepEnabled !== false;
-    const scheduleEnabled = inboxProcessing.scheduleEnabled === true;
-    const referenceEnabled = inboxProcessing.referenceEnabled === true;
-    const prioritiesEnabled = settings?.features?.priorities !== false;
-    const hiddenTaskEditorFields = useMemo(
-        () => new Set(settings?.gtd?.taskEditor?.hidden ?? DEFAULT_TASK_EDITOR_HIDDEN),
-        [settings?.gtd?.taskEditor?.hidden],
-    );
-    const showEnergyLevelField = !hiddenTaskEditorFields.has('energyLevel');
-    const showAssignedToField = !hiddenTaskEditorFields.has('assignedTo');
-
-    const areaById = useMemo(() => new Map(areas.map((area) => [area.id, area])), [areas]);
+    const people = useTaskStore((state) => state.people);
+    const personOptions = useMemo(() => getPersonOptionNames(people, tasks), [people, tasks]);
+    const {
+        processingMode,
+        setProcessingMode,
+        processingTask,
+        setProcessingTask,
+        processingStep,
+        setProcessingStep,
+        stepHistory,
+        setStepHistory,
+        quickActionability,
+        setQuickActionability,
+        quickTwoMinuteChoice,
+        setQuickTwoMinuteChoice,
+        quickExecutionChoice,
+        setQuickExecutionChoice,
+        selectedContexts,
+        setSelectedContexts,
+        contextsDraft,
+        setContextsDraft,
+        selectedTags,
+        setSelectedTags,
+        tagsDraft,
+        setTagsDraft,
+        selectedEnergyLevel,
+        setSelectedEnergyLevel,
+        selectedAssignedTo,
+        setSelectedAssignedTo,
+        selectedPriority,
+        setSelectedPriority,
+        selectedTimeEstimate,
+        setSelectedTimeEstimate,
+        delegateWho,
+        setDelegateWho,
+        delegateFollowUp,
+        setDelegateFollowUp,
+        projectSearch,
+        setProjectSearch,
+        processingTitle,
+        setProcessingTitle,
+        processingDescription,
+        setProcessingDescription,
+        convertToProject,
+        setConvertToProject,
+        projectTitleDraft,
+        setProjectTitleDraft,
+        nextActionDraft,
+        setNextActionDraft,
+        extraActionDrafts,
+        setExtraActionDrafts,
+        customContext,
+        setCustomContext,
+        customTag,
+        setCustomTag,
+        selectedProjectId,
+        setSelectedProjectId,
+        selectedAreaId,
+        setSelectedAreaId,
+        skippedIds,
+        setSkippedIds,
+        twoMinuteEnabled,
+        twoMinuteFirst,
+        projectFirst,
+        scheduleEnabled,
+        referenceEnabled,
+        prioritiesEnabled,
+        showProjectField,
+        showAreaField,
+        showContextsField,
+        showTagsField,
+        showPriorityField,
+        showEnergyLevelField,
+        showAssignedToField,
+        showTimeEstimateField,
+        showProjectStep,
+        visibleScheduleFieldKeys,
+        showScheduleFields,
+        showOrganizationStep,
+        areaById,
+        matchesAreaFilter,
+        filteredProjects,
+        hasExactProjectMatch,
+        activeAreas,
+        inboxCount,
+        remainingInboxCount,
+        resetProcessingSession,
+        hydrateProcessingTask,
+        suggestedContexts,
+        suggestedTags,
+        scheduleDate,
+        scheduleTime,
+        scheduleTimeDraft,
+        dueDate,
+        dueTime,
+        dueTimeDraft,
+        reviewDate,
+        reviewTime,
+        reviewTimeDraft,
+        handleScheduleTimeCommit,
+        handleDueTimeCommit,
+        handleReviewTimeCommit,
+        scheduleFields,
+        timeEstimateOptions,
+    } = useInboxProcessingState({
+        tasks,
+        projects,
+        areas,
+        settings,
+    });
     const projectMap = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
-    const resolvedAreaFilter = useMemo(
-        () => resolveAreaFilter(settings?.filters?.areaId, areas),
-        [settings?.filters?.areaId, areas],
-    );
-    const matchesAreaFilter = useCallback(
-        (task: Task) => taskMatchesAreaFilter(task, resolvedAreaFilter, projectMap, areaById),
-        [resolvedAreaFilter, projectMap, areaById],
-    );
 
-    const filteredProjects = useMemo(() => {
-        if (!projectSearch.trim()) return projects;
-        const query = projectSearch.trim().toLowerCase();
-        return projects.filter((project) => project.title.toLowerCase().includes(query));
-    }, [projects, projectSearch]);
-
-    const hasExactProjectMatch = useMemo(() => {
-        if (!projectSearch.trim()) return false;
-        const query = projectSearch.trim().toLowerCase();
-        return projects.some((project) => project.title.toLowerCase() === query);
-    }, [projects, projectSearch]);
-
-    const activeAreas = useMemo(
-        () => areas.filter((area) => !area.deletedAt).sort((a, b) => a.order - b.order),
-        [areas],
-    );
-
-    const inboxCount = useMemo(() => (
-        tasks.filter((task) => {
-            if (task.status !== 'inbox' || task.deletedAt) return false;
-            const start = safeParseDate(task.startTime);
-            if (start && start > new Date()) return false;
-            if (!matchesAreaFilter(task)) return false;
-            return true;
-        }).length
-    ), [tasks, matchesAreaFilter]);
-
-    const remainingInboxCount = useMemo(
-        () => tasks.filter((task) => task.status === 'inbox' && !skippedIds.has(task.id) && matchesAreaFilter(task)).length,
-        [tasks, skippedIds, matchesAreaFilter],
-    );
-
-    const resetProcessingSession = useCallback(() => {
-        setProcessingMode(defaultProcessingMode);
-        setProcessingTask(null);
-        setProcessingStep('actionable');
-        setStepHistory([]);
-        setQuickActionability('actionable');
-        setQuickTwoMinuteChoice('no');
-        setQuickExecutionChoice('defer');
-        setSelectedContexts([]);
-        setSelectedTags([]);
-        setSelectedEnergyLevel(undefined);
-        setSelectedAssignedTo('');
-        setSelectedPriority(undefined);
-        setDelegateWho('');
-        setDelegateFollowUp('');
-        setProjectSearch('');
-        setProcessingTitle('');
-        setProcessingDescription('');
-        setConvertToProject(false);
-        setProjectTitleDraft('');
-        setNextActionDraft('');
-        setCustomContext('');
-        setCustomTag('');
-        setSelectedProjectId(null);
-        setSelectedAreaId(null);
-        setScheduleDate('');
-        setScheduleTime('');
-        setScheduleTimeDraft('');
-        setDueDate('');
-        setDueTime('');
-        setDueTimeDraft('');
-        setReviewDate('');
-        setReviewTime('');
-        setReviewTimeDraft('');
-        setSkippedIds(new Set());
-    }, [defaultProcessingMode]);
+    const handleSetSelectedAreaId = useCallback((areaId: string | null) => {
+        setSelectedAreaId(areaId);
+        setSelectedProjectId((currentProjectId) => {
+            if (!currentProjectId || !areaId) return currentProjectId;
+            const project = projectMap.get(currentProjectId);
+            return project?.areaId === areaId ? currentProjectId : null;
+        });
+    }, [projectMap, setSelectedAreaId, setSelectedProjectId]);
 
     useEffect(() => {
         if (isProcessing) return;
         resetProcessingSession();
-    }, [
-        contextStepEnabled,
-        defaultProcessingMode,
-        isProcessing,
-        prioritiesEnabled,
-        projectFirst,
-        referenceEnabled,
-        resetProcessingSession,
-        scheduleEnabled,
-        twoMinuteEnabled,
-        twoMinuteFirst,
-    ]);
-
-    const hydrateProcessingTask = useCallback((task: Task) => {
-        setProcessingTask(task);
-        setProcessingStep('refine');
-        setStepHistory([]);
-        setQuickActionability('actionable');
-        setQuickTwoMinuteChoice('no');
-        setQuickExecutionChoice('defer');
-        setSelectedContexts(task.contexts ?? []);
-        setSelectedTags(task.tags ?? []);
-        setSelectedEnergyLevel(task.energyLevel);
-        setSelectedAssignedTo(task.assignedTo ?? '');
-        setSelectedPriority(task.priority);
-        setCustomContext('');
-        setCustomTag('');
-        setProjectSearch('');
-        setProcessingTitle(task.title);
-        setProcessingDescription(task.description || '');
-        setConvertToProject(false);
-        setProjectTitleDraft(task.title);
-        setNextActionDraft('');
-        setSelectedProjectId(task.projectId ?? null);
-        setSelectedAreaId(task.projectId ? null : (task.areaId ?? null));
-        const startDraft = getDateFieldDraft(task.startTime);
-        setScheduleDate(startDraft.date);
-        setScheduleTime(startDraft.time);
-        setScheduleTimeDraft(startDraft.timeDraft);
-        const dueDraft = getDateFieldDraft(task.dueDate);
-        setDueDate(dueDraft.date);
-        setDueTime(dueDraft.time);
-        setDueTimeDraft(dueDraft.timeDraft);
-        const reviewDraft = getDateFieldDraft(task.reviewAt);
-        setReviewDate(reviewDraft.date);
-        setReviewTime(reviewDraft.time);
-        setReviewTimeDraft(reviewDraft.timeDraft);
-    }, []);
-
-    const suggestedContexts = useMemo(
-        () => mergeSuggestedTokens(
-            getRecentTaskTokens(tasks, (task) => task.contexts, 6, { prefix: '@' }),
-            getFrequentTaskTokens(tasks, (task) => task.contexts, 6, { prefix: '@' }),
-        ).slice(0, 8),
-        [tasks],
-    );
-
-    const suggestedTags = useMemo(
-        () => mergeSuggestedTokens(
-            getRecentTaskTokens(tasks, (task) => task.tags, 6, { prefix: '#' }),
-            getFrequentTaskTokens(tasks, (task) => task.tags, 6, { prefix: '#' }),
-        ).slice(0, 8),
-        [tasks],
-    );
+    }, [isProcessing, resetProcessingSession]);
 
     const startProcessing = useCallback(() => {
-        const inboxTasks = tasks.filter((task) => task.status === 'inbox' && matchesAreaFilter(task));
+        const inboxTasks = tasks.filter((task) => (
+            task.status === 'inbox'
+            && !task.deletedAt
+            && isTaskInActiveProject(task, projectMap)
+            && matchesAreaFilter(task)
+        ));
         if (inboxTasks.length === 0) return;
         hydrateProcessingTask(inboxTasks[0]);
         addBreadcrumb('inbox:start');
         setIsProcessing(true);
-    }, [tasks, hydrateProcessingTask, setIsProcessing, matchesAreaFilter]);
+    }, [tasks, hydrateProcessingTask, setIsProcessing, projectMap, matchesAreaFilter]);
 
     const closeProcessing = useCallback(() => {
         setIsProcessing(false);
@@ -287,8 +212,10 @@ export function useInboxProcessingController({
         const currentTaskId = processingTask?.id;
         const inboxTasks = tasks.filter((task) =>
             task.status === 'inbox'
+            && !task.deletedAt
             && task.id !== currentTaskId
             && !skippedIds.has(task.id)
+            && isTaskInActiveProject(task, projectMap)
             && matchesAreaFilter(task)
         );
         if (inboxTasks.length > 0) {
@@ -299,11 +226,30 @@ export function useInboxProcessingController({
         setIsProcessing(false);
         setProcessingTask(null);
         setSelectedContexts([]);
+        setContextsDraft('');
         setSelectedTags([]);
+        setTagsDraft('');
         setSelectedEnergyLevel(undefined);
         setSelectedAssignedTo('');
         setSelectedPriority(undefined);
-    }, [hydrateProcessingTask, processingTask?.id, tasks, setIsProcessing, skippedIds, matchesAreaFilter]);
+        setSelectedTimeEstimate(undefined);
+    }, [
+        hydrateProcessingTask,
+        matchesAreaFilter,
+        processingTask?.id,
+        projectMap,
+        setContextsDraft,
+        setIsProcessing,
+        setSelectedAssignedTo,
+        setSelectedContexts,
+        setSelectedEnergyLevel,
+        setSelectedPriority,
+        setSelectedTags,
+        setSelectedTimeEstimate,
+        setTagsDraft,
+        skippedIds,
+        tasks,
+    ]);
 
     const handleSkip = useCallback(() => {
         if (processingTask) {
@@ -347,6 +293,7 @@ export function useInboxProcessingController({
         const { title: parsedTitle, props: parsedDateProps, invalidDateCommands } = parseQuickAddDateCommands(
             titleInput,
             new Date(),
+            { preserveText: settings?.quickAddAutoClean !== true },
         );
         if (invalidDateCommands && invalidDateCommands.length > 0) {
             showToast(`${t('quickAdd.invalidDateCommand')}: ${invalidDateCommands.join(', ')}`, 'error');
@@ -362,22 +309,7 @@ export function useInboxProcessingController({
             ...parsedDateProps,
         });
         return true;
-    }, [processingDescription, processingTask, processingTitle, showToast, t, updateTask]);
-
-    const handleNotActionable = useCallback((action: 'trash' | 'someday' | 'reference') => {
-        if (!processingTask) return;
-        if (action === 'trash') {
-            void deleteTask(processingTask.id);
-            processNext();
-            return;
-        }
-        const applied = action === 'someday'
-            ? applyProcessingEdits({ status: 'someday' })
-            : applyProcessingEdits({ status: 'reference' });
-        if (applied) {
-            processNext();
-        }
-    }, [applyProcessingEdits, deleteTask, processNext, processingTask]);
+    }, [processingDescription, processingTask, processingTitle, settings?.quickAddAutoClean, showToast, t, updateTask]);
 
     const goToStep = useCallback((nextStep: ProcessingStep) => {
         setStepHistory((prev) => [...prev, processingStep]);
@@ -393,6 +325,95 @@ export function useInboxProcessingController({
             return next;
         });
     }, []);
+
+    const buildReferenceUpdates = useCallback((): Partial<Task> => {
+        const updates: Partial<Task> = { status: 'reference' };
+        if (showContextsField) updates.contexts = selectedContexts;
+        if (showTagsField) updates.tags = selectedTags;
+        return updates;
+    }, [selectedContexts, selectedTags, showContextsField, showTagsField]);
+
+    const handleNotActionable = useCallback((action: 'trash' | 'someday' | 'reference') => {
+        if (!processingTask) return;
+        if (action === 'trash') {
+            void deleteTask(processingTask.id);
+            processNext();
+            return;
+        }
+        if (action === 'reference') {
+            if (processingMode === 'guided' && (showContextsField || showTagsField)) {
+                goToStep('reference');
+                return;
+            }
+            const applied = applyProcessingEdits(buildReferenceUpdates());
+            if (applied) {
+                processNext();
+            }
+            return;
+        }
+        const applied = applyProcessingEdits({ status: 'someday' });
+        if (applied) {
+            processNext();
+        }
+    }, [
+        applyProcessingEdits,
+        buildReferenceUpdates,
+        deleteTask,
+        goToStep,
+        processNext,
+        processingMode,
+        processingTask,
+        showContextsField,
+        showTagsField,
+    ]);
+
+    const handleConfirmReference = useCallback(() => {
+        if (!processingTask) return;
+        const applied = applyProcessingEdits(buildReferenceUpdates());
+        if (applied) {
+            processNext();
+        }
+    }, [applyProcessingEdits, buildReferenceUpdates, processNext, processingTask]);
+
+    const handleLater = useCallback(() => {
+        if (!processingTask) return;
+        handleScheduleTimeCommit();
+        const startTime = buildDateTimeUpdate(scheduleDate, scheduleTimeDraft, scheduleTime);
+        if (!startTime) {
+            showToast(tFallback(t, 'process.laterStartRequired', 'Choose a start date for Later.'), 'error');
+            return;
+        }
+        const projectUpdates = projectFirst && showProjectStep
+            ? {
+                ...(showProjectField ? { projectId: selectedProjectId || undefined } : {}),
+                ...(showAreaField ? { areaId: selectedProjectId ? undefined : (selectedAreaId || undefined) } : {}),
+            }
+            : {};
+        const applied = applyProcessingEdits({
+            status: 'next',
+            ...projectUpdates,
+            startTime,
+        });
+        if (applied) {
+            processNext();
+        }
+    }, [
+        applyProcessingEdits,
+        handleScheduleTimeCommit,
+        processNext,
+        processingTask,
+        projectFirst,
+        scheduleDate,
+        scheduleTime,
+        scheduleTimeDraft,
+        selectedAreaId,
+        selectedProjectId,
+        showAreaField,
+        showProjectField,
+        showProjectStep,
+        showToast,
+        t,
+    ]);
 
     const getInitialGuidedStep = useCallback<() => ProcessingStep>(() => (
         twoMinuteEnabled && twoMinuteFirst ? 'twomin' : 'actionable'
@@ -415,13 +436,16 @@ export function useInboxProcessingController({
     }, [continueFromProjectCheck]);
 
     const handleProjectCheckYes = useCallback(() => {
-        const { title: parsedTitle } = parseQuickAddDateCommands(processingTitle, new Date());
+        const { title: parsedTitle } = parseQuickAddDateCommands(processingTitle, new Date(), {
+            preserveText: settings?.quickAddAutoClean !== true,
+        });
         const baseTitle = parsedTitle.trim() || processingTitle.trim() || processingTask?.title || '';
         setConvertToProject(true);
         setProjectTitleDraft(baseTitle);
         setNextActionDraft(baseTitle);
+        setExtraActionDrafts([]);
         goToStep('project');
-    }, [goToStep, processingTask?.title, processingTitle]);
+    }, [goToStep, processingTask?.title, processingTitle, setExtraActionDrafts, settings?.quickAddAutoClean]);
 
     const handleTwoMinDone = useCallback(() => {
         if (!processingTask) return;
@@ -451,6 +475,7 @@ export function useInboxProcessingController({
             status: 'waiting',
             energyLevel: selectedEnergyLevel ?? undefined,
             assignedTo: who || undefined,
+            timeEstimate: selectedTimeEstimate ?? undefined,
             ...(prioritiesEnabled ? { priority: selectedPriority ?? undefined } : {}),
             ...scheduleUpdates,
             reviewAt: followUpIso,
@@ -470,6 +495,7 @@ export function useInboxProcessingController({
         processingTask,
         selectedEnergyLevel,
         selectedPriority,
+        selectedTimeEstimate,
     ]);
 
     const handleDelegateBack = useCallback(() => {
@@ -496,163 +522,62 @@ export function useInboxProcessingController({
         window.open(mailto);
     }, [delegateWho, processingDescription, processingTask, processingTitle]);
 
+    const updateSelectedContexts = useCallback((contexts: string[]) => {
+        setSelectedContexts(contexts);
+        setContextsDraft(formatTokenListInput(contexts));
+    }, [setContextsDraft, setSelectedContexts]);
+
+    const updateSelectedTags = useCallback((tags: string[]) => {
+        setSelectedTags(tags);
+        setTagsDraft(formatTokenListInput(tags));
+    }, [setSelectedTags, setTagsDraft]);
+
     const toggleTag = useCallback((tag: string) => {
-        setSelectedTags((prev) =>
-            prev.includes(tag) ? prev.filter((item) => item !== tag) : [...prev, tag]
-        );
-    }, []);
+        const nextTags = selectedTags.includes(tag)
+            ? selectedTags.filter((item) => item !== tag)
+            : [...selectedTags, tag];
+        updateSelectedTags(nextTags);
+    }, [selectedTags, updateSelectedTags]);
 
     const toggleContext = useCallback((ctx: string) => {
         if (ctx.startsWith('#')) {
             toggleTag(ctx);
             return;
         }
-        setSelectedContexts((prev) =>
-            prev.includes(ctx) ? prev.filter((item) => item !== ctx) : [...prev, ctx]
-        );
-    }, [toggleTag]);
+        const nextContexts = selectedContexts.includes(ctx)
+            ? selectedContexts.filter((item) => item !== ctx)
+            : [...selectedContexts, ctx];
+        updateSelectedContexts(nextContexts);
+    }, [selectedContexts, toggleTag, updateSelectedContexts]);
 
-    const addCustomContext = useCallback(() => {
-        const trimmed = customContext.trim();
-        if (!trimmed) return;
-        const raw = trimmed.replace(/^@/, '');
-        const ctx = `@${raw.replace(/^@/, '').trim()}`;
-        if (ctx.length > 1 && !selectedContexts.includes(ctx)) {
-            setSelectedContexts((prev) => [...prev, ctx]);
+    const addCustomContext = useCallback((value?: string) => {
+        const contexts = parseTokenListInput(value ?? customContext, '@');
+        if (contexts.length > 0) {
+            updateSelectedContexts(Array.from(new Set([...selectedContexts, ...contexts])));
         }
         setCustomContext('');
-    }, [customContext, selectedContexts]);
+    }, [customContext, selectedContexts, setCustomContext, updateSelectedContexts]);
 
-    const addCustomTag = useCallback(() => {
-        const trimmed = customTag.trim();
-        if (!trimmed) return;
-        const tag = `#${trimmed.replace(/^#+/, '').trim()}`;
-        if (tag.length > 1 && !selectedTags.includes(tag)) {
-            setSelectedTags((prev) => [...prev, tag]);
+    const addCustomTag = useCallback((value?: string) => {
+        const tags = parseTokenListInput(value ?? customTag, '#');
+        if (tags.length > 0) {
+            updateSelectedTags(Array.from(new Set([...selectedTags, ...tags])));
         }
         setCustomTag('');
-    }, [customTag, selectedTags]);
-
-    const handleProcessingTimeCommit = useCallback((
-        draft: string,
-        committed: string,
-        setDraft: (value: string) => void,
-        setTime: (value: string) => void,
-    ) => {
-        const resolved = resolveCommittedTime(draft, committed);
-        setDraft(resolved.timeDraft);
-        setTime(resolved.time);
-    }, []);
-
-    const handleDateFieldChange = useCallback((
-        value: string,
-        setDateValue: (value: string) => void,
-        setTimeValue: (value: string) => void,
-        setTimeDraftValue: (value: string) => void,
-    ) => {
-        setDateValue(value);
-        if (!value) {
-            setTimeValue('');
-            setTimeDraftValue('');
-        }
-    }, []);
-
-    const handleScheduleTimeCommit = useCallback(() => {
-        handleProcessingTimeCommit(scheduleTimeDraft, scheduleTime, setScheduleTimeDraft, setScheduleTime);
-    }, [handleProcessingTimeCommit, scheduleTime, scheduleTimeDraft]);
-
-    const handleDueTimeCommit = useCallback(() => {
-        handleProcessingTimeCommit(dueTimeDraft, dueTime, setDueTimeDraft, setDueTime);
-    }, [dueTime, dueTimeDraft, handleProcessingTimeCommit]);
-
-    const handleReviewTimeCommit = useCallback(() => {
-        handleProcessingTimeCommit(reviewTimeDraft, reviewTime, setReviewTimeDraft, setReviewTime);
-    }, [handleProcessingTimeCommit, reviewTime, reviewTimeDraft]);
-
-    const handleScheduleDateChange = useCallback((value: string) => {
-        handleDateFieldChange(value, setScheduleDate, setScheduleTime, setScheduleTimeDraft);
-    }, [handleDateFieldChange]);
-
-    const handleDueDateChange = useCallback((value: string) => {
-        handleDateFieldChange(value, setDueDate, setDueTime, setDueTimeDraft);
-    }, [handleDateFieldChange]);
-
-    const handleReviewDateChange = useCallback((value: string) => {
-        handleDateFieldChange(value, setReviewDate, setReviewTime, setReviewTimeDraft);
-    }, [handleDateFieldChange]);
-
-    const clearScheduleDate = useCallback(() => {
-        setScheduleDate('');
-        setScheduleTime('');
-        setScheduleTimeDraft('');
-    }, []);
-
-    const clearDueDate = useCallback(() => {
-        setDueDate('');
-        setDueTime('');
-        setDueTimeDraft('');
-    }, []);
-
-    const clearReviewDate = useCallback(() => {
-        setReviewDate('');
-        setReviewTime('');
-        setReviewTimeDraft('');
-    }, []);
-
-    const scheduleFields = useMemo<InboxProcessingScheduleFieldsControls>(() => ({
-        start: {
-            date: scheduleDate,
-            timeDraft: scheduleTimeDraft,
-            onDateChange: handleScheduleDateChange,
-            onTimeDraftChange: setScheduleTimeDraft,
-            onTimeCommit: handleScheduleTimeCommit,
-            onClear: clearScheduleDate,
-        },
-        due: {
-            date: dueDate,
-            timeDraft: dueTimeDraft,
-            onDateChange: handleDueDateChange,
-            onTimeDraftChange: setDueTimeDraft,
-            onTimeCommit: handleDueTimeCommit,
-            onClear: clearDueDate,
-        },
-        review: {
-            date: reviewDate,
-            timeDraft: reviewTimeDraft,
-            onDateChange: handleReviewDateChange,
-            onTimeDraftChange: setReviewTimeDraft,
-            onTimeCommit: handleReviewTimeCommit,
-            onClear: clearReviewDate,
-        },
-    }), [
-        clearDueDate,
-        clearReviewDate,
-        clearScheduleDate,
-        dueDate,
-        dueTimeDraft,
-        handleDueDateChange,
-        handleDueTimeCommit,
-        handleReviewDateChange,
-        handleReviewTimeCommit,
-        handleScheduleDateChange,
-        handleScheduleTimeCommit,
-        reviewDate,
-        reviewTimeDraft,
-        scheduleDate,
-        scheduleTimeDraft,
-    ]);
+    }, [customTag, selectedTags, setCustomTag, updateSelectedTags]);
 
     const handleSetProject = useCallback((projectId: string | null) => {
         if (!processingTask) return;
         const applied = applyProcessingEdits({
             status: 'next',
-            contexts: selectedContexts,
-            tags: selectedTags,
+            contexts: showContextsField ? selectedContexts : (processingTask.contexts ?? []),
+            tags: showTagsField ? selectedTags : (processingTask.tags ?? []),
             energyLevel: selectedEnergyLevel ?? undefined,
             assignedTo: selectedAssignedTo.trim() || undefined,
+            timeEstimate: selectedTimeEstimate ?? undefined,
             ...(prioritiesEnabled ? { priority: selectedPriority ?? undefined } : {}),
             projectId: projectId || undefined,
-            areaId: projectId ? undefined : (selectedAreaId || undefined),
+            areaId: projectId ? undefined : (showAreaField ? (selectedAreaId || undefined) : (processingTask.areaId || undefined)),
             ...buildScheduleUpdates(),
         });
         if (applied) {
@@ -669,7 +594,11 @@ export function useInboxProcessingController({
         selectedContexts,
         selectedEnergyLevel,
         selectedPriority,
+        selectedTimeEstimate,
         selectedTags,
+        showAreaField,
+        showContextsField,
+        showTagsField,
     ]);
 
     const handleConfirmContexts = useCallback(() => {
@@ -677,13 +606,19 @@ export function useInboxProcessingController({
             handleSetProject(selectedProjectId);
             return;
         }
+        if (!showProjectStep) {
+            handleSetProject(selectedProjectId);
+            return;
+        }
         goToStep('project');
-    }, [goToStep, handleSetProject, projectFirst, selectedProjectId]);
+    }, [goToStep, handleSetProject, projectFirst, selectedProjectId, showProjectStep]);
 
     const handleDefer = useCallback(() => {
-        if (contextStepEnabled) {
-            setSelectedContexts(processingTask?.contexts ?? []);
-            setSelectedTags(processingTask?.tags ?? []);
+        if (showOrganizationStep) {
+            const taskContexts = processingTask?.contexts ?? [];
+            const taskTags = processingTask?.tags ?? [];
+            updateSelectedContexts(taskContexts);
+            updateSelectedTags(taskTags);
             goToStep('context');
             return;
         }
@@ -691,15 +626,22 @@ export function useInboxProcessingController({
             handleSetProject(selectedProjectId);
             return;
         }
+        if (!showProjectStep) {
+            handleSetProject(selectedProjectId);
+            return;
+        }
         goToStep('project');
     }, [
-        contextStepEnabled,
         goToStep,
         handleSetProject,
         processingTask?.contexts,
         processingTask?.tags,
         projectFirst,
         selectedProjectId,
+        showOrganizationStep,
+        showProjectStep,
+        updateSelectedContexts,
+        updateSelectedTags,
     ]);
 
     const handleConvertToProject = useCallback(async () => {
@@ -713,19 +655,34 @@ export function useInboxProcessingController({
         }
         try {
             const existing = projects.find((project) => project.title.toLowerCase() === projectTitle.toLowerCase());
-            const project = existing ?? await addProject(projectTitle, DEFAULT_PROJECT_COLOR);
+            const project = existing ?? await addProject(
+                projectTitle,
+                DEFAULT_PROJECT_COLOR,
+                showAreaField && selectedAreaId ? { areaId: selectedAreaId } : undefined,
+            );
             if (!project) return;
             const applied = applyProcessingEdits({
                 status: 'next',
-                contexts: selectedContexts,
-                tags: selectedTags,
+                contexts: showContextsField ? selectedContexts : (processingTask.contexts ?? []),
+                tags: showTagsField ? selectedTags : (processingTask.tags ?? []),
                 energyLevel: selectedEnergyLevel ?? undefined,
                 assignedTo: selectedAssignedTo.trim() || undefined,
+                timeEstimate: selectedTimeEstimate ?? undefined,
                 ...(prioritiesEnabled ? { priority: selectedPriority ?? undefined } : {}),
                 projectId: project.id,
                 ...buildScheduleUpdates(),
             }, nextAction, processingTask.title);
             if (applied) {
+                // The converted capture becomes the project's clarified next
+                // action. Extra actions typed at the split step are raw
+                // captures, so they return to the Inbox (project attached)
+                // for their own clarify pass — same semantics as a quick-add
+                // with a +Project token (#827).
+                const extraActions = extraActionDrafts.map((title) => title.trim()).filter(Boolean);
+                for (const title of extraActions) {
+                    await addTask(title, { status: 'inbox', projectId: project.id });
+                }
+                setExtraActionDrafts([]);
                 processNext();
             }
         } catch (error) {
@@ -734,6 +691,9 @@ export function useInboxProcessingController({
         }
     }, [
         addProject,
+        addTask,
+        extraActionDrafts,
+        setExtraActionDrafts,
         applyProcessingEdits,
         buildScheduleUpdates,
         nextActionDraft,
@@ -743,11 +703,16 @@ export function useInboxProcessingController({
         processNext,
         projectTitleDraft,
         projects,
+        selectedAreaId,
         selectedAssignedTo,
         selectedContexts,
         selectedEnergyLevel,
         selectedPriority,
+        selectedTimeEstimate,
         selectedTags,
+        showAreaField,
+        showContextsField,
+        showTagsField,
         showToast,
         t,
     ]);
@@ -757,17 +722,23 @@ export function useInboxProcessingController({
     }, [getInitialGuidedStep, goToStep]);
 
     const handleContextsInputChange = useCallback((value: string) => {
+        setContextsDraft(value);
         setSelectedContexts(parseTokenListInput(value, '@'));
-    }, []);
+    }, [setContextsDraft, setSelectedContexts]);
 
     const handleTagsInputChange = useCallback((value: string) => {
+        setTagsDraft(value);
         setSelectedTags(parseTokenListInput(value, '#'));
-    }, []);
+    }, [setSelectedTags, setTagsDraft]);
 
     const handleQuickSubmit = useCallback(async () => {
         handleScheduleTimeCommit();
         handleDueTimeCommit();
         handleReviewTimeCommit();
+        if (quickActionability === 'later') {
+            handleLater();
+            return;
+        }
         if (quickActionability !== 'actionable') {
             handleNotActionable(quickActionability);
             return;
@@ -790,6 +761,7 @@ export function useInboxProcessingController({
         handleConfirmWaiting,
         handleConvertToProject,
         handleDueTimeCommit,
+        handleLater,
         handleNotActionable,
         handleReviewTimeCommit,
         handleScheduleTimeCommit,
@@ -823,22 +795,32 @@ export function useInboxProcessingController({
             setTwoMinuteChoice: setQuickTwoMinuteChoice,
             executionChoice: quickExecutionChoice,
             setExecutionChoice: setQuickExecutionChoice,
-            showScheduleFields: scheduleEnabled,
+            showScheduleFields,
             scheduleFields,
+            visibleScheduleFieldKeys,
             delegateWho,
             setDelegateWho,
             delegateFollowUp,
             setDelegateFollowUp,
             onSendDelegateRequest: handleSendDelegateRequest,
             selectedContexts,
+            contextsDraft,
             selectedTags,
+            tagsDraft,
             selectedEnergyLevel,
             setSelectedEnergyLevel,
             selectedAssignedTo,
             setSelectedAssignedTo,
+            personOptions,
+            selectedTimeEstimate,
+            setSelectedTimeEstimate,
+            timeEstimateOptions,
+            showContextsField,
+            showTagsField,
             showEnergyLevelField,
             showAssignedToField,
-            prioritiesEnabled,
+            showTimeEstimateField,
+            showPriorityField,
             selectedPriority,
             setSelectedPriority,
             onContextsInputChange: handleContextsInputChange,
@@ -847,12 +829,16 @@ export function useInboxProcessingController({
             toggleTag,
             suggestedContexts,
             suggestedTags,
+            allContexts,
+            allTags,
             projects,
             areas: activeAreas,
             selectedProjectId,
             setSelectedProjectId,
             selectedAreaId,
-            setSelectedAreaId,
+            setSelectedAreaId: handleSetSelectedAreaId,
+            showProjectField,
+            showAreaField,
             convertToProject,
             setConvertToProject,
             projectTitleDraft,
@@ -881,6 +867,7 @@ export function useInboxProcessingController({
         handleRefineNext,
         handleSkip,
         handleNotActionable,
+        handleLater,
         handleActionable,
         showDoneNowShortcut: twoMinuteEnabled && !twoMinuteFirst,
         showReferenceOption: referenceEnabled,
@@ -897,18 +884,27 @@ export function useInboxProcessingController({
         handleDelegateBack,
         handleSendDelegateRequest,
         handleConfirmWaiting,
+        handleConfirmReference,
         selectedContexts,
         selectedTags,
         selectedEnergyLevel,
         setSelectedEnergyLevel,
         selectedAssignedTo,
         setSelectedAssignedTo,
+        personOptions,
+        selectedTimeEstimate,
+        setSelectedTimeEstimate,
+        timeEstimateOptions,
+        showContextsField,
+        showTagsField,
         showEnergyLevelField,
         showAssignedToField,
-        prioritiesEnabled,
+        showTimeEstimateField,
+        showPriorityField,
         selectedPriority,
         setSelectedPriority,
         allContexts,
+        allTags,
         customContext,
         setCustomContext,
         addCustomContext,
@@ -926,6 +922,8 @@ export function useInboxProcessingController({
         setNextActionDraft,
         projectTitleDraft,
         nextActionDraft,
+        extraActionDrafts,
+        setExtraActionDrafts,
         handleConvertToProject,
         projectSearch,
         setProjectSearch,
@@ -937,13 +935,16 @@ export function useInboxProcessingController({
         hasExactProjectMatch,
         areaById,
         remainingCount: remainingInboxCount,
-        showProjectInRefine: projectFirst,
+        showProjectInRefine: projectFirst && showProjectStep,
         selectedProjectId,
         setSelectedProjectId,
         selectedAreaId,
-        setSelectedAreaId,
-        showScheduleFields: scheduleEnabled,
+        setSelectedAreaId: handleSetSelectedAreaId,
+        showProjectField,
+        showAreaField,
+        showScheduleFields,
         scheduleFields,
+        visibleScheduleFieldKeys,
     };
 
     return {

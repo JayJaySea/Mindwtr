@@ -1,7 +1,7 @@
 import React from 'react';
 import { Image, Modal, Pressable, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
-import type { Attachment } from '@mindwtr/core';
+import { translateWithFallback, type Attachment } from '@mindwtr/core';
 
 import { styles } from './task-edit-modal.styles';
 
@@ -21,6 +21,7 @@ type TaskEditLinkModalProps = {
     visible: boolean;
     t: Translator;
     tc: ThemeColors;
+    title: string;
     linkInput: string;
     linkInputTouched: boolean;
     onChangeLinkInput: (value: string) => void;
@@ -33,6 +34,7 @@ export const TaskEditLinkModal = ({
     visible,
     t,
     tc,
+    title,
     linkInput,
     linkInputTouched,
     onChangeLinkInput,
@@ -48,7 +50,7 @@ export const TaskEditLinkModal = ({
     >
         <View style={styles.overlay}>
             <View style={[styles.modalCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
-                <Text style={[styles.modalTitle, { color: tc.text }]}>{t('attachments.addLink')}</Text>
+                <Text style={[styles.modalTitle, { color: tc.text }]}>{title}</Text>
                 <TextInput
                     value={linkInput}
                     onChangeText={onChangeLinkInput}
@@ -88,6 +90,95 @@ export const TaskEditLinkModal = ({
         </View>
     </Modal>
 );
+
+type TaskEditWaitingAssignmentModalProps = {
+    visible: boolean;
+    t: Translator;
+    tc: ThemeColors;
+    value: string;
+    suggestions?: string[];
+    onChangeValue: (value: string) => void;
+    onClose: () => void;
+    onSave: () => void;
+};
+
+export const TaskEditWaitingAssignmentModal = ({
+    visible,
+    t,
+    tc,
+    value,
+    suggestions = [],
+    onChangeValue,
+    onClose,
+    onSave,
+}: TaskEditWaitingAssignmentModalProps) => {
+    const title = translateWithFallback(t, 'process.waitingFor', 'Who/what are you waiting for?');
+    const description = translateWithFallback(
+        t,
+        'process.waitingForDesc',
+        "Add a note to remember what you're waiting on",
+    );
+    const placeholder = translateWithFallback(
+        t,
+        'taskEdit.assignedToPlaceholder',
+        'Who is this waiting for?',
+    );
+
+    return (
+        <Modal
+            visible={visible}
+            transparent
+            animationType="fade"
+            onRequestClose={onClose}
+        >
+            <Pressable style={styles.overlay} onPress={onClose}>
+                <Pressable
+                    style={[styles.modalCard, { backgroundColor: tc.cardBg, borderColor: tc.border }]}
+                    onPress={(event) => event.stopPropagation()}
+                >
+                    <Text style={[styles.modalTitle, { color: tc.text }]}>{title}</Text>
+                    <Text style={[styles.modalLabel, { color: tc.secondaryText }]}>{description}</Text>
+                    <TextInput
+                        value={value}
+                        onChangeText={onChangeValue}
+                        placeholder={placeholder}
+                        placeholderTextColor={tc.secondaryText}
+                        style={[styles.modalInput, { backgroundColor: tc.inputBg, borderColor: tc.border, color: tc.text }]}
+                        autoCapitalize="words"
+                        returnKeyType="done"
+                        accessibilityLabel={title}
+                        accessibilityHint={description}
+                        onSubmitEditing={onSave}
+                    />
+                    {suggestions.length > 0 && (
+                        <View style={[styles.tokenSuggestionsMenu, { backgroundColor: tc.cardBg, borderColor: tc.border }]}>
+                            {suggestions.map((name, index) => (
+                                <TouchableOpacity
+                                    key={name}
+                                    style={[
+                                        styles.tokenSuggestionItem,
+                                        index === suggestions.length - 1 ? styles.tokenSuggestionItemLast : null,
+                                    ]}
+                                    onPress={() => onChangeValue(name)}
+                                >
+                                    <Text style={[styles.tokenSuggestionText, { color: tc.text }]}>{name}</Text>
+                                </TouchableOpacity>
+                            ))}
+                        </View>
+                    )}
+                    <View style={styles.modalButtons}>
+                        <TouchableOpacity onPress={onClose} style={styles.modalButton}>
+                            <Text style={[styles.modalButtonText, { color: tc.secondaryText }]}>{t('common.cancel')}</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={onSave} style={styles.modalButton}>
+                            <Text style={[styles.modalButtonText, { color: tc.tint }]}>{t('common.save')}</Text>
+                        </TouchableOpacity>
+                    </View>
+                </Pressable>
+            </Pressable>
+        </Modal>
+    );
+};
 
 type AudioStatusLike = {
     isLoaded?: boolean;
@@ -131,10 +222,7 @@ export const TaskEditAudioModal = ({
     onRetryTranscription,
     onClose,
 }: TaskEditAudioModalProps) => {
-    const resolveText = (key: string, fallback: string) => {
-        const translated = t(key);
-        return translated === key ? fallback : translated;
-    };
+    const resolveText = (key: string, fallback: string) => translateWithFallback(t, key, fallback);
 
     return (
         <Modal

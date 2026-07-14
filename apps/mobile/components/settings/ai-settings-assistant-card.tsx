@@ -4,13 +4,14 @@ import { Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import type { AIProviderId, AIReasoningEffort } from '@mindwtr/core';
 
 import type { ThemeColors } from '@/hooks/use-theme-colors';
+import { CompactText } from '@/components/compact-text';
 
 import { AiSettingsAssistantAnthropicPanel } from './ai-settings-assistant-anthropic-panel';
 import { AiSettingsAssistantGeminiPanel } from './ai-settings-assistant-gemini-panel';
 import { AiSettingsAssistantOpenAiPanel } from './ai-settings-assistant-openai-panel';
 import { styles } from './settings.styles';
 
-type Localize = (english: string, chinese: string) => string;
+type SettingsTranslator = (key: string, values?: Record<string, string | number | boolean | null | undefined>) => string;
 type ModelPickerKind = null | 'model' | 'copilot' | 'speech';
 type Translate = (key: string) => string;
 
@@ -21,6 +22,8 @@ type AiSettingsAssistantCardProps = {
     aiCopilotModel: string;
     aiCopilotOptions: string[];
     aiEnabled: boolean;
+    aiExtraBodyParamsDraft: string;
+    aiExtraBodyParamsError: string;
     aiModel: string;
     aiModelOptions: string[];
     aiProvider: AIProviderId;
@@ -29,11 +32,13 @@ type AiSettingsAssistantCardProps = {
     anthropicThinkingEnabled: boolean;
     getAIProviderLabel: (provider: AIProviderId) => string;
     isFossBuild: boolean;
-    localize: Localize;
+    tr: SettingsTranslator;
     onAiApiKeyChange: (value: string) => void;
     onAiBaseUrlChange: (value: string) => void;
     onAiCopilotModelChange: (value: string) => void;
     onAiEnabledChange: (value: boolean) => void;
+    onAiExtraBodyParamsDraftChange: (value: string) => void;
+    onAiExtraBodyParamsSave: () => void;
     onAiModelChange: (value: string) => void;
     onAiProviderChange: (provider: AIProviderId) => void;
     onAiReasoningEffortChange: (value: AIReasoningEffort) => void;
@@ -52,6 +57,8 @@ export function AiSettingsAssistantCard({
     aiCopilotModel,
     aiCopilotOptions,
     aiEnabled,
+    aiExtraBodyParamsDraft,
+    aiExtraBodyParamsError,
     aiModel,
     aiModelOptions,
     aiProvider,
@@ -60,11 +67,13 @@ export function AiSettingsAssistantCard({
     anthropicThinkingEnabled,
     getAIProviderLabel,
     isFossBuild,
-    localize,
+    tr,
     onAiApiKeyChange,
     onAiBaseUrlChange,
     onAiCopilotModelChange,
     onAiEnabledChange,
+    onAiExtraBodyParamsDraftChange,
+    onAiExtraBodyParamsSave,
     onAiModelChange,
     onAiProviderChange,
     onAiReasoningEffortChange,
@@ -91,10 +100,7 @@ export function AiSettingsAssistantCard({
                         <View style={styles.settingInfo}>
                             <Text style={[styles.settingLabel, { color: tc.text }]}>{t('settings.aiEnable')}</Text>
                             <Text style={[styles.settingDescription, { color: tc.secondaryText }]}>
-                                {localize(
-                                    `When enabled, task text is sent directly to ${getAIProviderLabel(aiProvider)} using your API key.`,
-                                    `启用后，任务文本将通过你的 API Key 直接发送到 ${getAIProviderLabel(aiProvider)}。`
-                                )}
+                                {tr('settings.aiMobile.taskTextSentToProvider', { provider: getAIProviderLabel(aiProvider) })}
                             </Text>
                         </View>
                         <Switch
@@ -119,9 +125,12 @@ export function AiSettingsAssistantCard({
                                 ]}
                                 onPress={() => onAiProviderChange('openai')}
                             >
-                                <Text style={[styles.backendOptionText, { color: aiProvider === 'openai' ? tc.tint : tc.secondaryText }]}>
+                                <CompactText
+                                    style={[styles.backendOptionText, { color: aiProvider === 'openai' ? tc.tint : tc.secondaryText }]}
+                                    numberOfLines={2}
+                                >
                                     {getAIProviderLabel('openai')}
-                                </Text>
+                                </CompactText>
                             </TouchableOpacity>
                             {!isFossBuild && (
                                 <TouchableOpacity
@@ -131,9 +140,12 @@ export function AiSettingsAssistantCard({
                                     ]}
                                     onPress={() => onAiProviderChange('gemini')}
                                 >
-                                    <Text style={[styles.backendOptionText, { color: aiProvider === 'gemini' ? tc.tint : tc.secondaryText }]}>
+                                    <CompactText
+                                        style={[styles.backendOptionText, { color: aiProvider === 'gemini' ? tc.tint : tc.secondaryText }]}
+                                        numberOfLines={2}
+                                    >
                                         {t('settings.aiProviderGemini')}
-                                    </Text>
+                                    </CompactText>
                                 </TouchableOpacity>
                             )}
                             {!isFossBuild && (
@@ -144,9 +156,12 @@ export function AiSettingsAssistantCard({
                                     ]}
                                     onPress={() => onAiProviderChange('anthropic')}
                                 >
-                                    <Text style={[styles.backendOptionText, { color: aiProvider === 'anthropic' ? tc.tint : tc.secondaryText }]}>
+                                    <CompactText
+                                        style={[styles.backendOptionText, { color: aiProvider === 'anthropic' ? tc.tint : tc.secondaryText }]}
+                                        numberOfLines={2}
+                                    >
                                         {t('settings.aiProviderAnthropic')}
-                                    </Text>
+                                    </CompactText>
                                 </TouchableOpacity>
                             )}
                         </View>
@@ -172,9 +187,12 @@ export function AiSettingsAssistantCard({
                                 style={[styles.modelSuggestButton, { borderColor: tc.border, backgroundColor: tc.cardBg }]}
                                 onPress={() => onModelPickerChange('model')}
                             >
-                                <Text style={[styles.modelSuggestButtonText, { color: tc.secondaryText }]}>
-                                    {localize('Suggestions', '建议')}
-                                </Text>
+                                <CompactText
+                                    style={[styles.modelSuggestButtonText, { color: tc.secondaryText }]}
+                                    numberOfLines={2}
+                                >
+                                    {tr('settings.aiMobile.suggestions')}
+                                </CompactText>
                             </TouchableOpacity>
                         </View>
                     </View>
@@ -200,9 +218,12 @@ export function AiSettingsAssistantCard({
                                 style={[styles.modelSuggestButton, { borderColor: tc.border, backgroundColor: tc.cardBg }]}
                                 onPress={() => onModelPickerChange('copilot')}
                             >
-                                <Text style={[styles.modelSuggestButtonText, { color: tc.secondaryText }]}>
-                                    {localize('Suggestions', '建议')}
-                                </Text>
+                                <CompactText
+                                    style={[styles.modelSuggestButtonText, { color: tc.secondaryText }]}
+                                    numberOfLines={2}
+                                >
+                                    {tr('settings.aiMobile.suggestions')}
+                                </CompactText>
                             </TouchableOpacity>
                         </View>
                     </View>
@@ -211,11 +232,15 @@ export function AiSettingsAssistantCard({
                         <AiSettingsAssistantOpenAiPanel
                             aiApiKey={aiApiKey}
                             aiBaseUrl={aiBaseUrl}
+                            aiExtraBodyParamsDraft={aiExtraBodyParamsDraft}
+                            aiExtraBodyParamsError={aiExtraBodyParamsError}
                             aiReasoningEffort={aiReasoningEffort}
                             isFossBuild={isFossBuild}
-                            localize={localize}
+                            tr={tr}
                             onAiApiKeyChange={onAiApiKeyChange}
                             onAiBaseUrlChange={onAiBaseUrlChange}
+                            onAiExtraBodyParamsDraftChange={onAiExtraBodyParamsDraftChange}
+                            onAiExtraBodyParamsSave={onAiExtraBodyParamsSave}
                             onAiReasoningEffortChange={onAiReasoningEffortChange}
                             t={t}
                             tc={tc}

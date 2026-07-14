@@ -1,27 +1,36 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.tsx';
+import { QuickAddWindowApp } from './QuickAddWindowApp.tsx';
 import './index.css';
 
-import { type AppData, consoleLogger, generateUUID, sendDailyHeartbeat, setLogger, setStorageAdapter, SQLITE_SCHEMA_VERSION } from '@mindwtr/core';
+import { type AppData, consoleLogger, setLogger, setStorageAdapter, SQLITE_SCHEMA_VERSION } from '@mindwtr/core';
 import { LanguageProvider } from './contexts/language-context';
-import { getInstallSourceOrFallback, isTauriRuntime } from './lib/runtime';
-import { normalizeAnalyticsInstallChannel } from './lib/install-source';
+import { isTauriRuntime } from './lib/runtime';
 import { reportError } from './lib/report-error';
 import { webStorage } from './lib/storage-adapter-web';
 import { isDiagnosticsEnabled, logError, logInfo, logWarn, setupGlobalErrorLogging } from './lib/app-log';
-import { THEME_STORAGE_KEY, applyThemeMode, coerceDesktopThemeMode, resolveNativeTheme } from './lib/theme';
+import {
+    THEME_STORAGE_KEY,
+    applyNativeTheme,
+    applyThemeMode,
+    coerceDesktopThemeMode,
+    resolveNativeTheme,
+    resolveSystemThemeCommandPreference,
+} from './lib/theme';
 import { TEXT_SIZE_STORAGE_KEY, applyDesktopTextSize, coerceDesktopTextSize } from './lib/text-size';
+import { loadStoredFullscreen } from './lib/window-state';
+import { restoreStoredWebviewZoom } from './lib/webview-zoom';
+import { isQuickAddWindowLocation } from './lib/quick-add-window';
+import {
+    detectDesktopPlatform,
+    getDesktopChannel,
+    getDesktopLocale,
+    getDesktopOsMajor,
+    getDesktopVersion,
+    sendDesktopDailyHeartbeat,
+} from './lib/analytics-heartbeat';
 
-const ANALYTICS_DISTINCT_ID_KEY = 'mindwtr-analytics-distinct-id';
-const ANALYTICS_HEARTBEAT_URL = String(import.meta.env.VITE_ANALYTICS_HEARTBEAT_URL || '').trim();
-
-const parseBool = (value: string | undefined): boolean => {
-    const normalized = String(value || '').trim().toLowerCase();
-    return normalized === '1' || normalized === 'true' || normalized === 'yes';
-};
-
-const heartbeatDisabled = parseBool(import.meta.env.VITE_DISABLE_HEARTBEAT);
 let coreLoggerBridgeInstalled = false;
 
 const buildCoreLogExtra = (payload: {
@@ -68,66 +77,6 @@ const installCoreLoggerBridge = () => {
         }
         void logInfo(payload.message, { scope, extra });
     });
-};
-
-const detectDesktopPlatform = (): string => {
-    const userAgent = navigator.userAgent.toLowerCase();
-    if (userAgent.includes('win')) return 'windows';
-    if (userAgent.includes('mac')) return 'macos';
-    if (userAgent.includes('linux')) return 'linux';
-    return 'unknown';
-};
-
-const getDesktopLocale = (): string => {
-    const candidates = navigator.languages?.length ? navigator.languages : [navigator.language];
-    const locale = String(candidates?.[0] || '').trim();
-    return locale;
-};
-
-const getDesktopOsMajor = (platform: string): string => {
-    const userAgent = navigator.userAgent;
-    if (platform === 'windows') {
-        const match = userAgent.match(/windows nt\s+(\d+)/i);
-        if (match?.[1]) return `windows-${match[1]}`;
-        return 'windows';
-    }
-    if (platform === 'macos') {
-        const match = userAgent.match(/mac os x\s+(\d+)/i);
-        if (match?.[1]) return `macos-${match[1]}`;
-        return 'macos';
-    }
-    if (platform === 'linux') {
-        return 'linux';
-    }
-    return 'unknown';
-};
-
-const getOrCreateAnalyticsDistinctId = (): string => {
-    const existing = localStorage.getItem(ANALYTICS_DISTINCT_ID_KEY)?.trim();
-    if (existing) return existing;
-    const generated = generateUUID();
-    localStorage.setItem(ANALYTICS_DISTINCT_ID_KEY, generated);
-    return generated;
-};
-
-const getDesktopChannel = async (): Promise<string> => {
-    if (!isTauriRuntime()) return 'web';
-    try {
-        const source = await getInstallSourceOrFallback('unknown');
-        return normalizeAnalyticsInstallChannel(source);
-    } catch {
-        return 'unknown';
-    }
-};
-
-const getDesktopVersion = async (): Promise<string> => {
-    if (!isTauriRuntime()) return 'web';
-    try {
-        const { getVersion } = await import('@tauri-apps/api/app');
-        return await getVersion();
-    } catch {
-        return '0.0.0';
-    }
 };
 
 const getLoggingReason = (loggingEnabled: boolean): string => {
@@ -182,40 +131,17 @@ const logDesktopStartupContext = async (): Promise<void> => {
     });
 };
 
-const sendDesktopHeartbeat = async (): Promise<void> => {
-    if (!isTauriRuntime()) return;
-    if (import.meta.env.DEV || import.meta.env.VITEST || import.meta.env.MODE === 'test' || process.env.NODE_ENV === 'test') return;
-    if (heartbeatDisabled || !ANALYTICS_HEARTBEAT_URL) return;
-    try {
-        const [channel, appVersion] = await Promise.all([
-            getDesktopChannel(),
-            getDesktopVersion(),
-        ]);
-        const platform = detectDesktopPlatform();
-        const distinctId = getOrCreateAnalyticsDistinctId();
-        await sendDailyHeartbeat({
-            enabled: true,
-            endpointUrl: ANALYTICS_HEARTBEAT_URL,
-            distinctId,
-            platform,
-            channel,
-            appVersion,
-            deviceClass: 'desktop',
-            osMajor: getDesktopOsMajor(platform),
-            locale: getDesktopLocale(),
-            storage: localStorage,
-        });
-    } catch (error) {
-        void logWarn('Desktop analytics heartbeat failed', {
-            scope: 'analytics',
-            extra: { error: error instanceof Error ? error.message : String(error) },
-        });
-    }
-};
-
 // Initialize theme immediately before React renders to prevent flash
 const savedTheme = coerceDesktopThemeMode(localStorage.getItem(THEME_STORAGE_KEY));
 applyThemeMode(savedTheme);
+if ((savedTheme ?? 'system') === 'system' && isTauriRuntime()) {
+    void resolveSystemThemeCommandPreference(
+        () => import('@tauri-apps/api/core'),
+        (step, error) => void logError(error, { scope: 'theme', step: `startup-command:${step}` }),
+    ).then((theme) => {
+        if (theme) applyThemeMode('system', theme);
+    });
+}
 const savedTextSize = coerceDesktopTextSize(localStorage.getItem(TEXT_SIZE_STORAGE_KEY));
 applyDesktopTextSize(savedTextSize);
 
@@ -225,12 +151,18 @@ const diagnosticsEnabled = isDiagnosticsEnabled();
 if (diagnosticsEnabled) {
     setupGlobalErrorLogging();
 }
+const isQuickAddWindow = isQuickAddWindowLocation();
+if (isQuickAddWindow) {
+    document.documentElement.dataset.quickAddWindow = 'true';
+}
 
 const nativeTheme = resolveNativeTheme(savedTheme);
 if (isTauriRuntime()) {
-    import('@tauri-apps/api/app')
-        .then(({ setTheme }) => setTheme(nativeTheme))
-        .catch(() => undefined);
+    void applyNativeTheme(
+        nativeTheme,
+        () => import('@tauri-apps/api/app'),
+        () => import('@tauri-apps/api/window'),
+    );
 }
 
 async function initStorage() {
@@ -243,24 +175,86 @@ async function initStorage() {
     setStorageAdapter(webStorage);
 }
 
+async function restoreFullscreenState() {
+    if (!isTauriRuntime()) return;
+    if (!loadStoredFullscreen(localStorage)) return;
+    try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const current = getCurrentWindow();
+        if (await current.isFullscreen()) return;
+        await current.setFullscreen(true);
+    } catch (error) {
+        void logWarn('Failed to restore fullscreen state', {
+            scope: 'window',
+            extra: {
+                step: 'restoreFullscreen',
+                error: error instanceof Error ? error.message : String(error),
+            },
+        });
+    }
+}
+
+async function restoreWebviewZoomState() {
+    if (!isTauriRuntime()) return;
+    try {
+        await restoreStoredWebviewZoom({ storage: localStorage });
+    } catch (error) {
+        void logWarn('Failed to restore webview zoom', {
+            scope: 'window',
+            extra: {
+                step: 'restoreWebviewZoom',
+                error: error instanceof Error ? error.message : String(error),
+            },
+        });
+    }
+}
+
 async function bootstrap() {
     await initStorage();
     setupGlobalErrorLogging();
-    await logDesktopStartupContext().catch(() => undefined);
+    if (!isQuickAddWindow) {
+        await logDesktopStartupContext().catch(() => undefined);
+        await restoreFullscreenState();
+        await restoreWebviewZoomState();
+    }
 
-    if (!isTauriRuntime() && 'serviceWorker' in navigator) {
+    if (!isQuickAddWindow && !isTauriRuntime() && 'serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js').catch(() => undefined);
     }
+
+    if (!isTauriRuntime()) {
+        // A lazy route chunk can fail to import when the served index.html and
+        // the deployed assets are from different builds (web app redeployed
+        // while a tab was open, or a stale cached shell). One reload fetches a
+        // fresh shell with matching chunk names; the guard stops a reload loop
+        // when the failure is not staleness.
+        window.addEventListener('vite:preloadError', () => {
+            const RELOAD_FLAG = 'mindwtr-chunk-reload-at';
+            const lastReload = Number(sessionStorage.getItem(RELOAD_FLAG) || 0);
+            if (Date.now() - lastReload < 30_000) return;
+            sessionStorage.setItem(RELOAD_FLAG, String(Date.now()));
+            window.location.reload();
+        });
+    }
+
+    const RootApp = isQuickAddWindow ? QuickAddWindowApp : App;
 
     ReactDOM.createRoot(document.getElementById('root')!).render(
         <React.StrictMode>
             <LanguageProvider>
-                <App />
+                <RootApp />
             </LanguageProvider>
         </React.StrictMode>,
     );
 
-    void sendDesktopHeartbeat();
+    if (!isQuickAddWindow) {
+        void sendDesktopDailyHeartbeat().catch((error) => {
+            void logWarn('Desktop analytics heartbeat failed', {
+                scope: 'analytics',
+                extra: { error: error instanceof Error ? error.message : String(error) },
+            });
+        });
+    }
 }
 
 bootstrap().catch((error) => reportError('Failed to start app', error));

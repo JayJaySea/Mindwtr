@@ -6,8 +6,12 @@ import {
     addBreadcrumb,
     CLOCK_SKEW_THRESHOLD_MS,
     cloudGetJson,
+    isConnectionAllowed,
+    normalizeCloudUrl,
+    normalizeWebdavUrl,
+    SYNC_LOCAL_INSECURE_URL_OPTIONS,
     webdavGetJson,
-    type AppData,
+    type AppSettings,
 } from '@mindwtr/core';
 
 import { pickAndParseSyncFolder } from '@/lib/storage-file';
@@ -19,7 +23,9 @@ import {
     getValidDropboxAccessToken,
     isDropboxConnected,
 } from '@/lib/dropbox-auth';
-import { performMobileSync } from '@/lib/sync-service';
+import { clearMobileSyncConfigCache, performMobileSync } from '@/lib/sync-service';
+import { syncMobileBackgroundSyncRegistration } from '@/lib/background-sync-task';
+import { getMobileCloudRequestOptions, getMobileWebDavRequestOptions } from '@/lib/webdav-request-options';
 import {
     getSyncConflictCount,
     getSyncMaxClockSkewMs,
@@ -32,12 +38,14 @@ import { testDropboxAccess } from '@/lib/dropbox-sync';
 import { formatClockSkew, formatError, isDropboxUnauthorizedError, logSettingsError } from '@/lib/settings-utils';
 import {
     CLOUD_PROVIDER_KEY,
+    CLOUD_ALLOW_INSECURE_HTTP_KEY,
     CLOUD_TOKEN_KEY,
     CLOUD_URL_KEY,
     SYNC_BACKEND_KEY,
     SYNC_PATH_BOOKMARK_KEY,
     SYNC_PATH_KEY,
     WEBDAV_PASSWORD_KEY,
+    WEBDAV_ALLOW_INSECURE_HTTP_KEY,
     WEBDAV_URL_KEY,
     WEBDAV_USERNAME_KEY,
 } from '@/lib/sync-constants';
@@ -56,6 +64,40 @@ type SyncActionOptions = {
     webdav?: WebDavSyncSettings;
 };
 
+const serializeBool = (value: boolean): string => (value ? 'true' : 'false');
+
+const reconcileBackgroundSyncRegistration = () => {
+    void syncMobileBackgroundSyncRegistration().catch(logSettingsError);
+};
+
+const persistSyncConfigItem = (key: string, value: string, afterSave?: () => void) => {
+    AsyncStorage.setItem(key, value)
+        .then(() => {
+            clearMobileSyncConfigCache();
+            afterSave?.();
+        })
+        .catch(logSettingsError);
+};
+
+const persistSyncConfigItems = (entries: [string, string][], afterSave?: () => void) => {
+    AsyncStorage.multiSet(entries)
+        .then(() => {
+            clearMobileSyncConfigCache();
+            afterSave?.();
+        })
+        .catch(logSettingsError);
+};
+
+const isManualInsecureOverride = (url: string, allowInsecureHttp: boolean): boolean => {
+    if (!allowInsecureHttp) return false;
+    try {
+        if (new URL(url).protocol !== 'http:') return false;
+    } catch {
+        return false;
+    }
+    return !isConnectionAllowed(url, SYNC_LOCAL_INSECURE_URL_OPTIONS);
+};
+
 type ToastFn = (options: {
     durationMs?: number;
     message: string;
@@ -70,9 +112,9 @@ type UseSyncSettingsTransportActionsParams = {
     getSyncFailureToastMessage: (error: unknown) => string;
     isExpoGo: boolean;
     isFossBuild: boolean;
-    lastSyncStats: AppData['settings']['lastSyncStats'] | null | undefined;
-    lastSyncStatus: AppData['settings']['lastSyncStatus'] | undefined;
-    localize: (english: string, chinese: string) => string;
+    lastSyncStats: AppSettings['lastSyncStats'] | null | undefined;
+    lastSyncStatus: AppSettings['lastSyncStatus'] | undefined;
+    tr: (key: string, values?: Record<string, string | number | boolean | null | undefined>) => string;
     resetSyncStatusForBackendSwitch: () => void;
     showSettingsErrorToast: (title: string, message: string, durationMs?: number) => void;
     showSettingsWarning: (title: string, message: string, durationMs?: number) => void;
@@ -90,7 +132,7 @@ export function useSyncSettingsTransportActions({
     isFossBuild,
     lastSyncStats,
     lastSyncStatus,
-    localize,
+    tr,
     resetSyncStatusForBackendSwitch,
     showSettingsErrorToast,
     showSettingsWarning,
@@ -105,12 +147,21 @@ export function useSyncSettingsTransportActions({
     const [webdavUrl, setWebdavUrl] = useState('');
     const [webdavUsername, setWebdavUsername] = useState('');
     const [webdavPassword, setWebdavPassword] = useState('');
+    const [webdavAllowInsecureHttp, setWebdavAllowInsecureHttp] = useState(false);
     const [cloudUrl, setCloudUrl] = useState('');
     const [cloudToken, setCloudToken] = useState('');
+    const [cloudAllowInsecureHttp, setCloudAllowInsecureHttp] = useState(false);
     const [cloudProvider, setCloudProvider] = useState<CloudProvider>('selfhosted');
     const [dropboxConnected, setDropboxConnected] = useState(false);
     const [dropboxBusy, setDropboxBusy] = useState(false);
     const [cloudKitAccountStatus, setCloudKitAccountStatus] = useState<CloudKitAccountStatus>('unknown');
+    const formatText = useCallback((key: string, replacements: Record<string, string | number>) => {
+        let text = t(key);
+        Object.entries(replacements).forEach(([name, value]) => {
+            text = text.split(`{${name}}`).join(String(value));
+        });
+        return text;
+    }, [t]);
 
     const runDropboxConnectionTest = useCallback(async () => {
         let accessToken = await getValidDropboxAccessToken(dropboxAppKey);
@@ -125,6 +176,37 @@ export function useSyncSettingsTransportActions({
         }
     }, [dropboxAppKey]);
 
+    const validateSyncHttpUrl = useCallback((url: string, allowInsecureHttp: boolean, label: 'WebDAV' | 'self-hosted'): boolean => {
+        if (!url || !isValidHttpUrl(url)) {
+            showSettingsWarning(
+                tr('settings.syncMobile.invalidUrl'),
+                label === 'WebDAV'
+                    ? tr('settings.syncMobile.pleaseEnterAValidWebdavUrlHttpHttps')
+                    : tr('settings.syncMobile.pleaseEnterAValidSelfHostedUrlHttpHttps')
+            );
+            return false;
+        }
+        if (!isConnectionAllowed(url, {
+            ...SYNC_LOCAL_INSECURE_URL_OPTIONS,
+            allowInsecureHttp,
+        })) {
+            showSettingsWarning(
+                tr('settings.syncMobile.httpsRequired'),
+                tr('settings.syncMobile.publicHttpSyncUrlsAreBlockedUseHttpsOrEnable'),
+                6500
+            );
+            return false;
+        }
+        if (isManualInsecureOverride(url, allowInsecureHttp)) {
+            showSettingsWarning(
+                tr('settings.syncMobile.insecureHttpEnabled'),
+                tr('settings.syncMobile.onlyUseThisOnTrustedNetworksSyncDataWillBe'),
+                6500
+            );
+        }
+        return true;
+    }, [tr, showSettingsWarning]);
+
     useEffect(() => {
         let cancelled = false;
 
@@ -134,8 +216,10 @@ export function useSyncSettingsTransportActions({
             WEBDAV_URL_KEY,
             WEBDAV_USERNAME_KEY,
             WEBDAV_PASSWORD_KEY,
+            WEBDAV_ALLOW_INSECURE_HTTP_KEY,
             CLOUD_URL_KEY,
             CLOUD_TOKEN_KEY,
+            CLOUD_ALLOW_INSECURE_HTTP_KEY,
             CLOUD_PROVIDER_KEY,
         ]).then((entries) => {
             if (cancelled) return;
@@ -146,16 +230,20 @@ export function useSyncSettingsTransportActions({
             const storedWebDavUrl = entryMap.get(WEBDAV_URL_KEY);
             const storedWebDavUsername = entryMap.get(WEBDAV_USERNAME_KEY);
             const storedWebDavPassword = entryMap.get(WEBDAV_PASSWORD_KEY);
+            const storedWebDavAllowInsecureHttp = entryMap.get(WEBDAV_ALLOW_INSECURE_HTTP_KEY);
             const storedCloudUrl = entryMap.get(CLOUD_URL_KEY);
             const storedCloudToken = entryMap.get(CLOUD_TOKEN_KEY);
+            const storedCloudAllowInsecureHttp = entryMap.get(CLOUD_ALLOW_INSECURE_HTTP_KEY);
             const storedCloudProvider = entryMap.get(CLOUD_PROVIDER_KEY);
 
             setSyncPath(path || null);
             setWebdavUrl(storedWebDavUrl || '');
             setWebdavUsername(storedWebDavUsername || '');
             setWebdavPassword(storedWebDavPassword || '');
+            setWebdavAllowInsecureHttp(storedWebDavAllowInsecureHttp === 'true');
             setCloudUrl(storedCloudUrl || '');
             setCloudToken(storedCloudToken || '');
+            setCloudAllowInsecureHttp(storedCloudAllowInsecureHttp === 'true');
 
             const resolvedBackend = storedBackend === 'webdav'
                 || storedBackend === 'cloud'
@@ -177,14 +265,15 @@ export function useSyncSettingsTransportActions({
             setCloudProvider(resolvedCloudProvider);
 
             if (resolvedBackend !== supportedBackend) {
-                AsyncStorage.setItem(SYNC_BACKEND_KEY, supportedBackend).catch(logSettingsError);
+                persistSyncConfigItem(SYNC_BACKEND_KEY, supportedBackend);
             }
             if (!dropboxConfigured && storedCloudProvider === 'dropbox') {
-                AsyncStorage.setItem(CLOUD_PROVIDER_KEY, 'selfhosted').catch(logSettingsError);
+                persistSyncConfigItem(CLOUD_PROVIDER_KEY, 'selfhosted');
             }
             if (!supportsNativeICloudSync && storedCloudProvider === 'cloudkit') {
-                AsyncStorage.setItem(CLOUD_PROVIDER_KEY, 'selfhosted').catch(logSettingsError);
+                persistSyncConfigItem(CLOUD_PROVIDER_KEY, 'selfhosted');
             }
+            reconcileBackgroundSyncRegistration();
         }).catch(logSettingsError);
 
         return () => {
@@ -235,7 +324,7 @@ export function useSyncSettingsTransportActions({
         const nextBackend = backend === 'cloud'
             ? (cloudProvider === 'cloudkit' ? 'cloudkit' : 'cloud')
             : backend;
-        AsyncStorage.setItem(SYNC_BACKEND_KEY, nextBackend).catch(logSettingsError);
+        persistSyncConfigItem(SYNC_BACKEND_KEY, nextBackend, reconcileBackgroundSyncRegistration);
         addBreadcrumb(`settings:syncBackend:${nextBackend}`);
         setSyncBackend(nextBackend);
         resetSyncStatusForBackendSwitch();
@@ -248,10 +337,10 @@ export function useSyncSettingsTransportActions({
         const nextBackend: SyncBackend = provider === 'cloudkit' ? 'cloudkit' : 'cloud';
         setCloudProvider(provider);
         setSyncBackend(nextBackend);
-        AsyncStorage.multiSet([
+        persistSyncConfigItems([
             [CLOUD_PROVIDER_KEY, provider],
             [SYNC_BACKEND_KEY, nextBackend],
-        ]).catch(logSettingsError);
+        ], reconcileBackgroundSyncRegistration);
         resetSyncStatusForBackendSwitch();
     }, [dropboxConfigured, resetSyncStatusForBackendSwitch, supportsNativeICloudSync]);
 
@@ -272,58 +361,48 @@ export function useSyncSettingsTransportActions({
 
             setSyncPath(fileUri);
             await AsyncStorage.setItem(SYNC_BACKEND_KEY, 'file');
+            clearMobileSyncConfigCache();
             addBreadcrumb('settings:syncBackend:file');
             setSyncBackend('file');
             resetSyncStatusForBackendSwitch();
+            reconcileBackgroundSyncRegistration();
             showToast({
-                title: localize('Success', '成功'),
-                message: localize('Sync folder set successfully', '同步文件夹已设置'),
+                title: tr('common.success'),
+                message: tr('settings.syncMobile.syncFolderSetSuccessfully'),
                 tone: 'success',
             });
         } catch (error) {
             const message = String(error);
             if (/Selected JSON file is not a Mindwtr backup/i.test(message)) {
                 showSettingsWarning(
-                    localize('Invalid sync file', '无效同步文件'),
-                    localize(
-                        'Please choose a Mindwtr backup JSON file in the target folder, then try "Select Folder" again.',
-                        '请选择目标文件夹中的 Mindwtr 备份 JSON 文件，然后重试“选择文件夹”。'
-                    ),
+                    tr('settings.syncMobile.invalidSyncFile'),
+                    tr('settings.syncMobile.pleaseChooseAMindwtrBackupJsonFileInTheTarget'),
                     5200
                 );
                 return;
             }
-            if (/temporary Inbox location|re-select a folder in Settings -> Data & Sync/i.test(message)) {
+            if (/temporary Inbox location|re-select a folder in Settings -> (?:Data & Sync|Sync)/i.test(message)) {
                 showSettingsWarning(
-                    localize('Unsupported cloud provider on iOS', 'iOS 云端提供商暂不支持'),
-                    localize(
-                        'The selected file came from a temporary iOS Files copy. Providers like Google Drive and OneDrive are not reliable for file sync here yet. Please choose iCloud Drive instead, or switch to WebDAV.',
-                        '当前选择的是 iOS“文件”提供的临时副本。Google Drive、OneDrive 等提供商暂不适合作为这里的文件同步目录。请改用 iCloud Drive，或切换到 WebDAV。'
-                    ),
+                    tr('settings.syncMobile.unsupportedCloudProviderOnIos'),
+                    tr('settings.syncMobile.theSelectedFileCameFromATemporaryIosFilesCopy'),
                     5600
                 );
                 return;
             }
             if (/read-only|read only|not writable|isn't writable|permission denied|EACCES/i.test(message)) {
                 showSettingsWarning(
-                    localize('Sync folder is read-only', '同步文件夹不可写'),
+                    tr('settings.syncMobile.syncFolderIsReadOnly'),
                     Platform.OS === 'ios'
-                        ? localize(
-                            'The selected folder is read-only. Choose a writable location, or make the cloud folder available offline in Files before selecting it.',
-                            '所选文件夹不可写。请选择可写位置，或先在“文件”App中将云端文件夹设为离线可用后再选择。'
-                        )
-                        : localize(
-                            'The selected folder is read-only. Please choose a writable folder (e.g. My files) or make it available offline.',
-                            '所选文件夹不可写。请选择可写文件夹（如“我的文件”），或将其设为离线可用。'
-                        ),
+                        ? tr('settings.syncMobile.theSelectedFolderIsReadOnlyChooseAWritableLocation')
+                        : tr('settings.syncMobile.theSelectedFolderIsReadOnlyPleaseChooseAWritable'),
                     5600
                 );
                 return;
             }
-            showSettingsErrorToast(localize('Error', '错误'), localize('Failed to set sync path', '设置失败'));
+            showSettingsErrorToast(tr('settings.syncMobile.error'), tr('settings.syncMobile.failedToSetSyncPath'));
         }
     }, [
-        localize,
+        tr,
         resetSyncStatusForBackendSwitch,
         showSettingsErrorToast,
         showSettingsWarning,
@@ -332,20 +411,17 @@ export function useSyncSettingsTransportActions({
 
     const handleConnectDropbox = useCallback(async () => {
         if (isFossBuild) {
-            showSettingsWarning(localize('Dropbox unavailable', 'Dropbox 不可用'), localize('Dropbox is disabled in FOSS builds.', 'FOSS 构建不支持 Dropbox。'));
+            showSettingsWarning(tr('settings.syncMobile.dropboxUnavailable'), tr('settings.syncMobile.dropboxIsDisabledInFossBuilds'));
             return;
         }
         if (!dropboxConfigured) {
-            showSettingsWarning(localize('Dropbox unavailable', 'Dropbox 不可用'), localize('Dropbox app key is not configured in this build.', '当前构建未配置 Dropbox App Key。'));
+            showSettingsWarning(tr('settings.syncMobile.dropboxUnavailable'), tr('settings.syncMobile.dropboxAppKeyIsNotConfiguredInThisBuild'));
             return;
         }
         if (isExpoGo) {
             showSettingsWarning(
-                localize('Dropbox unavailable in Expo Go', 'Expo Go 不支持 Dropbox'),
-                `${localize(
-                    'Dropbox OAuth requires a development/release build. Expo Go uses temporary redirect URIs that Dropbox rejects.',
-                    'Dropbox OAuth 需要开发版或正式版应用。Expo Go 使用临时回调地址，Dropbox 会拒绝。'
-                )}\n\n${localize('Use redirect URI', '请使用回调地址')}: ${getDropboxRedirectUri()}`,
+                tr('settings.syncMobile.dropboxUnavailableInExpoGo'),
+                `${tr('settings.syncMobile.dropboxOauthRequiresADevelopmentReleaseBuildExpoGoUses')}\n\n${tr('settings.syncMobile.useRedirectUri')}: ${getDropboxRedirectUri()}`,
                 6000
             );
             return;
@@ -357,26 +433,28 @@ export function useSyncSettingsTransportActions({
                 [SYNC_BACKEND_KEY, 'cloud'],
                 [CLOUD_PROVIDER_KEY, 'dropbox'],
             ]);
+            clearMobileSyncConfigCache();
             setCloudProvider('dropbox');
             addBreadcrumb('settings:syncBackend:cloud');
             setSyncBackend('cloud');
             setDropboxConnected(true);
             resetSyncStatusForBackendSwitch();
+            reconcileBackgroundSyncRegistration();
             showToast({
-                title: localize('Success', '成功'),
-                message: localize('Connected to Dropbox.', '已连接 Dropbox。'),
+                title: tr('common.success'),
+                message: tr('settings.syncMobile.connectedToDropbox'),
                 tone: 'success',
             });
         } catch (error) {
             const message = String(error);
             if (/redirect[_\s-]?uri/i.test(message)) {
                 showSettingsWarning(
-                    localize('Invalid redirect URI', '回调地址无效'),
-                    `${localize('Add this exact redirect URI in Dropbox OAuth settings.', '请在 Dropbox OAuth 设置里添加以下精确回调地址。')}\n\n${getDropboxRedirectUri()}`,
+                    tr('settings.syncMobile.invalidRedirectUri'),
+                    `${tr('settings.syncMobile.addThisExactRedirectUriInDropboxOauthSettings')}\n\n${getDropboxRedirectUri()}`,
                     6000
                 );
             } else {
-                showSettingsErrorToast(localize('Connection failed', '连接失败'), formatError(error), 5200);
+                showSettingsErrorToast(tr('settings.syncMobile.connectionFailed'), formatError(error), 5200);
             }
         } finally {
             setDropboxBusy(false);
@@ -386,7 +464,7 @@ export function useSyncSettingsTransportActions({
         dropboxConfigured,
         isExpoGo,
         isFossBuild,
-        localize,
+        tr,
         resetSyncStatusForBackendSwitch,
         showSettingsErrorToast,
         showSettingsWarning,
@@ -403,20 +481,21 @@ export function useSyncSettingsTransportActions({
             await disconnectDropbox(dropboxAppKey);
             setDropboxConnected(false);
             resetSyncStatusForBackendSwitch();
+            reconcileBackgroundSyncRegistration();
             showToast({
-                title: localize('Disconnected', '已断开'),
-                message: localize('Dropbox connection removed.', '已移除 Dropbox 连接。'),
+                title: tr('settings.syncMobile.disconnected'),
+                message: tr('settings.syncMobile.dropboxConnectionRemoved'),
                 tone: 'success',
             });
         } catch (error) {
-            showSettingsErrorToast(localize('Disconnect failed', '断开失败'), formatError(error), 5200);
+            showSettingsErrorToast(tr('settings.syncMobile.disconnectFailed'), formatError(error), 5200);
         } finally {
             setDropboxBusy(false);
         }
     }, [
         dropboxAppKey,
         dropboxConfigured,
-        localize,
+        tr,
         resetSyncStatusForBackendSwitch,
         showSettingsErrorToast,
         showToast,
@@ -424,11 +503,11 @@ export function useSyncSettingsTransportActions({
 
     const handleTestDropboxConnection = useCallback(async () => {
         if (isFossBuild) {
-            showSettingsWarning(localize('Dropbox unavailable', 'Dropbox 不可用'), localize('Dropbox is disabled in FOSS builds.', 'FOSS 构建不支持 Dropbox。'));
+            showSettingsWarning(tr('settings.syncMobile.dropboxUnavailable'), tr('settings.syncMobile.dropboxIsDisabledInFossBuilds'));
             return;
         }
         if (!dropboxConfigured) {
-            showSettingsWarning(localize('Dropbox unavailable', 'Dropbox 不可用'), localize('Dropbox app key is not configured in this build.', '当前构建未配置 Dropbox App Key。'));
+            showSettingsWarning(tr('settings.syncMobile.dropboxUnavailable'), tr('settings.syncMobile.dropboxAppKeyIsNotConfiguredInThisBuild'));
             return;
         }
         setIsTestingConnection(true);
@@ -436,23 +515,20 @@ export function useSyncSettingsTransportActions({
             await runDropboxConnectionTest();
             setDropboxConnected(true);
             showToast({
-                title: localize('Connection OK', '连接成功'),
-                message: localize('Dropbox account is reachable.', 'Dropbox 账号可访问。'),
+                title: tr('settings.syncMobile.connectionOk'),
+                message: tr('settings.syncMobile.dropboxAccountIsReachable'),
                 tone: 'success',
             });
         } catch (error) {
             if (isDropboxUnauthorizedError(error)) {
                 setDropboxConnected(false);
                 showSettingsWarning(
-                    localize('Connection failed', '连接失败'),
-                    localize(
-                        'Dropbox token is invalid or revoked. Please tap Connect Dropbox to re-authorize.',
-                        'Dropbox 令牌无效或已失效。请点击“连接 Dropbox”重新授权。'
-                    ),
+                    tr('settings.syncMobile.connectionFailed'),
+                    tr('settings.syncMobile.dropboxTokenIsInvalidOrRevokedPleaseTapConnectDropbox'),
                     5200
                 );
             } else {
-                showSettingsErrorToast(localize('Connection failed', '连接失败'), formatError(error), 5200);
+                showSettingsErrorToast(tr('settings.syncMobile.connectionFailed'), formatError(error), 5200);
             }
         } finally {
             setIsTestingConnection(false);
@@ -460,7 +536,7 @@ export function useSyncSettingsTransportActions({
     }, [
         dropboxConfigured,
         isFossBuild,
-        localize,
+        tr,
         runDropboxConnectionTest,
         showSettingsErrorToast,
         showSettingsWarning,
@@ -469,8 +545,7 @@ export function useSyncSettingsTransportActions({
 
     const handleSaveWebDavSettings = useCallback(async (nextSettings: WebDavSyncSettings) => {
         const trimmedUrl = nextSettings.url.trim();
-        if (!trimmedUrl || !isValidHttpUrl(trimmedUrl)) {
-            showSettingsWarning(localize('Invalid URL', '地址无效'), localize('Please enter a valid WebDAV URL (http/https).', '请输入有效的 WebDAV 地址（http/https）。'));
+        if (!validateSyncHttpUrl(trimmedUrl, nextSettings.allowInsecureHttp, 'WebDAV')) {
             return;
         }
         const trimmedUsername = nextSettings.username.trim();
@@ -480,36 +555,39 @@ export function useSyncSettingsTransportActions({
                 [WEBDAV_URL_KEY, trimmedUrl],
                 [WEBDAV_USERNAME_KEY, trimmedUsername],
                 [WEBDAV_PASSWORD_KEY, nextSettings.password],
+                [WEBDAV_ALLOW_INSECURE_HTTP_KEY, serializeBool(nextSettings.allowInsecureHttp)],
             ]);
+            clearMobileSyncConfigCache();
             setWebdavUrl(trimmedUrl);
             setWebdavUsername(trimmedUsername);
             setWebdavPassword(nextSettings.password);
+            setWebdavAllowInsecureHttp(nextSettings.allowInsecureHttp);
             setSyncBackend('webdav');
             resetSyncStatusForBackendSwitch();
+            reconcileBackgroundSyncRegistration();
             showToast({
-                title: localize('Success', '成功'),
+                title: tr('common.success'),
                 message: t('settings.webdavSave'),
                 tone: 'success',
             });
         } catch {
             showSettingsErrorToast(
-                localize('Error', '错误'),
-                localize('Failed to save WebDAV settings', '保存 WebDAV 设置失败')
+                tr('settings.syncMobile.error'),
+                tr('settings.syncMobile.failedToSaveWebdavSettings')
             );
         }
     }, [
-        localize,
+        tr,
         resetSyncStatusForBackendSwitch,
         showSettingsErrorToast,
-        showSettingsWarning,
         showToast,
         t,
+        validateSyncHttpUrl,
     ]);
 
     const handleSaveSelfHostedSettings = useCallback(async (nextSettings: SelfHostedSyncSettings) => {
         const trimmedUrl = nextSettings.url.trim();
-        if (!trimmedUrl || !isValidHttpUrl(trimmedUrl)) {
-            showSettingsWarning(localize('Invalid URL', '地址无效'), localize('Please enter a valid self-hosted URL (http/https).', '请输入有效的自托管地址（http/https）。'));
+        if (!validateSyncHttpUrl(trimmedUrl, nextSettings.allowInsecureHttp, 'self-hosted')) {
             return;
         }
         try {
@@ -518,30 +596,34 @@ export function useSyncSettingsTransportActions({
                 [CLOUD_PROVIDER_KEY, 'selfhosted'],
                 [CLOUD_URL_KEY, trimmedUrl],
                 [CLOUD_TOKEN_KEY, nextSettings.token],
+                [CLOUD_ALLOW_INSECURE_HTTP_KEY, serializeBool(nextSettings.allowInsecureHttp)],
             ]);
+            clearMobileSyncConfigCache();
             setCloudUrl(trimmedUrl);
             setCloudToken(nextSettings.token);
+            setCloudAllowInsecureHttp(nextSettings.allowInsecureHttp);
             setCloudProvider('selfhosted');
             setSyncBackend('cloud');
             resetSyncStatusForBackendSwitch();
+            reconcileBackgroundSyncRegistration();
             showToast({
-                title: localize('Success', '成功'),
+                title: tr('common.success'),
                 message: t('settings.cloudSave'),
                 tone: 'success',
             });
         } catch {
             showSettingsErrorToast(
-                localize('Error', '错误'),
-                localize('Failed to save self-hosted settings', '保存自托管设置失败')
+                tr('settings.syncMobile.error'),
+                tr('settings.syncMobile.failedToSaveSelfHostedSettings')
             );
         }
     }, [
-        localize,
+        tr,
         resetSyncStatusForBackendSwitch,
         showSettingsErrorToast,
-        showSettingsWarning,
         showToast,
         t,
+        validateSyncHttpUrl,
     ]);
 
     const handleSync = useCallback(async (options?: SyncActionOptions) => {
@@ -551,19 +633,28 @@ export function useSyncSettingsTransportActions({
             const previousLastSyncStatus = lastSyncStatus;
             const previousLastSyncStats = lastSyncStats ?? null;
             const effectiveBackend = options?.backend ?? syncBackend;
-            const effectiveCloud = options?.cloud ?? { token: cloudToken, url: cloudUrl };
+            let wroteSyncConfig = false;
+            const effectiveCloud = options?.cloud ?? {
+                allowInsecureHttp: cloudAllowInsecureHttp,
+                token: cloudToken,
+                url: cloudUrl,
+            };
             const effectiveCloudProvider = options?.cloudProvider ?? cloudProvider;
-            const effectiveWebdav = options?.webdav ?? { password: webdavPassword, url: webdavUrl, username: webdavUsername };
+            const effectiveWebdav = options?.webdav ?? {
+                allowInsecureHttp: webdavAllowInsecureHttp,
+                password: webdavPassword,
+                url: webdavUrl,
+                username: webdavUsername,
+            };
 
             if (effectiveBackend === 'off') return;
             if (effectiveBackend === 'webdav') {
                 const trimmedWebDavUrl = effectiveWebdav.url.trim();
                 if (!trimmedWebDavUrl) {
-                    showSettingsWarning(localize('Notice', '提示'), localize('Please set a WebDAV URL first', '请先设置 WebDAV 地址'));
+                    showSettingsWarning(tr('common.notice'), tr('settings.syncMobile.pleaseSetAWebdavUrlFirst'));
                     return;
                 }
-                if (!isValidHttpUrl(trimmedWebDavUrl)) {
-                    showSettingsWarning(localize('Invalid URL', '地址无效'), localize('Please enter a valid WebDAV URL (http/https).', '请输入有效的 WebDAV 地址（http/https）。'));
+                if (!validateSyncHttpUrl(trimmedWebDavUrl, effectiveWebdav.allowInsecureHttp, 'WebDAV')) {
                     return;
                 }
                 const trimmedWebDavUsername = effectiveWebdav.username.trim();
@@ -572,54 +663,58 @@ export function useSyncSettingsTransportActions({
                     [WEBDAV_URL_KEY, trimmedWebDavUrl],
                     [WEBDAV_USERNAME_KEY, trimmedWebDavUsername],
                     [WEBDAV_PASSWORD_KEY, effectiveWebdav.password],
+                    [WEBDAV_ALLOW_INSECURE_HTTP_KEY, serializeBool(effectiveWebdav.allowInsecureHttp)],
                 ]);
+                wroteSyncConfig = true;
                 setWebdavUrl(trimmedWebDavUrl);
                 setWebdavUsername(trimmedWebDavUsername);
                 setWebdavPassword(effectiveWebdav.password);
+                setWebdavAllowInsecureHttp(effectiveWebdav.allowInsecureHttp);
                 setSyncBackend('webdav');
             } else if (effectiveBackend === 'cloudkit') {
                 const accountStatus = await getCloudKitAccountStatus();
                 setCloudKitAccountStatus(accountStatus);
                 const statusDetails = getCloudKitStatusDetails(accountStatus);
                 if (!statusDetails.syncEnabled) {
-                    showSettingsWarning(localize('iCloud unavailable', 'iCloud 不可用'), statusDetails.helpText, 5200);
+                    showSettingsWarning(tr('settings.syncMobile.icloudUnavailable'), statusDetails.helpText, 5200);
                     return;
                 }
                 await AsyncStorage.multiSet([
                     [SYNC_BACKEND_KEY, 'cloudkit'],
                     [CLOUD_PROVIDER_KEY, 'cloudkit'],
                 ]);
+                wroteSyncConfig = true;
                 setCloudProvider('cloudkit');
                 setSyncBackend('cloudkit');
             } else if (effectiveBackend === 'cloud') {
                 if (effectiveCloudProvider === 'dropbox') {
                     if (isFossBuild) {
-                        showSettingsWarning(localize('Dropbox unavailable', 'Dropbox 不可用'), localize('Dropbox is disabled in FOSS builds.', 'FOSS 构建不支持 Dropbox。'));
+                        showSettingsWarning(tr('settings.syncMobile.dropboxUnavailable'), tr('settings.syncMobile.dropboxIsDisabledInFossBuilds'));
                         return;
                     }
                     if (!dropboxConfigured) {
-                        showSettingsWarning(localize('Dropbox unavailable', 'Dropbox 不可用'), localize('Dropbox app key is not configured in this build.', '当前构建未配置 Dropbox App Key。'));
+                        showSettingsWarning(tr('settings.syncMobile.dropboxUnavailable'), tr('settings.syncMobile.dropboxAppKeyIsNotConfiguredInThisBuild'));
                         return;
                     }
                     const connected = await isDropboxConnected();
                     if (!connected) {
-                        showSettingsWarning(localize('Notice', '提示'), localize('Please connect Dropbox first.', '请先连接 Dropbox。'));
+                        showSettingsWarning(tr('common.notice'), tr('settings.syncMobile.pleaseConnectDropboxFirst'));
                         return;
                     }
                     await AsyncStorage.multiSet([
                         [SYNC_BACKEND_KEY, 'cloud'],
                         [CLOUD_PROVIDER_KEY, 'dropbox'],
                     ]);
+                    wroteSyncConfig = true;
                     setCloudProvider('dropbox');
                     setSyncBackend('cloud');
                 } else {
                     const trimmedCloudUrl = effectiveCloud.url.trim();
                     if (!trimmedCloudUrl) {
-                        showSettingsWarning(localize('Notice', '提示'), localize('Please set a self-hosted URL first', '请先设置自托管地址'));
+                        showSettingsWarning(tr('common.notice'), tr('settings.syncMobile.pleaseSetASelfHostedUrlFirst'));
                         return;
                     }
-                    if (!isValidHttpUrl(trimmedCloudUrl)) {
-                        showSettingsWarning(localize('Invalid URL', '地址无效'), localize('Please enter a valid self-hosted URL (http/https).', '请输入有效的自托管地址（http/https）。'));
+                    if (!validateSyncHttpUrl(trimmedCloudUrl, effectiveCloud.allowInsecureHttp, 'self-hosted')) {
                         return;
                     }
                     await AsyncStorage.multiSet([
@@ -627,35 +722,46 @@ export function useSyncSettingsTransportActions({
                         [CLOUD_PROVIDER_KEY, 'selfhosted'],
                         [CLOUD_URL_KEY, trimmedCloudUrl],
                         [CLOUD_TOKEN_KEY, effectiveCloud.token],
+                        [CLOUD_ALLOW_INSECURE_HTTP_KEY, serializeBool(effectiveCloud.allowInsecureHttp)],
                     ]);
+                    wroteSyncConfig = true;
                     setCloudUrl(trimmedCloudUrl);
                     setCloudToken(effectiveCloud.token);
+                    setCloudAllowInsecureHttp(effectiveCloud.allowInsecureHttp);
                     setCloudProvider('selfhosted');
                     setSyncBackend('cloud');
                 }
             } else {
                 if (!syncPath) {
-                    showSettingsWarning(localize('Notice', '提示'), localize('Please set a sync folder first', '请先设置同步文件夹'));
+                    showSettingsWarning(tr('common.notice'), tr('settings.syncMobile.pleaseSetASyncFolderFirst'));
                     return;
                 }
                 await AsyncStorage.setItem(SYNC_BACKEND_KEY, 'file');
+                wroteSyncConfig = true;
                 setSyncBackend('file');
             }
 
+            if (wroteSyncConfig) {
+                clearMobileSyncConfigCache();
+            }
             resetSyncStatusForBackendSwitch();
-            const result = await performMobileSync(effectiveBackend === 'file' ? syncPath || undefined : undefined);
+            reconcileBackgroundSyncRegistration();
+            const result = await performMobileSync(
+                effectiveBackend === 'file' ? syncPath || undefined : undefined,
+                { manual: true }
+            );
             if (result.skipped === 'offline' || isLikelyOfflineSyncError(result.error)) {
                 showToast({
-                    title: localize('Offline', '离线'),
-                    message: localize('No internet connection. Sync skipped.', '当前无网络连接，已跳过同步。'),
+                    title: t('common.offline'),
+                    message: t('settings.syncSkippedOffline'),
                     tone: 'warning',
                 });
                 return;
             }
             if (result.skipped === 'requeued') {
                 showToast({
-                    title: localize('Sync queued', '已重新排队'),
-                    message: localize('Local changes arrived during sync. A retry was queued automatically.', '同步期间检测到本地更改，已自动重新排队重试。'),
+                    title: t('settings.syncQueued'),
+                    message: t('settings.syncQueuedBody'),
                     tone: 'info',
                     durationMs: 4200,
                 });
@@ -671,24 +777,22 @@ export function useSyncSettingsTransportActions({
                 );
                 const warningDetails = [
                     maxResultClockSkewMs > CLOCK_SKEW_THRESHOLD_MS
-                        ? localize(
-                            `Large device clock skew detected (${formatClockSkew(maxResultClockSkewMs)}). Check time settings on each device.`,
-                            `检测到较大的设备时钟偏差（${formatClockSkew(maxResultClockSkewMs)}）。请检查各设备的时间设置。`
-                        )
+                        ? formatText('settings.syncClockSkewWarning', {
+                            skew: formatClockSkew(maxResultClockSkewMs),
+                        })
                         : null,
                     resultTimestampAdjustments > 0
-                        ? localize(
-                            `Adjusted ${resultTimestampAdjustments} future-dated timestamp${resultTimestampAdjustments === 1 ? '' : 's'} during sync.`,
-                            `同步期间已调整 ${resultTimestampAdjustments} 个未来时间戳。`
-                        )
+                        ? formatText('settings.syncAdjustedTimestamps', {
+                            count: resultTimestampAdjustments,
+                        })
                         : null,
                 ].filter(Boolean);
                 showToast({
-                    title: localize('Success', '成功'),
+                    title: t('common.success'),
                     message: [
                         conflictCount > 0 && !shouldSuppressDuplicateConflictNotice
-                            ? localize(`Sync completed with ${conflictCount} conflicts (resolved automatically).`, `同步完成，发现 ${conflictCount} 个冲突（已自动处理）。`)
-                            : localize('Sync completed!', '同步完成！'),
+                            ? formatText('settings.syncCompletedWithConflicts', { count: conflictCount })
+                            : t('settings.syncCompleted'),
                         ...warningDetails,
                     ].join('\n\n'),
                     tone: conflictCount > 0 || warningDetails.length > 0 ? 'warning' : 'success',
@@ -699,22 +803,20 @@ export function useSyncSettingsTransportActions({
             }
         } catch (error) {
             const message = String(error);
-            if (/temporary Inbox location|re-select a folder in Settings -> Data & Sync|Cannot access the selected sync file/i.test(message)) {
+            if (/temporary Inbox location|re-select a folder in Settings -> (?:Data & Sync|Sync)|Cannot access the selected sync file/i.test(message)) {
                 showSettingsWarning(
-                    localize('Unsupported cloud provider on iOS', 'iOS 云端提供商暂不支持'),
-                    localize(
-                        'The selected file came from a temporary iOS Files copy. Providers like Google Drive and OneDrive are not reliable for file sync here yet. Please go to Settings → Data & Sync, choose iCloud Drive, or switch to WebDAV.',
-                        '当前选择的是 iOS“文件”提供的临时副本。Google Drive、OneDrive 等提供商暂不适合作为这里的文件同步目录。请前往「设置 → 数据与同步」，改选 iCloud Drive，或切换到 WebDAV。'
-                    ),
+                    tr('settings.syncMobile.unsupportedCloudProviderOnIos'),
+                    tr('settings.syncMobile.theSelectedFileCameFromATemporaryIosFilesCopy2'),
                     5600
                 );
                 return;
             }
-            showSettingsErrorToast(localize('Error', '错误'), getSyncFailureToastMessage(error));
+            showSettingsErrorToast(tr('settings.syncMobile.error'), getSyncFailureToastMessage(error));
         } finally {
             setIsSyncing(false);
         }
     }, [
+        cloudAllowInsecureHttp,
         cloudProvider,
         cloudToken,
         cloudUrl,
@@ -724,13 +826,17 @@ export function useSyncSettingsTransportActions({
         isFossBuild,
         lastSyncStats,
         lastSyncStatus,
-        localize,
+        t,
+        tr,
+        formatText,
         resetSyncStatusForBackendSwitch,
         showSettingsErrorToast,
         showSettingsWarning,
         showToast,
         syncBackend,
         syncPath,
+        validateSyncHttpUrl,
+        webdavAllowInsecureHttp,
         webdavPassword,
         webdavUrl,
         webdavUsername,
@@ -738,24 +844,33 @@ export function useSyncSettingsTransportActions({
 
     const handleTestConnection = useCallback(async (backend: 'webdav' | 'cloud', options?: Omit<SyncActionOptions, 'backend'>) => {
         setIsTestingConnection(true);
-        const effectiveCloud = options?.cloud ?? { token: cloudToken, url: cloudUrl };
+        const effectiveCloud = options?.cloud ?? {
+            allowInsecureHttp: cloudAllowInsecureHttp,
+            token: cloudToken,
+            url: cloudUrl,
+        };
         const effectiveCloudProvider = options?.cloudProvider ?? cloudProvider;
-        const effectiveWebdav = options?.webdav ?? { password: webdavPassword, url: webdavUrl, username: webdavUsername };
+        const effectiveWebdav = options?.webdav ?? {
+            allowInsecureHttp: webdavAllowInsecureHttp,
+            password: webdavPassword,
+            url: webdavUrl,
+            username: webdavUsername,
+        };
         try {
             if (backend === 'webdav') {
                 const trimmedWebDavUrl = effectiveWebdav.url.trim();
-                if (!trimmedWebDavUrl || !isValidHttpUrl(trimmedWebDavUrl)) {
-                    showSettingsWarning(localize('Invalid URL', '地址无效'), localize('Please enter a valid WebDAV URL (http/https).', '请输入有效的 WebDAV 地址（http/https）。'));
+                if (!validateSyncHttpUrl(trimmedWebDavUrl, effectiveWebdav.allowInsecureHttp, 'WebDAV')) {
                     return;
                 }
-                await webdavGetJson<unknown>(trimmedWebDavUrl.replace(/\/+$/, ''), {
+                await webdavGetJson<unknown>(normalizeWebdavUrl(trimmedWebDavUrl), {
+                    ...getMobileWebDavRequestOptions(effectiveWebdav.allowInsecureHttp),
                     username: effectiveWebdav.username.trim(),
                     password: effectiveWebdav.password,
                     timeoutMs: 10_000,
                 });
                 showToast({
-                    title: localize('Connection OK', '连接成功'),
-                    message: localize('WebDAV endpoint is reachable.', 'WebDAV 端点可访问。'),
+                    title: tr('settings.syncMobile.connectionOk'),
+                    message: tr('settings.syncMobile.webdavEndpointIsReachable'),
                     tone: 'success',
                 });
                 return;
@@ -763,31 +878,31 @@ export function useSyncSettingsTransportActions({
 
             if (effectiveCloudProvider === 'dropbox') {
                 if (isFossBuild) {
-                    showSettingsWarning(localize('Dropbox unavailable', 'Dropbox 不可用'), localize('Dropbox is disabled in FOSS builds.', 'FOSS 构建不支持 Dropbox。'));
+                    showSettingsWarning(tr('settings.syncMobile.dropboxUnavailable'), tr('settings.syncMobile.dropboxIsDisabledInFossBuilds'));
                     return;
                 }
                 await runDropboxConnectionTest();
                 setDropboxConnected(true);
                 showToast({
-                    title: localize('Connection OK', '连接成功'),
-                    message: localize('Dropbox account is reachable.', 'Dropbox 账号可访问。'),
+                    title: tr('settings.syncMobile.connectionOk'),
+                    message: tr('settings.syncMobile.dropboxAccountIsReachable'),
                     tone: 'success',
                 });
                 return;
             }
 
             const trimmedCloudUrl = effectiveCloud.url.trim();
-            if (!trimmedCloudUrl || !isValidHttpUrl(trimmedCloudUrl)) {
-                showSettingsWarning(localize('Invalid URL', '地址无效'), localize('Please enter a valid self-hosted URL (http/https).', '请输入有效的自托管地址（http/https）。'));
+            if (!validateSyncHttpUrl(trimmedCloudUrl, effectiveCloud.allowInsecureHttp, 'self-hosted')) {
                 return;
             }
-            await cloudGetJson<unknown>(trimmedCloudUrl.replace(/\/+$/, ''), {
+            await cloudGetJson<unknown>(normalizeCloudUrl(trimmedCloudUrl), {
+                ...getMobileCloudRequestOptions(effectiveCloud.allowInsecureHttp),
                 token: effectiveCloud.token,
                 timeoutMs: 10_000,
             });
             showToast({
-                title: localize('Connection OK', '连接成功'),
-                message: localize('Self-hosted endpoint is reachable.', '自托管端点可访问。'),
+                title: tr('settings.syncMobile.connectionOk'),
+                message: tr('settings.syncMobile.selfHostedEndpointIsReachable'),
                 tone: 'success',
             });
         } catch (error) {
@@ -795,12 +910,9 @@ export function useSyncSettingsTransportActions({
                 setDropboxConnected(false);
             }
             showSettingsErrorToast(
-                localize('Connection failed', '连接失败'),
+                tr('settings.syncMobile.connectionFailed'),
                 effectiveCloudProvider === 'dropbox' && isDropboxUnauthorizedError(error)
-                    ? localize(
-                        'Dropbox token is invalid or revoked. Please tap Connect Dropbox to re-authorize.',
-                        'Dropbox 令牌无效或已失效。请点击“连接 Dropbox”重新授权。'
-                    )
+                    ? tr('settings.syncMobile.dropboxTokenIsInvalidOrRevokedPleaseTapConnectDropbox')
                     : formatError(error),
                 5200
             );
@@ -808,15 +920,18 @@ export function useSyncSettingsTransportActions({
             setIsTestingConnection(false);
         }
     }, [
+        cloudAllowInsecureHttp,
         cloudProvider,
         cloudToken,
         cloudUrl,
         isFossBuild,
-        localize,
+        tr,
         runDropboxConnectionTest,
         showSettingsErrorToast,
         showSettingsWarning,
         showToast,
+        validateSyncHttpUrl,
+        webdavAllowInsecureHttp,
         webdavPassword,
         webdavUrl,
         webdavUsername,
@@ -824,6 +939,7 @@ export function useSyncSettingsTransportActions({
 
     return {
         cloudKitAccountStatus,
+        cloudAllowInsecureHttp,
         cloudProvider,
         cloudToken,
         cloudUrl,
@@ -843,6 +959,7 @@ export function useSyncSettingsTransportActions({
         isTestingConnection,
         syncBackend,
         syncPath,
+        webdavAllowInsecureHttp,
         webdavPassword,
         webdavUrl,
         webdavUsername,

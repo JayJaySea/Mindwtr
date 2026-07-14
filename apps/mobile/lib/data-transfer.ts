@@ -5,24 +5,44 @@ import { Directory, File, Paths } from 'expo-file-system';
 import { Platform } from 'react-native';
 import {
     addBreadcrumb,
-    applyDgtImport,
-    applyTodoistImport,
     createBackupFileName,
-    parseDgtImportSource,
+    ensureFreshLocalSyncSnapshot,
     flushPendingSave,
-    parseTodoistImportSource,
+    prepareRestoredBackupDataForSync,
     serializeBackupData,
-    type DgtImportExecutionResult,
-    type DgtImportParseResult,
-    type ParsedDgtImportData,
     type AppData,
     type BackupValidation,
-    type TodoistImportExecutionResult,
-    type TodoistImportParseResult,
-    type ParsedTodoistProject,
     validateBackupJson,
     useTaskStore,
 } from '@mindwtr/core';
+import {
+    applyDgtImport,
+    parseDgtImportSource,
+    type DgtImportExecutionResult,
+    type DgtImportParseResult,
+    type ParsedDgtImportData,
+} from '@mindwtr/core/dgt-import';
+import {
+    applyOmniFocusImport,
+    parseOmniFocusImportSource,
+    type OmniFocusImportExecutionResult,
+    type OmniFocusImportParseResult,
+    type ParsedOmniFocusImportData,
+} from '@mindwtr/core/omnifocus-import';
+import {
+    applyTodoistImport,
+    parseTodoistImportSource,
+    type ParsedTodoistProject,
+    type TodoistImportExecutionResult,
+    type TodoistImportParseResult,
+} from '@mindwtr/core/todoist-import';
+import {
+    applyTickTickImport,
+    parseTickTickImportSource,
+    type ParsedTickTickImportData,
+    type TickTickImportExecutionResult,
+    type TickTickImportParseResult,
+} from '@mindwtr/core/ticktick-import';
 
 import { logError, logInfo } from './app-log';
 import { mobileStorage } from './storage-adapter';
@@ -42,6 +62,11 @@ type SnapshotApplyResult = {
     snapshotName: string;
 };
 
+type TransferWriteGuard = {
+    localSnapshotChangeAt: number;
+    operation: string;
+};
+
 const countActiveRecords = (data: AppData) => ({
     tasks: data.tasks.filter((task) => !task.deletedAt).length,
     projects: data.projects.filter((project) => !project.deletedAt).length,
@@ -57,6 +82,26 @@ const toCountExtra = (data: AppData): Record<string, string> => {
         sections: String(counts.sections),
         areas: String(counts.areas),
     };
+};
+
+const getLocalChangeAt = (): number => useTaskStore.getState().lastDataChangeAt;
+
+const assertNoConcurrentTransferWrite = ({ localSnapshotChangeAt, operation }: TransferWriteGuard): void => {
+    ensureFreshLocalSyncSnapshot({
+        localSnapshotChangeAt,
+        getCurrentChangeAt: getLocalChangeAt,
+        requestFollowUp: () => undefined,
+        onStale: ({ localSnapshotChangeAt: snapshotChangeAt, currentChangeAt }) => {
+            void logInfo('Data transfer aborted after local data changed', {
+                scope: 'transfer',
+                extra: {
+                    operation,
+                    snapshotChangeAt: String(snapshotChangeAt),
+                    currentChangeAt: String(currentChangeAt),
+                },
+            });
+        },
+    });
 };
 
 const normalizeBaseUri = (value?: string | null): string | null => {
@@ -203,9 +248,19 @@ const saveCurrentDataSnapshot = async (data: AppData): Promise<string> => {
     return fileName;
 };
 
-const applyImportedData = async (data: AppData): Promise<void> => {
+const applyImportedData = async (data: AppData, guard?: TransferWriteGuard): Promise<void> => {
+    if (guard) {
+        assertNoConcurrentTransferWrite(guard);
+    }
     await mobileStorage.saveData(data);
     await useTaskStore.getState().fetchData({ silent: true });
+};
+
+const readCurrentDataForTransfer = async (): Promise<{ currentData: AppData; localSnapshotChangeAt: number }> => {
+    await flushPendingSave();
+    const localSnapshotChangeAt = getLocalChangeAt();
+    const currentData = await mobileStorage.getData();
+    return { currentData, localSnapshotChangeAt };
 };
 
 export const pickBackupDocument = async (): Promise<TransferDocument | null> =>
@@ -220,8 +275,27 @@ export const pickTodoistDocument = async (): Promise<TransferDocument | null> =>
         'application/octet-stream',
     ]);
 
+export const pickTickTickDocument = async (): Promise<TransferDocument | null> =>
+    pickDocument([
+        'text/csv',
+        'text/comma-separated-values',
+        'application/zip',
+        'application/x-zip-compressed',
+        'application/octet-stream',
+    ]);
+
 export const pickDgtDocument = async (): Promise<TransferDocument | null> =>
     pickDocument([
+        'application/json',
+        'application/zip',
+        'application/x-zip-compressed',
+        'application/octet-stream',
+    ]);
+
+export const pickOmniFocusDocument = async (): Promise<TransferDocument | null> =>
+    pickDocument([
+        'text/csv',
+        'text/comma-separated-values',
         'application/json',
         'application/zip',
         'application/x-zip-compressed',
@@ -250,11 +324,31 @@ export const inspectTodoistDocument = async (
     });
 };
 
+export const inspectTickTickDocument = async (
+    document: TransferDocument
+): Promise<TickTickImportParseResult> => {
+    const bytes = await readBinaryFile(document.uri);
+    return parseTickTickImportSource({
+        bytes,
+        fileName: document.fileName,
+    });
+};
+
 export const inspectDgtDocument = async (
     document: TransferDocument
 ): Promise<DgtImportParseResult> => {
     const bytes = await readBinaryFile(document.uri);
     return parseDgtImportSource({
+        bytes,
+        fileName: document.fileName,
+    });
+};
+
+export const inspectOmniFocusDocument = async (
+    document: TransferDocument
+): Promise<OmniFocusImportParseResult> => {
+    const bytes = await readBinaryFile(document.uri);
+    return parseOmniFocusImportSource({
         bytes,
         fileName: document.fileName,
     });
@@ -270,10 +364,12 @@ export const restoreDataFromBackup = async (backupData: AppData): Promise<Snapsh
         },
     });
     try {
-        await flushPendingSave();
-        const currentData = await mobileStorage.getData();
+        const { currentData, localSnapshotChangeAt } = await readCurrentDataForTransfer();
         const snapshotName = await saveCurrentDataSnapshot(currentData);
-        await applyImportedData(backupData);
+        await applyImportedData(prepareRestoredBackupDataForSync(backupData), {
+            localSnapshotChangeAt,
+            operation: 'restoreBackup',
+        });
         void logInfo('Backup restore complete', {
             scope: 'transfer',
             extra: {
@@ -301,11 +397,13 @@ export const importTodoistData = async (
         },
     });
     try {
-        await flushPendingSave();
-        const currentData = await mobileStorage.getData();
+        const { currentData, localSnapshotChangeAt } = await readCurrentDataForTransfer();
         const snapshotName = await saveCurrentDataSnapshot(currentData);
         const result = applyTodoistImport(currentData, parsedProjects);
-        await applyImportedData(result.data);
+        await applyImportedData(result.data, {
+            localSnapshotChangeAt,
+            operation: 'importTodoist',
+        });
         void logInfo('Todoist import complete', {
             scope: 'transfer',
             extra: {
@@ -327,6 +425,46 @@ export const importTodoistData = async (
     }
 };
 
+export const importTickTickData = async (
+    parsedData: ParsedTickTickImportData
+): Promise<SnapshotApplyResult & { result: TickTickImportExecutionResult }> => {
+    addBreadcrumb('transfer:restore');
+    void logInfo('TickTick import started', {
+        scope: 'transfer',
+        extra: {
+            operation: 'importTickTick',
+            source: 'ticktick',
+        },
+    });
+    try {
+        const { currentData, localSnapshotChangeAt } = await readCurrentDataForTransfer();
+        const snapshotName = await saveCurrentDataSnapshot(currentData);
+        const result = applyTickTickImport(currentData, parsedData);
+        await applyImportedData(result.data, {
+            localSnapshotChangeAt,
+            operation: 'importTickTick',
+        });
+        void logInfo('TickTick import complete', {
+            scope: 'transfer',
+            extra: {
+                operation: 'importTickTick',
+                source: 'ticktick',
+                tasks: String(result.importedTaskCount),
+                projects: String(result.importedProjectCount),
+                areas: String(result.importedAreaCount),
+                checklistItems: String(result.importedChecklistItemCount),
+            },
+        });
+        return {
+            snapshotName,
+            result,
+        };
+    } catch (error) {
+        void logError(error, { scope: 'transfer', extra: { operation: 'importTickTick' } });
+        throw error;
+    }
+};
+
 export const importDgtData = async (
     parsedData: ParsedDgtImportData
 ): Promise<SnapshotApplyResult & { result: DgtImportExecutionResult }> => {
@@ -339,11 +477,13 @@ export const importDgtData = async (
         },
     });
     try {
-        await flushPendingSave();
-        const currentData = await mobileStorage.getData();
+        const { currentData, localSnapshotChangeAt } = await readCurrentDataForTransfer();
         const snapshotName = await saveCurrentDataSnapshot(currentData);
         const result = applyDgtImport(currentData, parsedData);
-        await applyImportedData(result.data);
+        await applyImportedData(result.data, {
+            localSnapshotChangeAt,
+            operation: 'importDgt',
+        });
         void logInfo('DGT import complete', {
             scope: 'transfer',
             extra: {
@@ -361,6 +501,47 @@ export const importDgtData = async (
         };
     } catch (error) {
         void logError(error, { scope: 'transfer', extra: { operation: 'importDgt' } });
+        throw error;
+    }
+};
+
+export const importOmniFocusData = async (
+    parsedData: ParsedOmniFocusImportData
+): Promise<SnapshotApplyResult & { result: OmniFocusImportExecutionResult }> => {
+    addBreadcrumb('transfer:restore');
+    void logInfo('OmniFocus import started', {
+        scope: 'transfer',
+        extra: {
+            operation: 'importOmniFocus',
+            source: 'omnifocus',
+        },
+    });
+    try {
+        const { currentData, localSnapshotChangeAt } = await readCurrentDataForTransfer();
+        const snapshotName = await saveCurrentDataSnapshot(currentData);
+        const result = applyOmniFocusImport(currentData, parsedData);
+        await applyImportedData(result.data, {
+            localSnapshotChangeAt,
+            operation: 'importOmniFocus',
+        });
+        void logInfo('OmniFocus import complete', {
+            scope: 'transfer',
+            extra: {
+                operation: 'importOmniFocus',
+                source: 'omnifocus',
+                areas: String(result.importedAreaCount),
+                checklistItems: String(result.importedChecklistItemCount),
+                tasks: String(result.importedTaskCount),
+                projects: String(result.importedProjectCount),
+                standaloneTasks: String(result.importedStandaloneTaskCount),
+            },
+        });
+        return {
+            snapshotName,
+            result,
+        };
+    } catch (error) {
+        void logError(error, { scope: 'transfer', extra: { operation: 'importOmniFocus' } });
         throw error;
     }
 };
